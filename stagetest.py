@@ -21,7 +21,7 @@ Stage-Toolbox (Dark Minimal Theme) – Pro UI (Report & QA) + Workflow-Kacheln
 import os as _os
 _os.environ.pop("GIO_MODULE_DIR", None)
 
-import sys, datetime, pathlib, numpy as np, time, csv, ctypes, re, os, subprocess
+import sys, datetime, pathlib, numpy as np, time, csv, ctypes, re, os, subprocess, socket, json, shutil
 
 BASE_DIR = pathlib.Path(__file__).resolve().parent
 
@@ -53,6 +53,114 @@ def resolve_data_root() -> pathlib.Path:
     return fallback.resolve()
 
 DATA_ROOT = resolve_data_root()
+
+KLEBEROBOTER_SERVER_IP = os.environ.get("KLEBEROBOTER_SERVER_IP", "10.3.141.1")
+try:
+    KLEBEROBOTER_PORT = int(os.environ.get("KLEBEROBOTER_PORT", "5000"))
+except (TypeError, ValueError):
+    KLEBEROBOTER_PORT = 5000
+try:
+    KLEBEROBOTER_BARCODE = int(os.environ.get("KLEBEROBOTER_BARCODE", "999911200301203102103142124"))
+except (TypeError, ValueError):
+    KLEBEROBOTER_BARCODE = 999911200301203102103142124
+RASPI_WIFI_SSID = os.environ.get("RASPI_WIFI_SSID", "raspi-webgui")
+
+def _current_wifi_ssid() -> str | None:
+    """Return the currently connected Wi-Fi SSID if available."""
+    nmcli_path = shutil.which("nmcli")
+    if nmcli_path:
+        try:
+            res = subprocess.run(
+                [nmcli_path, "-t", "-f", "ACTIVE,SSID", "dev", "wifi"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError:
+            pass
+        else:
+            for line in res.stdout.splitlines():
+                if line.startswith("yes:"):
+                    return line.split(":", 1)[1] or None
+    iwgetid_path = shutil.which("iwgetid")
+    if iwgetid_path:
+        try:
+            res = subprocess.run(
+                [iwgetid_path, "-r"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError:
+            pass
+        else:
+            ssid = res.stdout.strip()
+            return ssid or None
+    return None
+
+def ensure_raspi_wifi_connected(target_ssid: str, timeout: float = 15.0) -> None:
+    """
+    Ensure the PC is connected to the raspi-webgui WLAN, trying to auto-connect if necessary.
+    Raises RuntimeError if the connection could not be established.
+    """
+    if not target_ssid:
+        return
+    current = _current_wifi_ssid()
+    if current == target_ssid:
+        return
+    nmcli_path = shutil.which("nmcli")
+    if not nmcli_path:
+        raise RuntimeError(f"WLAN '{target_ssid}' nicht verbunden und 'nmcli' ist nicht verfügbar.")
+    try:
+        subprocess.run(
+            [nmcli_path, "dev", "wifi", "connect", target_ssid],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        err = exc.stderr.strip() or exc.stdout.strip() or str(exc)
+        raise RuntimeError(f"WLAN-Verbindung zu '{target_ssid}' fehlgeschlagen:\n{err}") from exc
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(1.0)
+        if _current_wifi_ssid() == target_ssid:
+            return
+    raise RuntimeError(f"Konnte keine Verbindung zu '{target_ssid}' herstellen.")
+
+def send_kleberoboter_payload(
+    server_ip: str | None = None,
+    port: int | None = None,
+    barcode: int | None = None,
+) -> tuple[dict, str | None]:
+    """
+    Send the Kleberoboter payload to the configured Raspberry Pi relay and return payload + ACK text.
+    """
+    ip = server_ip or KLEBEROBOTER_SERVER_IP
+    port = port or KLEBEROBOTER_PORT
+    barcode_value = barcode or KLEBEROBOTER_BARCODE
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    payload = {
+        "device_id": "kleberoboter",
+        "barcodenummer": barcode_value,
+        "startTime": now_iso,
+        "endTime": now_iso,
+        "result": "ok",
+    }
+    message = (json.dumps(payload) + "\n").encode("utf-8")
+    ack: str | None = None
+    with socket.create_connection((ip, port), timeout=3) as conn:
+        conn.sendall(message)
+        conn.settimeout(1.0)
+        try:
+            data = conn.recv(256)
+            ack = data.decode().strip() if data else None
+            if ack == "":
+                ack = None
+        except socket.timeout:
+            ack = None
+    return payload, ack
 
 import matplotlib
 matplotlib.use("qtagg")
@@ -246,17 +354,18 @@ def _safe_icon(path: str) -> QIcon:
 def make_tile(text: str, icon_path: str, clicked_cb):
     btn = QToolButton()
     btn.setIcon(_safe_icon(icon_path))
-    btn.setIconSize(QSize(96, 96))
+    btn.setIconSize(QSize(72, 72))
     btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
     btn.setText(text)
-    btn.setMinimumSize(180, 150)
+    btn.setMinimumSize(150, 120)
+    btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
     btn.setAutoRaise(False)
     btn.setStyleSheet("""
         QToolButton {
             background-color: %s;
             border: 1px solid %s;
-            border-radius: 16px;
-            padding: 14px;
+            border-radius: 14px;
+            padding: 10px;
             font-weight: 600;
         }
         QToolButton:hover { background-color: %s; border-color: %s; }
@@ -1184,13 +1293,15 @@ class StageGUI(QWidget):
         self.btnStart = QPushButton("▶  Test starten  (Ctrl+R)"); self.btnStart.clicked.connect(self._start_test)
         self.btnDauer = QPushButton("⏱️  Dauertest starten  (Ctrl+D)"); self.btnDauer.clicked.connect(self._toggle_dauertest)
         self.btnOpenFolder = QPushButton("📂 Ordner öffnen"); self.btnOpenFolder.setEnabled(False); self.btnOpenFolder.clicked.connect(self._open_folder)
+        self.btnKleberoboter = QPushButton("Datenbank Senden"); self.btnKleberoboter.clicked.connect(self._trigger_kleberoboter)
 
-        for b in (self.btnStart, self.btnDauer, self.btnOpenFolder):
+        for b in (self.btnStart, self.btnDauer, self.btnOpenFolder, self.btnKleberoboter):
             b.setMinimumHeight(42)
 
         self.cardActions.body.addWidget(self.btnStart)
         self.cardActions.body.addWidget(self.btnDauer)
         self.cardActions.body.addWidget(self.btnOpenFolder)
+        self.cardActions.body.addWidget(self.btnKleberoboter)
 
         # --- Dauertest-Dauer (NEU) ---
         durRow = QHBoxLayout()
@@ -1792,6 +1903,40 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             self._open_in_file_manager(str(pathlib.Path(path).resolve()))
         except Exception as e:
             QMessageBox.warning(self, "Ordner öffnen", f"Konnte Ordner nicht öffnen:\n{e}")
+
+    def _ensure_raspi_wifi(self):
+        """Make sure we're connected to the Raspi WLAN before sending data."""
+        ensure_raspi_wifi_connected(RASPI_WIFI_SSID)
+
+    def _trigger_kleberoboter(self):
+        """Send the Kleberoboter payload via the Zwischen-Raspi socket."""
+        self.btnKleberoboter.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            try:
+                self._set_status("Verbinde mit Datenbank (raspi-webgui)…")
+                self._ensure_raspi_wifi()
+            except RuntimeError as err:
+                self._set_status("Datenbankverbindung fehlgeschlagen.")
+                QMessageBox.warning(self, "Kleberoboter", f"WLAN-Check fehlgeschlagen:\n{err}")
+                return
+
+            self._set_status("Datenbank verbunden – sende Payload…")
+            payload, ack = send_kleberoboter_payload()
+        except Exception as e:
+            self._set_status("Senden an Datenbank fehlgeschlagen.")
+            QMessageBox.warning(self, "Kleberoboter", f"Senden fehlgeschlagen:\n{e}")
+        else:
+            info = "Kleberoboter-Payload gesendet."
+            if ack:
+                info += f"\nACK: {ack}"
+            info += f"\nServer: {KLEBEROBOTER_SERVER_IP}:{KLEBEROBOTER_PORT}"
+            info += f"\nBarcode: {payload['barcodenummer']}"
+            QMessageBox.information(self, "Kleberoboter", info)
+            self._set_status("Datenbankübertragung abgeschlossen.")
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.btnKleberoboter.setEnabled(True)
 
     def _sn_match(self, query: str, candidate: str) -> bool:
         """Case-insensitive match helper that ignores spaces/underscores/dashes."""
