@@ -21,7 +21,7 @@ Stage-Toolbox (Dark Minimal Theme) – Pro UI (Report & QA) + Workflow-Kacheln
 import os as _os
 _os.environ.pop("GIO_MODULE_DIR", None)
 
-import sys, datetime, pathlib, numpy as np, time, csv, ctypes, re, os, subprocess
+import sys, datetime, pathlib, numpy as np, time, csv, ctypes, re, os, subprocess, socket, json
 
 BASE_DIR = pathlib.Path(__file__).resolve().parent
 
@@ -53,6 +53,49 @@ def resolve_data_root() -> pathlib.Path:
     return fallback.resolve()
 
 DATA_ROOT = resolve_data_root()
+
+KLEBEROBOTER_SERVER_IP = os.environ.get("KLEBEROBOTER_SERVER_IP", "10.3.141.1")
+try:
+    KLEBEROBOTER_PORT = int(os.environ.get("KLEBEROBOTER_PORT", "5000"))
+except (TypeError, ValueError):
+    KLEBEROBOTER_PORT = 5000
+try:
+    KLEBEROBOTER_BARCODE = int(os.environ.get("KLEBEROBOTER_BARCODE", "999911200301203102103142124"))
+except (TypeError, ValueError):
+    KLEBEROBOTER_BARCODE = 999911200301203102103142124
+
+def send_kleberoboter_payload(
+    server_ip: str | None = None,
+    port: int | None = None,
+    barcode: int | None = None,
+) -> tuple[dict, str | None]:
+    """
+    Send the Kleberoboter payload to the configured Raspberry Pi relay and return payload + ACK text.
+    """
+    ip = server_ip or KLEBEROBOTER_SERVER_IP
+    port = port or KLEBEROBOTER_PORT
+    barcode_value = barcode or KLEBEROBOTER_BARCODE
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    payload = {
+        "device_id": "kleberoboter",
+        "barcodenummer": barcode_value,
+        "startTime": now_iso,
+        "endTime": now_iso,
+        "result": "ok",
+    }
+    message = (json.dumps(payload) + "\n").encode("utf-8")
+    ack: str | None = None
+    with socket.create_connection((ip, port), timeout=3) as conn:
+        conn.sendall(message)
+        conn.settimeout(1.0)
+        try:
+            data = conn.recv(256)
+            ack = data.decode().strip() if data else None
+            if ack == "":
+                ack = None
+        except socket.timeout:
+            ack = None
+    return payload, ack
 
 import matplotlib
 matplotlib.use("qtagg")
@@ -1184,13 +1227,15 @@ class StageGUI(QWidget):
         self.btnStart = QPushButton("▶  Test starten  (Ctrl+R)"); self.btnStart.clicked.connect(self._start_test)
         self.btnDauer = QPushButton("⏱️  Dauertest starten  (Ctrl+D)"); self.btnDauer.clicked.connect(self._toggle_dauertest)
         self.btnOpenFolder = QPushButton("📂 Ordner öffnen"); self.btnOpenFolder.setEnabled(False); self.btnOpenFolder.clicked.connect(self._open_folder)
+        self.btnKleberoboter = QPushButton("Datenbank Senden"); self.btnKleberoboter.clicked.connect(self._trigger_kleberoboter)
 
-        for b in (self.btnStart, self.btnDauer, self.btnOpenFolder):
+        for b in (self.btnStart, self.btnDauer, self.btnOpenFolder, self.btnKleberoboter):
             b.setMinimumHeight(42)
 
         self.cardActions.body.addWidget(self.btnStart)
         self.cardActions.body.addWidget(self.btnDauer)
         self.cardActions.body.addWidget(self.btnOpenFolder)
+        self.cardActions.body.addWidget(self.btnKleberoboter)
 
         # --- Dauertest-Dauer (NEU) ---
         durRow = QHBoxLayout()
@@ -1792,6 +1837,25 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             self._open_in_file_manager(str(pathlib.Path(path).resolve()))
         except Exception as e:
             QMessageBox.warning(self, "Ordner öffnen", f"Konnte Ordner nicht öffnen:\n{e}")
+
+    def _trigger_kleberoboter(self):
+        """Send the Kleberoboter payload via the Zwischen-Raspi socket."""
+        self.btnKleberoboter.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            payload, ack = send_kleberoboter_payload()
+        except Exception as e:
+            QMessageBox.warning(self, "Kleberoboter", f"Senden fehlgeschlagen:\n{e}")
+        else:
+            info = "Kleberoboter-Payload gesendet."
+            if ack:
+                info += f"\nACK: {ack}"
+            info += f"\nServer: {KLEBEROBOTER_SERVER_IP}:{KLEBEROBOTER_PORT}"
+            info += f"\nBarcode: {payload['barcodenummer']}"
+            QMessageBox.information(self, "Kleberoboter", info)
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.btnKleberoboter.setEnabled(True)
 
     def _sn_match(self, query: str, candidate: str) -> bool:
         """Case-insensitive match helper that ignores spaces/underscores/dashes."""
