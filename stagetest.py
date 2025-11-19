@@ -14,6 +14,7 @@ Stage-Toolbox (Dark Minimal Theme) – Pro UI (Report & QA) + Workflow-Kacheln
 - Dauer-Auswahl für Dauertest (Presets + Benutzerdefiniert), Default 15 h
 - NEU: Workflow-Kacheln oben (Stage-Bild, Autofocus-Bild)
 - NEU: Autofocus-Reiter mit Exposure-Regler (µs/ms) je Zielkamera
+- NEU: Alignment zeigt dx, dy, dist zusätzlich in physikalischen Einheiten (µm / mm)
 """
 
 # --- Snap/GIO Modul-Konflikte entschärfen (vor allen anderen Imports) ---
@@ -267,14 +268,104 @@ def make_tile(text: str, icon_path: str, clicked_cb):
 # IDS Live-View (mit Geräteindex)
 # ================================================================
 class LiveView(QLabel):
-    """Minimaler IDS peak Live-View (Mono8) in QLabel. Wählt Kamera per device_index."""
+    """Minimaler IDS peak Live-View (Mono8) in QLabel. Wählt Kamera per device_index.
+
+    Erweiterung:
+    - versucht Pixelgröße automatisch zu erkennen (Node-Pfade, sonst ENV, sonst Default 2.2 µm)
+    - stellt pixel_size_um bereit, damit CameraWindow in physikalischen Einheiten rechnen kann
+    """
     # Emits (x, y) of the tracked laser centroid in pixel coordinates
     centerChanged = Signal(int, int)
+
     def __init__(self, parent=None, device_index: int = 0):
         super().__init__(parent)
         self.setScaledContents(True)
         self.device_index = int(device_index)
+        self._img_w = None
+        self._img_h = None
+        self._ref_point = None
+        self.pixel_size_um: float | None = None
+        self.sensor_width_px: int | None = None
+        self.sensor_height_px: int | None = None
         self._init_camera()
+
+    def _detect_pixel_size_um(self):
+        """Versucht die Pixelgröße automatisch zu bestimmen.
+
+        Reihenfolge:
+        1. Kamera-Node (verschiedene mögliche Namen)
+        """
+        try:
+            candidates = [
+                "SensorPixelWidth",
+                "SensorPixelHeight",
+                "PixelSize",
+                "SensorPixelSize",
+            ]
+            for name in candidates:
+                try:
+                    node = self.remote.FindNode(name)
+                    val = float(node.Value())
+                    # Heuristik: falls der Wert sehr klein ist, könnte er in mm sein
+                    # → < 0.001 → mm → in µm umrechnen
+                    if val < 0.001:
+                        val_um = val * 1e6
+                    elif val < 1.0:
+                        # könnte mm sein → konservativ: mm → µm
+                        val_um = val * 1e3
+                    else:
+                        # schon in µm
+                        val_um = val
+                    print(f"[INFO] Pixelgröße aus Node {name}: {val_um:.3f} µm")
+                    return val_um
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        raise RuntimeError("Pixelgröße konnte nicht aus der Kamera gelesen werden.")
+
+    def _configure_max_resolution(self):
+        """Setzt Breite/Höhe der Kamera auf die maximal verfügbaren Werte."""
+        def _set_node_to_max(name: str) -> int | None:
+            try:
+                node = self.remote.FindNode(name)
+            except Exception:
+                return None
+            max_val = None
+            try:
+                max_val = int(getattr(node, "Maximum")())
+            except Exception:
+                try:
+                    max_node = self.remote.FindNode(f"{name}Max")
+                    max_val = int(max_node.Value())
+                except Exception:
+                    pass
+            try:
+                if max_val is not None:
+                    node.SetValue(max_val)
+            except Exception:
+                pass
+            try:
+                return int(node.Value())
+            except Exception:
+                return None
+
+        self.sensor_width_px = _set_node_to_max("Width")
+        self.sensor_height_px = _set_node_to_max("Height")
+        # SensorWidth/-Height liefern ggf. die native Maximalauflösung direkt
+        try:
+            sensor_w = int(self.remote.FindNode("SensorWidth").Value())
+            if sensor_w:
+                self.sensor_width_px = sensor_w
+        except Exception:
+            pass
+        try:
+            sensor_h = int(self.remote.FindNode("SensorHeight").Value())
+            if sensor_h:
+                self.sensor_height_px = sensor_h
+        except Exception:
+            pass
 
     def _init_camera(self):
         p.Library.Initialize()
@@ -293,6 +384,11 @@ class LiveView(QLabel):
             try: self.remote.FindNode(n).SetCurrentEntry(v)
             except: pass
 
+        self._configure_max_resolution()
+
+        # Pixelgröße erkennen
+        self.pixel_size_um = self._detect_pixel_size_um()
+
         self.ds = self.dev.DataStreams()[0].OpenDataStream()
         ps = self.remote.FindNode("PayloadSize").Value()
         self._bufs = [self.ds.AllocAndAnnounceBuffer(ps) for _ in range(3)]
@@ -302,11 +398,6 @@ class LiveView(QLabel):
         except: pass
 
         self._timer = QTimer(self); self._timer.timeout.connect(self._grab); self._timer.start(0)
-        # last known image resolution (updated on each grab)
-        self._img_w = None
-        self._img_h = None
-        # optional saved reference point (Justage laser) as (x,y)
-        self._ref_point = None
 
     def set_exposure_us(self, val_us: float):
         """Setze Exposure (µs) direkt an die Kamera-Remote (robust gegen Namensvarianten)."""
@@ -444,21 +535,19 @@ class LiveView(QLabel):
                 except Exception:
                     pass
 
-                # 2) Laser centroid: larger solid cross + filled circle (very visible red)
+                # 2) Laser centroid: größere Kreuzhaare
                 try:
-                    # thicker pleasant red for the crosshair (no filled dot - user requested)
                     pen_l = QPen(QColor(ACCENT))
                     pen_l.setWidth(3)
                     pen_l.setCapStyle(Qt.RoundCap)
                     painter.setPen(pen_l)
-                    # make the cross bigger so it's visible on high-res images
                     size = max(6, min(w, h) // 20)
                     painter.drawLine(max(0, cx - size), cy, min(w, cx + size), cy)
                     painter.drawLine(cx, max(0, cy - size), cx, min(h, cy + size))
                 except Exception:
                     pass
 
-                # 3) Reference point (Justage) if present: draw a distinct marker (yellow)
+                # 3) Reference point (Justage) if present: distinct marker (yellow)
                 try:
                     if getattr(self, "_ref_point", None) is not None:
                         rx, ry = self._ref_point
@@ -516,14 +605,11 @@ class CameraWindow(QWidget):
 
         # Alignment panel (right) — compact fixed width
         align_card = Card("Alignment")
-        align_card.setFixedWidth(280)
-
-        # Tolerance removed per request (no UI element)
+        align_card.setFixedWidth(320)
 
         # Justage controls: single toggle button (Save ↔ Clear)
         ref_btn_row = QHBoxLayout()
         self.btn_toggle_justage = QPushButton("Save Justage")
-        # ensure label is fully visible on narrow layouts
         self.btn_toggle_justage.setMinimumHeight(28)
         self.btn_toggle_justage.setMinimumWidth(140)
         ref_btn_row.addWidget(self.btn_toggle_justage)
@@ -534,10 +620,10 @@ class CameraWindow(QWidget):
         self.lbl_ref.setObjectName("Chip")
         align_card.body.addWidget(self.lbl_ref)
 
-        # Numeric readouts
-        self.lbl_dx = QLabel("dx: — px")
-        self.lbl_dy = QLabel("dy: — px")
-        self.lbl_dist = QLabel("dist: — px")
+        # Numeric readouts (jetzt mit physikalischen Einheiten)
+        self.lbl_dx = QLabel("dx: —")
+        self.lbl_dy = QLabel("dy: —")
+        self.lbl_dist = QLabel("dist: —")
         for lbl in (self.lbl_dx, self.lbl_dy, self.lbl_dist):
             lbl.setObjectName("Chip")
             align_card.body.addWidget(lbl)
@@ -561,13 +647,10 @@ class CameraWindow(QWidget):
             self.live.centerChanged.connect(self._on_live_center_changed)
         except Exception:
             pass
-        # tolerance control is static now; no signal to connect
         try:
             self.btn_toggle_justage.clicked.connect(self._on_toggle_justage)
         except Exception:
             pass
-
-    
 
     def _on_live_center_changed(self, x: int, y: int):
         try:
@@ -581,11 +664,11 @@ class CameraWindow(QWidget):
         w = getattr(self.live, "_img_w", None)
         h = getattr(self.live, "_img_h", None)
         if not w or not h:
-            pm = self.live.pixmap()
-            if pm is not None and not pm.isNull():
-                w = pm.width(); h = pm.height()
-            else:
-                w = max(1, self.live.width()); h = max(1, self.live.height())
+            w = getattr(self.live, "sensor_width_px", None)
+            h = getattr(self.live, "sensor_height_px", None)
+        if not w or not h:
+            print("[WARN] Keine Auflösung aus Kamera verfügbar.")
+            return
 
         # If a Justage reference is set, compute offsets relative to it; otherwise use camera center
         ref = getattr(self.live, "_ref_point", None)
@@ -597,16 +680,31 @@ class CameraWindow(QWidget):
             dx = int(cx - cam_cx); dy = int(cy - cam_cy)
         dist = float(np.hypot(dx, dy))
 
-        self.lbl_dx.setText(f"dx: {dx} px")
-        self.lbl_dy.setText(f"dy: {dy} px")
-        self.lbl_dist.setText(f"dist: {dist:.2f} px")
+        # Physikalische Einheiten (Pixelgröße aus LiveView)
+        px_um = getattr(self.live, "pixel_size_um", None)
+        if px_um is None:
+            print("[WARN] Keine Pixelgröße aus Kamera verfügbar.")
+            return
+        px_um = float(px_um)
+        dx_um = dx * px_um
+        dy_um = dy * px_um
+        dist_um = dist * px_um
+        dist_mm = dist_um / 1000.0
+
+        self.lbl_dx.setText(f"dx: {dx:+d} px  ({dx_um:+.1f} µm)")
+        self.lbl_dy.setText(f"dy: {dy:+d} px  ({dy_um:+.1f} µm)")
+        self.lbl_dist.setText(f"dist: {dist:.2f} px  ({dist_um:.1f} µm · {dist_mm:.3f} mm)")
 
         # Fixed tolerance (no UI): use 5 px as pass threshold
-        tol = 5.0
-        ok = (dist <= tol)
+        tol_px = 5.0
+        tol_um = tol_px * px_um
+        ok = (dist <= tol_px)
         color = "#2ecc71" if ok else "#ff2740"
         text = "OK" if ok else "ALIGN"
-        self.lbl_align_status.setText(f'<span style="color:{color}; font-weight:600">{text}</span>')
+        self.lbl_align_status.setText(
+            f'<span style="color:{color}; font-weight:600">{text} '
+            f'(≤ {tol_px:.1f} px ≈ {tol_um:.1f} µm)</span>'
+        )
 
     def _on_save_justage(self):
         """Save the current centroid as the Justage reference point."""
@@ -639,7 +737,6 @@ class CameraWindow(QWidget):
             if ref is None:
                 # No reference -> save current centroid
                 self._on_save_justage()
-                # update button label
                 try: self.btn_toggle_justage.setText("Clear Justage")
                 except: pass
             else:
@@ -976,7 +1073,7 @@ class StageGUI(QWidget):
         self._dur_max_um  = None
         self._calib_vals  = {"X": None, "Y": None}
 
-        # Neu: Zielkamera für Exposure-UI
+        # Neu: Zielkamera für Exposure-UI (wird nur für Fallback genutzt)
         self._expo_target_idx = 0
 
         self._build_ui(); self._wire_shortcuts()
@@ -1018,10 +1115,9 @@ class StageGUI(QWidget):
         popup_flags = Qt.Popup | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
         self._sn_popup.setWindowFlags(popup_flags)
         self._sn_popup.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self._sn_popup.setFocusPolicy(Qt.StrongFocus)  # allow manual focus via arrow key, but don't auto-activate
+        self._sn_popup.setFocusPolicy(Qt.StrongFocus)
         self._sn_popup.setUniformItemSizes(True)
         self._sn_popup.setSelectionMode(QListWidget.SingleSelection)
-        # clicking or double-clicking opens the item
         self._sn_popup.itemClicked.connect(lambda it: self._open_selected_sn(it))
         self._sn_popup.itemDoubleClicked.connect(lambda it: self._open_selected_sn(it))
         root.addLayout(header)
@@ -1171,8 +1267,6 @@ class StageGUI(QWidget):
 
         camCard = Card("Kamera Funktionen")
         autoLayout.addWidget(camCard)
-    # (Quick exposure control removed from Autofocus page — exposure is
-    # controlled via the Exposure card and applies to open camera windows.)
 
         camGrid = QGridLayout(); camGrid.setSpacing(12); camGrid.setContentsMargins(0,0,0,0)
         camCard.body.addLayout(camGrid)
@@ -1200,8 +1294,6 @@ class StageGUI(QWidget):
         expoGrid.setSpacing(12)
         expoGrid.setContentsMargins(0,0,0,0)
         expoCard.body.addLayout(expoGrid)
-
-    # Zielkamera: Dropdown entfernt. Änderungen gelten für geöffnete Kamerafenster
 
         # Slider (µs skaliert), Spin (ms Anzeige)
         self.sliderExpo = QSlider(Qt.Horizontal)
@@ -1503,20 +1595,14 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             pass
         try:
             win = CameraWindow(self, batch=self._batch, device_index=idx, label=label)
-            # Apply the autofocus page exposure immediately so the user doesn't
-            # have to pick the camera in the Exposure control dropdown.
+            # Exposure beim Öffnen: aktueller UI-Wert (oder Slider-Minimum)
             try:
-                # Prefer setting to camera's minimum exposure if available
-                try:
-                    exinfo = win.live._read_exposure_info()
-                    win.live.set_exposure_us(exinfo.min_us)
-                    if hasattr(self, "af_exposure"):
-                        self.af_exposure.setValue(int(exinfo.min_us))
-                except Exception:
-                    if hasattr(self, "af_exposure"):
-                        win.live.set_exposure_us(float(self.af_exposure.value()))
+                us = int(self.sliderExpo.value())
+                if us <= 0:
+                    us = max(1, self.sliderExpo.minimum())
+                win.live.set_exposure_us(us)
             except Exception as e:
-                print(f"[WARN] Could not set autofocus exposure on open: {e}")
+                print(f"[WARN] Could not set exposure on open: {e}")
             win.show()
             self._cam_windows.append(win)
             try:
@@ -1890,7 +1976,6 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
                 geo = self.edSearchSN.geometry()
                 pos = self.edSearchSN.mapToGlobal(self.edSearchSN.rect().bottomLeft())
                 width = max(self.edSearchSN.width(), 420)
-                # estimate height (rows * rowHeight)
                 row_h = self._sn_popup.sizeHintForRow(0) or 20
                 h = min(12, len(results)) * row_h + 12
                 self._sn_popup.move(pos)
@@ -1957,8 +2042,6 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             subprocess.Popen(["xdg-open", str(pth)])
 
     # ---------- Exposure Helpers ----------
-    # camera-dropdown removed; no _on_expo_cam_changed any more
-
     def _on_expo_slider(self, us_val):
         # Slider ist in µs skaliert
         ms = max(0.001, us_val / 1000.0)
@@ -2013,7 +2096,6 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
         finally:
             try: dev.Close()
             except: pass
-        # p.Library.Close hier NICHT aufrufen (würde Live-Streams schließen)
 
     def _init_exposure_ui_from_remote(self, remote):
         # Auto aus, sofern vorhanden
@@ -2059,17 +2141,10 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
 
         self.sliderExpo.blockSignals(False)
         self.spinExpo.blockSignals(False)
-        # Update autofocus default exposure field (if present) to the minimum supported value
-        try:
-            if hasattr(self, "af_exposure"):
-                self.af_exposure.setValue(int(min_us))
-        except Exception:
-            pass
 
         self._set_status(f"Exposure: {cur_us/1000.0:.3f} ms (Range {min_us/1000.0:.3f}–{max_us/1000.0:.3f} ms)")
 
     def _get_live_remote_if_open(self, device_index: int):
-        # Falls ein Kamera-Fenster für diesen Index offen ist, dessen Remote benutzen
         for win in list(self._cam_windows):
             try:
                 if win.live.device_index == device_index:
@@ -2084,7 +2159,6 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
         if remote is not None:
             self._remote_set_exposure(remote, exposure_us)
             return
-        # ephemerer Setzvorgang
         try:
             dm = p.DeviceManager.Instance(); dm.Update()
         except Exception:
@@ -2114,10 +2188,8 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
                 print("[WARN] Could not apply exposure to open window:", e)
 
     def _remote_set_exposure(self, remote, exposure_us: int):
-        # Auto aus
         try: remote.FindNode("ExposureAuto").SetCurrentEntry("Off")
         except: pass
-        # Node finden
         node = None
         for name in ("ExposureTime", "ExposureTimeAbs", "ExposureTimeUs"):
             try:
@@ -2129,14 +2201,12 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
                 continue
         if node is None:
             raise RuntimeError("ExposureTime-Knoten nicht gefunden.")
-        # Clampen auf Limits
         try:
             mn = int(max(1, round(node.Minimum())))
             mx = int(round(node.Maximum()))
             exposure_us = int(min(mx, max(mn, exposure_us)))
         except:
             pass
-        # Setzen
         try:
             node.SetValue(float(exposure_us))
             self._set_status(f"Exposure gesetzt: {exposure_us/1000.0:.3f} ms")
