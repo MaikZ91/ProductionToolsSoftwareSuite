@@ -21,8 +21,44 @@ Stage-Toolbox (Dark Minimal Theme) – Pro UI (Report & QA) + Workflow-Kacheln
 import os as _os
 _os.environ.pop("GIO_MODULE_DIR", None)
 
-import sys, datetime, pathlib, numpy as np, time, csv, ctypes, re, os, subprocess, socket, json, shutil
+import csv
+import datetime
+import json
+import os
+import pathlib
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import time
 
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+from matplotlib import image as mpimg
+
+from PySide6.QtCore    import QObject, QThread, Signal, Qt, QTimer, QSize, QRegularExpression, QEvent
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QLabel, QPushButton, QLineEdit, QTextEdit,
+    QProgressBar, QMessageBox, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QFrame, QSizePolicy, QSpacerItem, QComboBox, QSpinBox, QToolButton,
+    QStackedWidget, QSlider, QDoubleSpinBox, QDialog, QListWidget,
+    QScrollArea
+)
+from PySide6.QtGui     import (
+    QPixmap, QPalette, QColor, QFont, QShortcut, QKeySequence,
+    QRegularExpressionValidator, QIcon
+)
+
+from ids_camera import CameraController, IDS_PEAK_MODULE
+from laser_spot_detection import LaserSpotDetector
+from z_trieb import ZTriebWidget
+
+# ========================== DATENBANK / INFRA ==========================
 BASE_DIR = pathlib.Path(__file__).resolve().parent
 
 def resolve_data_root() -> pathlib.Path:
@@ -53,6 +89,37 @@ def resolve_data_root() -> pathlib.Path:
     return fallback.resolve()
 
 DATA_ROOT = resolve_data_root()
+
+def _resolve_dashboard_widget():
+    candidates = [
+        BASE_DIR / "dashboard",
+        BASE_DIR.parent / "dashboard",
+        BASE_DIR.parent / "Pr\u00fcfstände" / "Datenbank",
+        pathlib.Path.home() / "Pr\u00fcfstände" / "Datenbank",
+    ]
+    dashboard_cls = None
+    dashboard_error = None
+    for candidate in candidates:
+        try:
+            dash_py = candidate / "dashboard.py"
+        except Exception:
+            continue
+        if not dash_py.exists():
+            continue
+        path_str = str(candidate)
+        if path_str not in sys.path:
+            sys.path.append(path_str)
+        try:
+            from dashboard import Dashboard as _DashboardWidget
+        except Exception as exc:  # pragma: no cover - optional import
+            dashboard_error = exc
+            continue
+        else:
+            dashboard_cls = _DashboardWidget
+            break
+    return dashboard_cls, dashboard_error
+
+DASHBOARD_WIDGET_CLS, _DASHBOARD_IMPORT_ERROR = _resolve_dashboard_widget()
 
 KLEBEROBOTER_SERVER_IP = os.environ.get("KLEBEROBOTER_SERVER_IP", "10.3.141.1")
 try:
@@ -162,28 +229,141 @@ def send_kleberoboter_payload(
             ack = None
     return payload, ack
 
-import matplotlib
 matplotlib.use("qtagg")
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib import image as mpimg
 
-from PySide6.QtCore    import QObject, QThread, Signal, Qt, QTimer, QSize, QRegularExpression, QEvent
-from PySide6.QtWidgets import (
-    QApplication, QWidget, QLabel, QPushButton, QLineEdit, QTextEdit,
-    QProgressBar, QMessageBox, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QFrame, QSizePolicy, QSpacerItem, QComboBox, QSpinBox, QToolButton,
-    QStackedWidget, QSlider, QDoubleSpinBox, QDialog, QListWidget
-)
-from PySide6.QtGui     import (
-    QImage, QPixmap, QPalette, QColor, QFont, QShortcut, QKeySequence,
-    QRegularExpressionValidator, QIcon, QPainter, QPen
-)
+try:
+    import pmacspy as _pmac_module
+except Exception as exc:  # pragma: no cover - hardware import fails during simulation
+    _pmac_module = None
+    _PMAC_IMPORT_ERROR = exc
+else:
+    _PMAC_IMPORT_ERROR = None
 
-import pmacspy as pmac
-from ids_peak import ids_peak as p
+
+class _DummyPMACBackend:
+    """Minimal in-memory replacement so the GUI works without a PMAC."""
+
+    def __init__(self):
+        base_cfg = {
+            "limitLowSteps": -500_000,
+            "limitHighSteps": 500_000,
+            "homeStepPosition": 0,
+            "stepsPerMeter": 200_000,
+            "encoderStepsPerMeter": 205_000,
+        }
+        self._state = {"X": 0, "Y": 0, "Z": 0}
+        self._encoders = {"X": 0, "Y": 0, "Z": 0}
+        self._config = {axis: dict(base_cfg) for axis in self._state}
+
+    def _split(self, path: str, section: str) -> tuple[str | None, str | None]:
+        if section not in path:
+            return None, None
+        try:
+            after = path.split(f"{section}/", 1)[1]
+            axis, key = after.split("/", 1)
+            return axis.upper(), key
+        except Exception:
+            return None, None
+
+    def _update_encoder(self, axis: str):
+        steps_per_m = float(self._config[axis].get("stepsPerMeter") or 1.0)
+        enc_per_m = float(self._config[axis].get("encoderStepsPerMeter") or steps_per_m)
+        step_pos = float(self._state.get(axis, 0))
+        if steps_per_m == 0:
+            steps_per_m = 1.0
+        self._encoders[axis] = int(round(step_pos / steps_per_m * enc_per_m))
+
+    def connect(self, uri: str):
+        print(f"[SIM][PMAC] Verbinde zu {uri} (Dummy-Modus).")
+        return f"sim://{uri}"
+
+    def getParam(self, path: str):
+        axis, key = self._split(path, "MicroscopeState")
+        if axis and key == "stepPosition":
+            return int(self._state.get(axis, 0))
+        axis, key = self._split(path, "MicroscopeConfig")
+        if axis and key:
+            try:
+                return int(self._config[axis][key])
+            except KeyError:
+                return 0
+        return 0
+
+    def setParam(self, path: str, value):
+        axis, key = self._split(path, "MicroscopeState")
+        if axis and key == "stepPosition":
+            self._state[axis] = int(value)
+            self._update_encoder(axis)
+            return
+        axis, key = self._split(path, "MicroscopeConfig")
+        if axis and key and axis in self._config:
+            self._config[axis][key] = int(value)
+            if key in {"stepsPerMeter", "encoderStepsPerMeter"}:
+                self._update_encoder(axis)
+
+    def getStagePosInfo(self, status: dict):
+        status.update({
+            "xPos_encoderSteps": self._encoders["X"],
+            "yPos_encoderSteps": self._encoders["Y"],
+            "zPos_encoderSteps": self._encoders["Z"],
+        })
+        return status
+
+
+class _PmacBridge:
+    """Proxy that falls back to the dummy backend if hardware is absent."""
+
+    def __init__(self, real_module):
+        self._real = real_module
+        self._sim = _DummyPMACBackend()
+        self._use_sim = real_module is None
+        if self._use_sim:
+            print("[INFO] Keine PMAC-Hardware gefunden �?\" starte im Simulationsmodus.")
+
+    @property
+    def is_simulated(self) -> bool:
+        return self._use_sim or self._real is None
+
+    def _fallback(self, reason: Exception | str):
+        if not self._use_sim:
+            print(f"[WARN] PMAC-Fallback aktiviert ({reason}).")
+            self._use_sim = True
+        return self._sim
+
+    def connect(self, uri: str):
+        if self._use_sim or self._real is None:
+            return self._sim.connect(uri)
+        try:
+            return self._real.connect(uri)
+        except Exception as exc:
+            return self._fallback(exc).connect(uri)
+
+    def getParam(self, path: str):
+        if self._use_sim or self._real is None:
+            return self._sim.getParam(path)
+        try:
+            return self._real.getParam(path)
+        except Exception as exc:
+            return self._fallback(exc).getParam(path)
+
+    def setParam(self, path: str, value):
+        if self._use_sim or self._real is None:
+            return self._sim.setParam(path, value)
+        try:
+            return self._real.setParam(path, value)
+        except Exception as exc:
+            return self._fallback(exc).setParam(path, value)
+
+    def getStagePosInfo(self, status: dict):
+        if self._use_sim or self._real is None:
+            return self._sim.getStagePosInfo(status)
+        try:
+            return self._real.getStagePosInfo(status)
+        except Exception as exc:
+            return self._fallback(exc).getStagePosInfo(status)
+
+
+pmac = _PmacBridge(_pmac_module)
 
 # ========================== QA LIMITS (in µm) ==========================
 MEAS_MAX_UM = 10.0   # Max. |Delta| in Messung
@@ -357,7 +537,7 @@ def make_tile(text: str, icon_path: str, clicked_cb):
     btn.setIconSize(QSize(72, 72))
     btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
     btn.setText(text)
-    btn.setMinimumSize(150, 120)
+    btn.setMinimumSize(130, 100)
     btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
     btn.setAutoRaise(False)
     btn.setStyleSheet("""
@@ -373,494 +553,7 @@ def make_tile(text: str, icon_path: str, clicked_cb):
     btn.clicked.connect(clicked_cb)
     return btn
 
-# ================================================================
-# IDS Live-View (mit Geräteindex)
-# ================================================================
-class LiveView(QLabel):
-    """Minimaler IDS peak Live-View (Mono8) in QLabel. Wählt Kamera per device_index.
-
-    Erweiterung:
-    - versucht Pixelgröße automatisch zu erkennen (Node-Pfade, sonst ENV, sonst Default 2.2 µm)
-    - stellt pixel_size_um bereit, damit CameraWindow in physikalischen Einheiten rechnen kann
-    """
-    # Emits (x, y) of the tracked laser centroid in pixel coordinates
-    centerChanged = Signal(int, int)
-
-    def __init__(self, parent=None, device_index: int = 0):
-        super().__init__(parent)
-        self.setScaledContents(True)
-        self.device_index = int(device_index)
-        self._img_w = None
-        self._img_h = None
-        self._ref_point = None
-        self.pixel_size_um: float | None = None
-        self.sensor_width_px: int | None = None
-        self.sensor_height_px: int | None = None
-        self._init_camera()
-
-    def _detect_pixel_size_um(self):
-        """Versucht die Pixelgröße automatisch zu bestimmen.
-
-        Reihenfolge:
-        1. Kamera-Node (verschiedene mögliche Namen)
-        """
-        try:
-            candidates = [
-                "SensorPixelWidth",
-                "SensorPixelHeight",
-                "PixelSize",
-                "SensorPixelSize",
-            ]
-            for name in candidates:
-                try:
-                    node = self.remote.FindNode(name)
-                    val = float(node.Value())
-                    # Heuristik: falls der Wert sehr klein ist, könnte er in mm sein
-                    # → < 0.001 → mm → in µm umrechnen
-                    if val < 0.001:
-                        val_um = val * 1e6
-                    elif val < 1.0:
-                        # könnte mm sein → konservativ: mm → µm
-                        val_um = val * 1e3
-                    else:
-                        # schon in µm
-                        val_um = val
-                    print(f"[INFO] Pixelgröße aus Node {name}: {val_um:.3f} µm")
-                    return val_um
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
-        raise RuntimeError("Pixelgröße konnte nicht aus der Kamera gelesen werden.")
-
-    def _configure_max_resolution(self):
-        """Setzt Breite/Höhe der Kamera auf die maximal verfügbaren Werte."""
-        def _set_node_to_max(name: str) -> int | None:
-            try:
-                node = self.remote.FindNode(name)
-            except Exception:
-                return None
-            max_val = None
-            try:
-                max_val = int(getattr(node, "Maximum")())
-            except Exception:
-                try:
-                    max_node = self.remote.FindNode(f"{name}Max")
-                    max_val = int(max_node.Value())
-                except Exception:
-                    pass
-            try:
-                if max_val is not None:
-                    node.SetValue(max_val)
-            except Exception:
-                pass
-            try:
-                return int(node.Value())
-            except Exception:
-                return None
-
-        self.sensor_width_px = _set_node_to_max("Width")
-        self.sensor_height_px = _set_node_to_max("Height")
-        # SensorWidth/-Height liefern ggf. die native Maximalauflösung direkt
-        try:
-            sensor_w = int(self.remote.FindNode("SensorWidth").Value())
-            if sensor_w:
-                self.sensor_width_px = sensor_w
-        except Exception:
-            pass
-        try:
-            sensor_h = int(self.remote.FindNode("SensorHeight").Value())
-            if sensor_h:
-                self.sensor_height_px = sensor_h
-        except Exception:
-            pass
-
-    def _init_camera(self):
-        p.Library.Initialize()
-        dm = p.DeviceManager.Instance(); dm.Update()
-        devs = dm.Devices()
-        if not devs:
-            raise SystemExit("Keine IDS-Kamera gefunden.")
-        idx = max(0, min(self.device_index, len(devs)-1))
-        self.dev    = devs[idx].OpenDevice(p.DeviceAccessType_Control)
-        self.remote = self.dev.RemoteDevice().NodeMaps()[0]
-
-        for n,v in [("AcquisitionMode","Continuous"),
-                    ("TriggerSelector","FrameStart"),
-                    ("TriggerMode","Off"),
-                    ("PixelFormat","Mono8")]:
-            try: self.remote.FindNode(n).SetCurrentEntry(v)
-            except: pass
-
-        self._configure_max_resolution()
-
-        # Pixelgröße erkennen
-        self.pixel_size_um = self._detect_pixel_size_um()
-
-        self.ds = self.dev.DataStreams()[0].OpenDataStream()
-        ps = self.remote.FindNode("PayloadSize").Value()
-        self._bufs = [self.ds.AllocAndAnnounceBuffer(ps) for _ in range(3)]
-        for b in self._bufs: self.ds.QueueBuffer(b)
-        self.ds.StartAcquisition()
-        try: self.remote.FindNode("AcquisitionStart").Execute()
-        except: pass
-
-        self._timer = QTimer(self); self._timer.timeout.connect(self._grab); self._timer.start(0)
-
-    def set_exposure_us(self, val_us: float):
-        """Setze Exposure (µs) direkt an die Kamera-Remote (robust gegen Namensvarianten)."""
-        try:
-            # Disable auto if present
-            try: self.remote.FindNode("ExposureAuto").SetCurrentEntry("Off")
-            except: pass
-            node = None
-            for name in ("ExposureTime", "ExposureTimeAbs", "ExposureTimeUs"):
-                try:
-                    n = self.remote.FindNode(name)
-                    _ = n.Value()
-                    node = n
-                    break
-                except:
-                    continue
-            if node is None:
-                raise RuntimeError("ExposureTime-Knoten nicht gefunden.")
-            # Clamp
-            try:
-                mn = int(max(1, round(node.Minimum())))
-                mx = int(round(node.Maximum()))
-                v = int(min(mx, max(mn, int(round(float(val_us))))))
-            except:
-                v = int(round(float(val_us)))
-            node.SetValue(float(v))
-            print(f"[INFO] LiveView: Exposure gesetzt auf {v} µs")
-        except Exception as e:
-            print("[WARN] LiveView: Exposure setzen fehlgeschlagen:", e)
-
-    def set_reference_point(self, x: int, y: int):
-        """Save a reference point (Justage laser) in pixel coordinates and keep it displayed.
-        Pass None to clear.
-        """
-        try:
-            if x is None or y is None:
-                self._ref_point = None
-            else:
-                self._ref_point = (int(x), int(y))
-            print(f"[INFO] LiveView: Reference point set to {self._ref_point}")
-        except Exception as e:
-            print("[WARN] LiveView: Could not set reference point:", e)
-
-    def clear_reference_point(self):
-        try:
-            self._ref_point = None
-            print("[INFO] LiveView: Reference point cleared")
-        except Exception as e:
-            print("[WARN] LiveView: Could not clear reference point:", e)
-
-    def _grab(self):
-        try: buf = self.ds.WaitForFinishedBuffer(50)
-        except: return
-        if not buf: return
-        try:
-            w,h,ptr,sz = buf.Width(), buf.Height(), int(buf.BasePtr()), buf.Size()
-            # remember image resolution for external consumers
-            try:
-                self._img_w = int(w); self._img_h = int(h)
-            except Exception:
-                self._img_w = None; self._img_h = None
-            arr = (ctypes.c_ubyte * sz).from_address(ptr)
-            # Create a copied QImage from the camera buffer (ensure correct bytesPerLine)
-            try:
-                # bytes(...) makes an explicit copy to avoid lifetime issues
-                raw_bytes = bytes(memoryview(arr)[:w*h])
-                qimg = QImage(raw_bytes, w, h, w, QImage.Format_Grayscale8).copy()
-            except Exception:
-                # Fallback to previous approach if needed
-                qimg = QImage(memoryview(arr)[:w*h], w, h, w, QImage.Format_Grayscale8).copy()
-
-            # Compute laser centroid robustly: subtract background median, find brightest pixel,
-            # then compute a local weighted centroid around that peak (reduces ring/Airy bias).
-            try:
-                img = np.frombuffer(raw_bytes if 'raw_bytes' in locals() else memoryview(arr)[:w*h], dtype=np.uint8)
-                img = img.reshape((h, w)).astype(np.float32)
-
-                # Background removal: subtract median to reduce rings / background
-                try:
-                    bkg = float(np.median(img))
-                    img_sub = img - bkg
-                    img_sub[img_sub < 0] = 0.0
-                except Exception:
-                    img_sub = img
-
-                # Find global brightest pixel in the background-subtracted image
-                idx = int(np.argmax(img_sub))
-                py, px = divmod(idx, w)
-
-                # Local window around the peak for refined centroid
-                win = min(41, max(11, min(h, w) // 10))  # odd-ish window, clamped
-                hw = win // 2
-                x0 = max(0, px - hw); x1 = min(w, px + hw + 1)
-                y0 = max(0, py - hw); y1 = min(h, py + hw + 1)
-                sub = img_sub[y0:y1, x0:x1]
-
-                tot = float(sub.sum())
-                if tot > 0:
-                    ys, xs = np.indices(sub.shape)
-                    cx_local = (sub * xs).sum() / tot
-                    cy_local = (sub * ys).sum() / tot
-                    cx = int(round(x0 + cx_local))
-                    cy = int(round(y0 + cy_local))
-                else:
-                    # Fallback to brightest pixel or center
-                    if img_sub.sum() > 0:
-                        cx, cy = px, py
-                    else:
-                        cx, cy = w // 2, h // 2
-
-                # Emit centroid for external UI consumption
-                try:
-                    self.centerChanged.emit(cx, cy)
-                except Exception:
-                    pass
-
-                # Ensure we paint in true color: convert the grayscale QImage to ARGB32
-                try:
-                    if qimg.format() != QImage.Format_ARGB32:
-                        qimg = qimg.convertToFormat(QImage.Format_ARGB32)
-                except Exception:
-                    pass
-                painter = QPainter(qimg)
-                # 1) Camera midpoint: full-width/height dashed lines (static) - make highly visible red
-                try:
-                    # use the shared ACCENT color from the theme for exact match
-                    pen_cam = QPen(QColor(ACCENT))
-                    pen_cam.setWidth(3)
-                    pen_cam.setStyle(Qt.DashLine)
-                    painter.setPen(pen_cam)
-                    cx0 = w // 2
-                    cy0 = h // 2
-                    painter.drawLine(cx0, 0, cx0, h)
-                    painter.drawLine(0, cy0, w, cy0)
-                except Exception:
-                    pass
-
-                # 2) Laser centroid: größere Kreuzhaare
-                try:
-                    pen_l = QPen(QColor(ACCENT))
-                    pen_l.setWidth(3)
-                    pen_l.setCapStyle(Qt.RoundCap)
-                    painter.setPen(pen_l)
-                    size = max(6, min(w, h) // 20)
-                    painter.drawLine(max(0, cx - size), cy, min(w, cx + size), cy)
-                    painter.drawLine(cx, max(0, cy - size), cx, min(h, cy + size))
-                except Exception:
-                    pass
-
-                # 3) Reference point (Justage) if present: distinct marker (yellow)
-                try:
-                    if getattr(self, "_ref_point", None) is not None:
-                        rx, ry = self._ref_point
-                        pen_r = QPen(QColor("#ffd60a"))
-                        pen_r.setWidth(2)
-                        painter.setPen(pen_r)
-                        rsize = max(6, min(w, h) // 30)
-                        from PySide6.QtCore import QRect
-                        painter.drawEllipse(QRect(int(rx - rsize//2), int(ry - rsize//2), int(rsize), int(rsize)))
-                        # line between current centroid and reference
-                        try:
-                            pen_line = QPen(QColor("#ffd60a"))
-                            pen_line.setStyle(Qt.DashLine)
-                            painter.setPen(pen_line)
-                            painter.drawLine(rx, ry, cx, cy)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-                painter.end()
-            except Exception:
-                # don't break the live view if processing fails
-                pass
-
-            self.setPixmap(QPixmap.fromImage(qimg))
-        finally:
-            self.ds.QueueBuffer(buf)
-
-    def close(self):
-        for fn in (
-            lambda: self.remote.FindNode("AcquisitionStop").Execute(),
-            self.ds.StopAcquisition,
-            lambda: [self.ds.RevokeBuffer(b) for b in self._bufs],
-            self.dev.Close,
-            p.Library.Close,
-        ):
-            try: fn()
-            except: pass
-        super().close()
-
-class CameraWindow(QWidget):
-    def __init__(self, parent=None, batch: str = "NoBatch", device_index: int = 0, label: str = ""):
-        super().__init__(parent)
-        cam_name = (label or f"Cam {device_index}")
-        self.setWindowTitle(f"Kamera – {cam_name} (Mono8) · Charge: {batch}")
-        self.resize(1180,640)
-
-        # Horizontal layout: live image on the left, alignment panel on the right
-        h = QHBoxLayout(self)
-
-        # Live view (left) — expand
-        self.live = LiveView(self, device_index=device_index)
-        h.addWidget(self.live, 1)
-
-        # Alignment panel (right) — compact fixed width
-        align_card = Card("Alignment")
-        align_card.setFixedWidth(320)
-
-        # Justage controls: single toggle button (Save ↔ Clear)
-        ref_btn_row = QHBoxLayout()
-        self.btn_toggle_justage = QPushButton("Save Justage")
-        self.btn_toggle_justage.setMinimumHeight(28)
-        self.btn_toggle_justage.setMinimumWidth(140)
-        ref_btn_row.addWidget(self.btn_toggle_justage)
-        align_card.body.addLayout(ref_btn_row)
-
-        # Reference coordinates display
-        self.lbl_ref = QLabel("Ref: —")
-        self.lbl_ref.setObjectName("Chip")
-        align_card.body.addWidget(self.lbl_ref)
-
-        # Numeric readouts (jetzt mit physikalischen Einheiten)
-        self.lbl_dx = QLabel("dx: —")
-        self.lbl_dy = QLabel("dy: —")
-        self.lbl_dist = QLabel("dist: —")
-        for lbl in (self.lbl_dx, self.lbl_dy, self.lbl_dist):
-            lbl.setObjectName("Chip")
-            align_card.body.addWidget(lbl)
-
-        align_card.body.addItem(QSpacerItem(0,8, QSizePolicy.Minimum, QSizePolicy.Fixed))
-
-        # Status indicator
-        self.lbl_align_status = QLabel("Status: —")
-        self.lbl_align_status.setAlignment(Qt.AlignCenter)
-        align_card.body.addWidget(self.lbl_align_status)
-
-        align_card.body.addStretch(1)
-
-        h.addWidget(align_card, 0)
-
-        # Internal state
-        self._last_centroid = None
-
-        # Wiring
-        try:
-            self.live.centerChanged.connect(self._on_live_center_changed)
-        except Exception:
-            pass
-        try:
-            self.btn_toggle_justage.clicked.connect(self._on_toggle_justage)
-        except Exception:
-            pass
-
-    def _on_live_center_changed(self, x: int, y: int):
-        try:
-            self._last_centroid = (x, y)
-            self._update_alignment(x, y)
-        except Exception:
-            pass
-
-    def _update_alignment(self, cx: int, cy: int):
-        # Determine camera center from LiveView if available
-        w = getattr(self.live, "_img_w", None)
-        h = getattr(self.live, "_img_h", None)
-        if not w or not h:
-            w = getattr(self.live, "sensor_width_px", None)
-            h = getattr(self.live, "sensor_height_px", None)
-        if not w or not h:
-            print("[WARN] Keine Auflösung aus Kamera verfügbar.")
-            return
-
-        # If a Justage reference is set, compute offsets relative to it; otherwise use camera center
-        ref = getattr(self.live, "_ref_point", None)
-        if ref is not None:
-            rx, ry = ref
-            dx = int(cx - int(rx)); dy = int(cy - int(ry))
-        else:
-            cam_cx = int(w // 2); cam_cy = int(h // 2)
-            dx = int(cx - cam_cx); dy = int(cy - cam_cy)
-        dist = float(np.hypot(dx, dy))
-
-        # Physikalische Einheiten (Pixelgröße aus LiveView)
-        px_um = getattr(self.live, "pixel_size_um", None)
-        if px_um is None:
-            print("[WARN] Keine Pixelgröße aus Kamera verfügbar.")
-            return
-        px_um = float(px_um)
-        dx_um = dx * px_um
-        dy_um = dy * px_um
-        dist_um = dist * px_um
-        dist_mm = dist_um / 1000.0
-
-        self.lbl_dx.setText(f"dx: {dx:+d} px  ({dx_um:+.1f} µm)")
-        self.lbl_dy.setText(f"dy: {dy:+d} px  ({dy_um:+.1f} µm)")
-        self.lbl_dist.setText(f"dist: {dist:.2f} px  ({dist_um:.1f} µm · {dist_mm:.3f} mm)")
-
-        # Fixed tolerance (no UI): use 5 px as pass threshold
-        tol_px = 5.0
-        tol_um = tol_px * px_um
-        ok = (dist <= tol_px)
-        color = "#2ecc71" if ok else "#ff2740"
-        text = "OK" if ok else "ALIGN"
-        self.lbl_align_status.setText(
-            f'<span style="color:{color}; font-weight:600">{text} '
-            f'(≤ {tol_px:.1f} px ≈ {tol_um:.1f} µm)</span>'
-        )
-
-    def _on_save_justage(self):
-        """Save the current centroid as the Justage reference point."""
-        try:
-            if self._last_centroid is None:
-                QMessageBox.warning(self, "Justage", "Kein Laser-Mittelpunkt erkannt. Bitte erstmal Justage-Laser einschalten und erkennen lassen.")
-                return
-            cx, cy = self._last_centroid
-            self.live.set_reference_point(cx, cy)
-            self.lbl_ref.setText(f"Ref: {cx}, {cy}")
-            # Re-evaluate alignment relative to reference
-            self._update_alignment(cx, cy)
-        except Exception as e:
-            print("[WARN] Could not save justage:", e)
-
-    def _on_clear_justage(self):
-        try:
-            self.live.clear_reference_point()
-            self.lbl_ref.setText("Ref: —")
-            # Recompute alignment relative to center if we have a centroid
-            if self._last_centroid is not None:
-                self._update_alignment(*self._last_centroid)
-        except Exception as e:
-            print("[WARN] Could not clear justage:", e)
-
-    def _on_toggle_justage(self):
-        """Toggle Save / Clear Justage depending on whether a reference exists."""
-        try:
-            ref = getattr(self.live, "_ref_point", None)
-            if ref is None:
-                # No reference -> save current centroid
-                self._on_save_justage()
-                try: self.btn_toggle_justage.setText("Clear Justage")
-                except: pass
-            else:
-                # Reference exists -> clear it
-                self._on_clear_justage()
-                try: self.btn_toggle_justage.setText("Save Justage")
-                except: pass
-        except Exception as e:
-            print("[WARN] Toggle justage failed:", e)
-
-    def closeEvent(self,e):
-        try: self.live.close()
-        except: pass
-        super().closeEvent(e)
-
+# ========================== STAGE ====================================
 # ================================================================
 # Stage Utilities
 # ================================================================
@@ -1136,6 +829,206 @@ class DauertestWorker(QObject):
                 "limit_um": float(self.dur_limit_um)
             })
 
+
+# ========================== AUTOFOCUS ================================
+# ================================================================
+# IDS Live-View (mit Geräteindex)
+# ================================================================
+class CameraWindow(QWidget):
+    def __init__(
+        self,
+        parent=None,
+        batch: str = "NoBatch",
+        device_index: int = 0,
+        label: str = "",
+    ):
+        super().__init__(parent)
+        cam_name = (label or f"Cam {device_index}")
+        self.setWindowTitle(f"Kamera – {cam_name} (Mono8) · Charge: {batch}")
+        self.resize(1180,640)
+
+        # Horizontal layout: live image on the left, alignment panel on the right
+        h = QHBoxLayout(self)
+
+        # Live view (left) — expand
+        self.detector = LaserSpotDetector()
+
+        self.live = CameraController(
+            self,
+            device_index=device_index,
+            accent_color=ACCENT,
+        )
+        try:
+            self.live.frameReady.connect(self._on_frame_ready)
+        except Exception:
+            pass
+        h.addWidget(self.live, 1)
+
+        # Alignment panel (right) — compact fixed width
+        align_card = Card("Alignment")
+        align_card.setFixedWidth(320)
+
+        # Justage controls: single toggle button (Save ↔ Clear)
+        ref_btn_row = QHBoxLayout()
+        self.btn_toggle_justage = QPushButton("Save Justage")
+        self.btn_toggle_justage.setMinimumHeight(28)
+        self.btn_toggle_justage.setMinimumWidth(140)
+        ref_btn_row.addWidget(self.btn_toggle_justage)
+        align_card.body.addLayout(ref_btn_row)
+
+        # Reference coordinates display
+        self.lbl_ref = QLabel("Ref: —")
+        self.lbl_ref.setObjectName("Chip")
+        align_card.body.addWidget(self.lbl_ref)
+
+        # Numeric readouts (jetzt mit physikalischen Einheiten)
+        self.lbl_dx = QLabel("dx: —")
+        self.lbl_dy = QLabel("dy: —")
+        self.lbl_dist = QLabel("dist: —")
+        for lbl in (self.lbl_dx, self.lbl_dy, self.lbl_dist):
+            lbl.setObjectName("Chip")
+            align_card.body.addWidget(lbl)
+
+        align_card.body.addItem(QSpacerItem(0,8, QSizePolicy.Minimum, QSizePolicy.Fixed))
+
+        # Status indicator
+        self.lbl_align_status = QLabel("Status: —")
+        self.lbl_align_status.setAlignment(Qt.AlignCenter)
+        align_card.body.addWidget(self.lbl_align_status)
+
+        align_card.body.addStretch(1)
+
+        h.addWidget(align_card, 0)
+
+        # Internal state
+        self._last_centroid = None
+
+        # Wiring
+        try:
+            self.live.centerChanged.connect(self._on_live_center_changed)
+        except Exception:
+            pass
+        try:
+            self.btn_toggle_justage.clicked.connect(self._on_toggle_justage)
+        except Exception:
+            pass
+
+    def _on_live_center_changed(self, x: int, y: int):
+        try:
+            self._last_centroid = (x, y)
+            self._update_alignment(x, y)
+        except Exception:
+            pass
+
+    def _update_alignment(self, cx: int, cy: int):
+        # Determine camera center from LiveView if available
+        w = getattr(self.live, "_img_w", None)
+        h = getattr(self.live, "_img_h", None)
+        if not w or not h:
+            w = getattr(self.live, "sensor_width_px", None)
+            h = getattr(self.live, "sensor_height_px", None)
+        if not w or not h:
+            print("[WARN] Keine Auflösung aus Kamera verfügbar.")
+            return
+
+        # If a Justage reference is set, compute offsets relative to it; otherwise use camera center
+        ref = self.detector.get_reference_point()
+        if ref is not None:
+            rx, ry = ref
+            dx = int(cx - int(rx)); dy = int(cy - int(ry))
+        else:
+            cam_cx = int(w // 2); cam_cy = int(h // 2)
+            dx = int(cx - cam_cx); dy = int(cy - cam_cy)
+        dist = float(np.hypot(dx, dy))
+
+        # Physikalische Einheiten (Pixelgröße aus LiveView)
+        px_um = getattr(self.live, "pixel_size_um", None)
+        if px_um is None:
+            print("[WARN] Keine Pixelgröße aus Kamera verfügbar.")
+            return
+        px_um = float(px_um)
+        dx_um = dx * px_um
+        dy_um = dy * px_um
+        dist_um = dist * px_um
+        dist_mm = dist_um / 1000.0
+
+        self.lbl_dx.setText(f"dx: {dx:+d} px  ({dx_um:+.1f} µm)")
+        self.lbl_dy.setText(f"dy: {dy:+d} px  ({dy_um:+.1f} µm)")
+        self.lbl_dist.setText(f"dist: {dist:.2f} px  ({dist_um:.1f} µm · {dist_mm:.3f} mm)")
+
+        # Fixed tolerance (no UI): use 5 px as pass threshold
+        tol_px = 5.0
+        tol_um = tol_px * px_um
+        ok = (dist <= tol_px)
+        color = "#2ecc71" if ok else "#ff2740"
+        text = "OK" if ok else "ALIGN"
+        self.lbl_align_status.setText(
+            f'<span style="color:{color}; font-weight:600">{text} '
+            f'(≤ {tol_px:.1f} px ≈ {tol_um:.1f} µm)</span>'
+        )
+
+    def _on_save_justage(self):
+        """Save the current centroid as the Justage reference point."""
+        try:
+            if self._last_centroid is None:
+                QMessageBox.warning(self, "Justage", "Kein Laser-Mittelpunkt erkannt. Bitte erstmal Justage-Laser einschalten und erkennen lassen.")
+                return
+            cx, cy = self._last_centroid
+            self.detector.set_reference_point(cx, cy)
+            self.lbl_ref.setText(f"Ref: {cx}, {cy}")
+            # Re-evaluate alignment relative to reference
+            self._update_alignment(cx, cy)
+        except Exception as e:
+            print("[WARN] Could not save justage:", e)
+
+    def _on_clear_justage(self):
+        try:
+            self.detector.clear_reference_point()
+            self.lbl_ref.setText("Ref: —")
+            # Recompute alignment relative to center if we have a centroid
+            if self._last_centroid is not None:
+                self._update_alignment(*self._last_centroid)
+        except Exception as e:
+            print("[WARN] Could not clear justage:", e)
+
+    def _on_toggle_justage(self):
+        """Toggle Save / Clear Justage depending on whether a reference exists."""
+        try:
+            ref = self.detector.get_reference_point()
+            if ref is None:
+                # No reference -> save current centroid
+                self._on_save_justage()
+                try: self.btn_toggle_justage.setText("Clear Justage")
+                except: pass
+            else:
+                # Reference exists -> clear it
+                self._on_clear_justage()
+                try: self.btn_toggle_justage.setText("Save Justage")
+                except: pass
+        except Exception as e:
+            print("[WARN] Toggle justage failed:", e)
+
+    def closeEvent(self,e):
+        try: self.live.close()
+        except: pass
+        super().closeEvent(e)
+
+    def _on_frame_ready(self, frame_bytes: bytes, w: int, h: int):
+        try:
+            ref_point = self.detector.get_reference_point()
+            qimg, (cx, cy) = self.detector.process_frame(
+                frame_bytes,
+                w,
+                h,
+                ACCENT,
+                ref_point,
+                getattr(self.live, "is_dummy", False),
+            )
+            self.live.display_frame(qimg)
+            self.live.update_centroid(cx, cy)
+        except Exception:
+            pass
+
 # ================================================================
 # Plot Widget
 # ================================================================
@@ -1155,16 +1048,19 @@ class LivePlot(FigureCanvas):
 
     def _apply_titles(self):
         self.ax.set_title(f"Dauertest – Positionsfehler · Charge: {self.batch}", fontweight="semibold")
-        self.ax.set_xlabel("Zeit [min]"); self.ax.set_ylabel("Fehler [m]")
+        self.ax.set_xlabel("Zeit [min]"); self.ax.set_ylabel("Fehler [µm]")
 
     def set_batch(self, batch: str):
         self.batch = sanitize_batch(batch); self._apply_titles(); self.draw_idle()
 
     def add_data(self, data):
-        self.t.append(data["t"]); self.ex.append(data["ex"]); self.ey.append(data["ey"])
+        ex_um = float(data.get("ex", 0.0)) * 1e6
+        ey_um = float(data.get("ey", 0.0)) * 1e6
+        self.t.append(data["t"]); self.ex.append(ex_um); self.ey.append(ey_um)
         self.line_ex.set_data(self.t,self.ex); self.line_ey.set_data(self.t,self.ey)
         self.ax.relim(); self.ax.autoscale_view(); self.draw_idle()
 
+# ========================== GUI =====================================
 # ================================================================
 # GUI
 # ================================================================
@@ -1181,16 +1077,26 @@ class StageGUI(QWidget):
         self._meas_max_um = None
         self._dur_max_um  = None
         self._calib_vals  = {"X": None, "Y": None}
+        self._warned_camera_sim = False
+        self.statusBar: QLabel | None = None
+        self._pending_status: str | None = None
 
         # Neu: Zielkamera für Exposure-UI (wird nur für Fallback genutzt)
         self._expo_target_idx = 0
 
         self._build_ui(); self._wire_shortcuts()
+        sim_msgs = []
+        if getattr(pmac, "is_simulated", False):
+            sim_msgs.append("Stage-Steuerung im Simulationsmodus (keine PMAC-Verbindung).")
+        if IDS_PEAK_MODULE is None:
+            sim_msgs.append("IDS-Kameras nicht verfügbar – LiveView zeigt Demo-Daten.")
+        if sim_msgs:
+            self._set_status(" ".join(sim_msgs))
 
     # ---------- UI ----------
     def _build_ui(self):
         self.setWindowTitle("Stage-Toolbox")
-        self.resize(1220,900)
+        self._apply_initial_size()
         root = QVBoxLayout(self); root.setContentsMargins(18,18,18,12); root.setSpacing(14)
 
         # Header
@@ -1212,6 +1118,11 @@ class StageGUI(QWidget):
         # allow forwarding arrow/enter to popup via eventFilter
         self.edSearchSN.installEventFilter(self)
         header.addWidget(self.btnFindSN)
+
+        self.btnLiveViewTab = QPushButton("LIVE VIEW")
+        self.btnLiveViewTab.setMinimumHeight(32)
+        self.btnLiveViewTab.clicked.connect(self._open_live_view)
+        header.addWidget(self.btnLiveViewTab)
 
         # Debounce timer for live search (singleShot)
         self._search_timer = QTimer(self)
@@ -1237,26 +1148,33 @@ class StageGUI(QWidget):
         laser_img = str((assets_dir / "laserscan_tile.png").resolve())
 
         # --- WORKFLOW (Kacheln) ---
-        workflowCard = Card("Workflow")
-        root.addWidget(workflowCard)
-        tiles = QHBoxLayout(); tiles.setSpacing(12)
-        self.btnStageTile = make_tile("Stage", stage_img, self._show_stage_workflow)
-        self.btnAutofocusTile = make_tile("Autofocus", af_img, self._open_autofocus_workflow)
-        self.btnLaserTile = make_tile("Laserscan Modul", laser_img, self._open_laserscan_workflow)
-        tiles.addWidget(self.btnStageTile)
-        tiles.addWidget(self.btnAutofocusTile)
-        tiles.addWidget(self.btnLaserTile)
-        tiles.addStretch(1)
-        workflowCard.body.addLayout(tiles)
-
-        # Seitenumschaltung
+        # Seitenumschaltung (in ScrollArea, damit Vollbild sauber aussieht)
         self.stack = QStackedWidget()
-        root.addWidget(self.stack, 1)
+        self.contentScroll = QScrollArea()
+        self.contentScroll.setWidgetResizable(True)
+        self.contentScroll.setFrameShape(QFrame.NoFrame)
+        self.contentScroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.contentScroll.setWidget(self.stack)
+        root.addWidget(self.contentScroll, 1)
 
         # ===================== Stage Seite =====================
         self.stagePage = QWidget()
         stageLayout = QVBoxLayout(self.stagePage)
         stageLayout.setContentsMargins(0,0,0,0); stageLayout.setSpacing(14)
+
+        self.workflowCard = Card("Workflow")
+        stageLayout.addWidget(self.workflowCard)
+        tiles = QHBoxLayout(); tiles.setSpacing(12)
+        self.btnStageTile = make_tile("Stage", stage_img, self._show_stage_workflow)
+        self.btnAutofocusTile = make_tile("Autofocus", af_img, self._open_autofocus_workflow)
+        self.btnLaserTile = make_tile("Laserscan Modul", laser_img, self._open_laserscan_workflow)
+        self.btnZTriebTile = make_tile("Z-Trieb", laser_img, self._open_ztrieb_workflow)
+        tiles.addWidget(self.btnStageTile)
+        tiles.addWidget(self.btnAutofocusTile)
+        tiles.addWidget(self.btnLaserTile)
+        tiles.addWidget(self.btnZTriebTile)
+        tiles.addStretch(1)
+        self.workflowCard.body.addLayout(tiles)
 
         # Hauptgrid
         grid = QGridLayout(); grid.setHorizontalSpacing(14); grid.setVerticalSpacing(14)
@@ -1296,7 +1214,7 @@ class StageGUI(QWidget):
         self.btnKleberoboter = QPushButton("Datenbank Senden"); self.btnKleberoboter.clicked.connect(self._trigger_kleberoboter)
 
         for b in (self.btnStart, self.btnDauer, self.btnOpenFolder, self.btnKleberoboter):
-            b.setMinimumHeight(42)
+            b.setMinimumHeight(36)
 
         self.cardActions.body.addWidget(self.btnStart)
         self.cardActions.body.addWidget(self.btnDauer)
@@ -1429,6 +1347,7 @@ class StageGUI(QWidget):
             self._init_exposure_ui_from_device(0)
         except Exception as e:
             print("[WARN] Exposure-Init (device 0):", e)
+            self._init_default_exposure_ui()
 
         autoLayout.addStretch(1)
         self.stack.addWidget(self.autofocusPage)
@@ -1464,8 +1383,55 @@ class StageGUI(QWidget):
 
         self.stack.addWidget(self.laserscanPage)
 
+        # ===================== Z-Trieb Seite =====================
+        self.ztriebPage = QWidget()
+        zLayout = QVBoxLayout(self.ztriebPage)
+        zLayout.setContentsMargins(0, 0, 0, 0)
+        zLayout.setSpacing(14)
+        self.ztriebWidget = ZTriebWidget(self)
+        zLayout.addWidget(self.ztriebWidget)
+        self.stack.addWidget(self.ztriebPage)
+
+        # ===================== Live View Seite =====================
+        self.liveViewPage = QWidget()
+        liveLayout = QVBoxLayout(self.liveViewPage)
+        liveLayout.setContentsMargins(0, 0, 0, 0)
+        liveLayout.setSpacing(14)
+
+        liveCard = Card("Live View · Produktions-Dashboard")
+        liveLayout.addWidget(liveCard, 1)
+        self._dashboard_widget = None
+        if DASHBOARD_WIDGET_CLS is not None:
+            try:
+                self._dashboard_widget = DASHBOARD_WIDGET_CLS()
+                self._dashboard_widget.setMinimumHeight(400)
+                liveCard.body.addWidget(self._dashboard_widget)
+            except Exception as exc:
+                msg = QLabel(
+                    f"Dashboard konnte nicht geladen werden:\n{exc}"
+                )
+                msg.setWordWrap(True)
+                liveCard.body.addWidget(msg)
+        else:
+            fallback = QLabel("Dashboard-Modul nicht gefunden.")
+            fallback.setWordWrap(True)
+            detail = QLabel(
+                "Bitte stelle sicher, dass das Dashboard-Projekt verfügbar ist."
+            )
+            detail.setWordWrap(True)
+            liveCard.body.addWidget(fallback)
+            liveCard.body.addWidget(detail)
+
+        self.stack.addWidget(self.liveViewPage)
+        liveLayout.addStretch(1)
+
         # Status bar
-        self.statusBar = QLabel("Bereit."); self.statusBar.setObjectName("Chip")
+        if self.statusBar is None:
+            self.statusBar = QLabel("Bereit.")
+        self.statusBar.setObjectName("Chip")
+        if self._pending_status:
+            self.statusBar.setText(self._pending_status)
+            self._pending_status = None
         statusWrap = QHBoxLayout(); statusWrap.addWidget(self.statusBar, 0, Qt.AlignLeft); statusWrap.addStretch(1)
         # Live laser center display (updated by LiveView.centerChanged)
         self.lblLaserCenter = QLabel(""); self.lblLaserCenter.setObjectName("Chip")
@@ -1483,6 +1449,24 @@ class StageGUI(QWidget):
         QShortcut(QKeySequence("Ctrl+S"), self, self._stop_dauertest)
         QShortcut(QKeySequence("Ctrl+K"), self, self._open_autofocus_workflow)
 
+    def _apply_initial_size(self):
+        """Resize the window so it fits on smaller screens as well."""
+        desired_w, desired_h = 1100, 780
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.resize(desired_w, desired_h)
+            return
+        geom = screen.availableGeometry()
+        margin_w = min(max(geom.width() // 14, 30), 70)
+        margin_h = min(max(geom.height() // 14, 30), 90)
+        width = min(desired_w, geom.width() - margin_w)
+        height = min(desired_h, geom.height() - margin_h)
+        if width <= 0:
+            width = geom.width()
+        if height <= 0:
+            height = geom.height()
+        self.resize(width, height)
+
     # ---------- Workflow Slots ----------
     def _show_stage_workflow(self):
         self.stack.setCurrentWidget(self.stagePage)
@@ -1498,6 +1482,26 @@ class StageGUI(QWidget):
     def _open_laserscan_workflow(self):
         self.stack.setCurrentWidget(self.laserscanPage)
         self._set_status("Laserscan Modul – weitere Funktionen folgen.")
+
+    def _open_ztrieb_workflow(self):
+        self.stack.setCurrentWidget(self.ztriebPage)
+        self._set_status("Z-Trieb – Objektivringversteller-Steuerung geöffnet.")
+
+    def _open_live_view(self):
+        self.stack.setCurrentWidget(self.liveViewPage)
+        if self._dashboard_widget is None and DASHBOARD_WIDGET_CLS is not None:
+            try:
+                self._dashboard_widget = DASHBOARD_WIDGET_CLS()
+                self._dashboard_widget.setMinimumHeight(400)
+                layout = self.liveViewPage.layout()
+                if layout and layout.count() > 0:
+                    card = layout.itemAt(0).widget()
+                    if isinstance(card, Card):
+                        card.body.addWidget(self._dashboard_widget)
+            except Exception as exc:
+                self._set_status(f"Dashboard-Start fehlgeschlagen: {exc}")
+                return
+        self._set_status("Live View – Produktions-Dashboard geöffnet.")
 
     # ---------- Helpers ----------
     def _reset_progress(self):
@@ -1519,7 +1523,10 @@ class StageGUI(QWidget):
     def _get_notes(self): return (self.txtNotes.toPlainText() or "").strip()
 
     def _set_status(self, text: str):
-        self.statusBar.setText(text)
+        self._pending_status = text
+        lbl = getattr(self, "statusBar", None)
+        if lbl is not None:
+            lbl.setText(text)
 
     def _on_live_center_changed(self, x: int, y: int):
         """Handler for LiveView.centerChanged signal: update small status label with coords."""
@@ -1697,15 +1704,26 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
 
     def _open_cam_idx(self, idx: int, label: str):
         self._acquire_batch()
+        if IDS_PEAK_MODULE is not None:
+            try:
+                dm = IDS_PEAK_MODULE.DeviceManager.Instance(); dm.Update()
+                if idx >= len(dm.Devices()):
+                    QMessageBox.warning(self, "Kamera", f"Keine Kamera am Index {idx} gefunden. ({label})")
+                    return
+            except Exception as exc:
+                print("[WARN] Kamera-Check fehlgeschlagen:", exc)
+        elif not self._warned_camera_sim:
+            QMessageBox.information(self, "Kamera", "IDS-Kameras nicht verfügbar – öffne Demo-Fenster.")
+            self._warned_camera_sim = True
         try:
-            dm = p.DeviceManager.Instance(); dm.Update()
-            if idx >= len(dm.Devices()):
-                QMessageBox.warning(self, "Kamera", f"Keine Kamera am Index {idx} gefunden. ({label})")
-                return
-        except Exception:
-            pass
-        try:
-            win = CameraWindow(self, batch=self._batch, device_index=idx, label=label)
+            detector = LaserSpotDetector()
+            win = CameraWindow(
+                self,
+                batch=self._batch,
+                device_index=idx,
+                label=label,
+                spot_detector=detector,
+            )
             # Exposure beim Öffnen: aktueller UI-Wert (oder Slider-Minimum)
             try:
                 us = int(self.sliderExpo.value())
@@ -1723,7 +1741,11 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             self._set_status(f"Kamera geöffnet: {label} (Index {idx})")
             # Exposure-UI ggf. aus Live-Remote initialisieren (damit Slider/Min/Max passen)
             try:
-                self._init_exposure_ui_from_remote(win.live.remote)
+                remote = getattr(win.live, "remote", None)
+                if remote is not None:
+                    self._init_exposure_ui_from_remote(remote)
+                else:
+                    self._init_default_exposure_ui()
             except Exception as e:
                 print("[WARN] Konnte Exposure-UI nicht aus Live-Remote initialisieren:", e)
         except SystemExit as e:
@@ -2219,22 +2241,39 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             try: self._apply_exposure_to_device(0, us)
             except: pass
 
+    def _init_default_exposure_ui(self, cur_us: int = 2000, min_us: int = 50, max_us: int = 200000):
+        cur_us = int(max(min_us, min(max_us, cur_us)))
+        self.sliderExpo.blockSignals(True)
+        self.spinExpo.blockSignals(True)
+        self.sliderExpo.setMinimum(min_us)
+        self.sliderExpo.setMaximum(max_us)
+        self.sliderExpo.setValue(cur_us)
+        self.spinExpo.setMinimum(min_us / 1000.0)
+        self.spinExpo.setMaximum(max_us / 1000.0)
+        self.spinExpo.setValue(cur_us / 1000.0)
+        self.sliderExpo.blockSignals(False)
+        self.spinExpo.blockSignals(False)
+        self._set_status(f"Exposure (Demo): {cur_us/1000.0:.3f} ms")
+
     def _init_exposure_ui_from_device(self, device_index: int):
         """Liest Limits & aktuellen Wert. Nutzt Live-Remote wenn Fenster offen, sonst kurzzeitig öffnen."""
+        if IDS_PEAK_MODULE is None:
+            self._init_default_exposure_ui()
+            return
         remote = self._get_live_remote_if_open(device_index)
         if remote is not None:
             self._init_exposure_ui_from_remote(remote)
             return
         # ephemeres Öffnen
         try:
-            dm = p.DeviceManager.Instance(); dm.Update()
+            dm = IDS_PEAK_MODULE.DeviceManager.Instance(); dm.Update()
         except Exception:
-            p.Library.Initialize()
-            dm = p.DeviceManager.Instance(); dm.Update()
+            IDS_PEAK_MODULE.Library.Initialize()
+            dm = IDS_PEAK_MODULE.DeviceManager.Instance(); dm.Update()
         devs = dm.Devices()
         if not devs or device_index >= len(devs):
             raise RuntimeError(f"Keine Kamera am Index {device_index} gefunden.")
-        dev = devs[device_index].OpenDevice(p.DeviceAccessType_Control)
+        dev = devs[device_index].OpenDevice(IDS_PEAK_MODULE.DeviceAccessType_Control)
         try:
             remote = dev.RemoteDevice().NodeMaps()[0]
             self._init_exposure_ui_from_remote(remote)
@@ -2292,28 +2331,32 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
     def _get_live_remote_if_open(self, device_index: int):
         for win in list(self._cam_windows):
             try:
-                if win.live.device_index == device_index:
-                    return win.live.remote
+                live = getattr(win, "live", None)
+                if live and live.device_index == device_index and hasattr(live, "remote"):
+                    return live.remote
             except:
                 continue
         return None
 
     def _apply_exposure_to_device(self, device_index: int, exposure_us: int):
         """Setzt Exposure. Nutzt Live-Remote, sonst ephemeres Öffnen."""
+        if IDS_PEAK_MODULE is None:
+            self._set_status(f"Exposure (Demo) gespeichert: {exposure_us/1000.0:.3f} ms")
+            return
         remote = self._get_live_remote_if_open(device_index)
         if remote is not None:
             self._remote_set_exposure(remote, exposure_us)
             return
         try:
-            dm = p.DeviceManager.Instance(); dm.Update()
+            dm = IDS_PEAK_MODULE.DeviceManager.Instance(); dm.Update()
         except Exception:
-            p.Library.Initialize()
-            dm = p.DeviceManager.Instance(); dm.Update()
+            IDS_PEAK_MODULE.Library.Initialize()
+            dm = IDS_PEAK_MODULE.DeviceManager.Instance(); dm.Update()
         devs = dm.Devices()
         if not devs or device_index >= len(devs):
             print(f"[WARN] Keine Kamera am Index {device_index} gefunden.")
             return
-        dev = devs[device_index].OpenDevice(p.DeviceAccessType_Control)
+        dev = devs[device_index].OpenDevice(IDS_PEAK_MODULE.DeviceAccessType_Control)
         try:
             remote = dev.RemoteDevice().NodeMaps()[0]
             self._remote_set_exposure(remote, exposure_us)
