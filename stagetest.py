@@ -841,6 +841,7 @@ class CameraWindow(QWidget):
         batch: str = "NoBatch",
         device_index: int = 0,
         label: str = "",
+        spot_detector: LaserSpotDetector | None = None,
     ):
         super().__init__(parent)
         cam_name = (label or f"Cam {device_index}")
@@ -851,7 +852,7 @@ class CameraWindow(QWidget):
         h = QHBoxLayout(self)
 
         # Live view (left) — expand
-        self.detector = LaserSpotDetector()
+        self.detector = spot_detector or LaserSpotDetector()
 
         self.live = CameraController(
             self,
