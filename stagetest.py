@@ -1077,7 +1077,6 @@ class CameraWindow(QWidget):
         batch: str = "NoBatch",
         device_index: int = 0,
         label: str = "",
-        spot_detector=None,
     ):
         super().__init__(parent)
         cam_name = (label or f"Cam {device_index}")
