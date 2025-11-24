@@ -32,7 +32,10 @@ import socket
 import subprocess
 import sys
 import time
+import threading
+from typing import Optional
 
+import cv2
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
@@ -51,10 +54,11 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui     import (
     QPixmap, QPalette, QColor, QFont, QShortcut, QKeySequence,
-    QRegularExpressionValidator, QIcon
+    QRegularExpressionValidator, QIcon, QImage
 )
 
-from ids_camera import CameraController, IDS_PEAK_MODULE
+import gitterschieber as gs
+from ids_camera import IdsCam
 from laser_spot_detection import LaserSpotDetector
 from z_trieb import ZTriebWidget
 
@@ -553,6 +557,60 @@ def make_tile(text: str, icon_path: str, clicked_cb):
     btn.clicked.connect(clicked_cb)
     return btn
 
+
+class LiveCamEmbed(QWidget):
+    """Einfacher Live-Kameraview für BGR/Mono Frames mit Frame-Provider."""
+    def __init__(self, frame_provider, *, interval_ms: int = 200, parent=None):
+        super().__init__(parent)
+        self._frame_provider = frame_provider
+        self._last_frame = None
+        self.label = QLabel("Kein Bild")
+        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setMinimumHeight(320)
+        self.status = QLabel("")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.label)
+        layout.addWidget(self.status)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(interval_ms)
+
+    def last_frame(self):
+        return self._last_frame
+
+    def _tick(self):
+        try:
+            frame = self._frame_provider()
+        except Exception as exc:
+            self.status.setText(f"Kein Frame: {exc}")
+            return
+        if frame is None:
+            self.status.setText("Kein Frame erhalten.")
+            return
+        self._last_frame = frame
+        try:
+            qimg = self._to_qimage(frame)
+            pm = QPixmap.fromImage(qimg)
+            pm = pm.scaled(self.label.width(), self.label.height(), Qt.KeepAspectRatio)
+            self.label.setPixmap(pm)
+            self.status.setText("Livebild aktualisiert.")
+        except Exception as exc:
+            self.status.setText(f"Anzeige-Fehler: {exc}")
+
+    def _to_qimage(self, frame):
+        if frame.ndim == 2:
+            arr = frame
+            if arr.dtype != np.uint8:
+                arr = np.clip(arr.astype(np.float32) / float(arr.max() or 1) * 255.0, 0, 255).astype(np.uint8)
+            h, w = arr.shape
+            return QImage(arr.data, w, h, w, QImage.Format_Grayscale8)
+        if frame.ndim == 3 and frame.shape[2] == 3:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+            return QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+        raise ValueError("Unsupported frame shape.")
+
 # ========================== STAGE ====================================
 # ================================================================
 # Stage Utilities
@@ -830,8 +888,186 @@ class DauertestWorker(QObject):
             })
 
 
+class RealUseTestWorker(QObject):
+    update   = Signal(dict)
+    finished = Signal(dict)
+    error    = Signal(str)
+
+    def __init__(self, sc, *,
+                 x_center: int,
+                 y_center: int,
+                 step_size: int = 1500,
+                 max_radius: int = 8000,
+                 n_moves: int = 300,
+                 dwell: float = 0.2,
+                 raster_loops: int = 3,
+                 batch: str = "NoBatch"):
+        super().__init__()
+        self.sc = sc
+        self.params = {
+            "x_center": int(x_center),
+            "y_center": int(y_center),
+            "step_size": int(step_size),
+            "max_radius": int(max_radius),
+            "n_moves": int(n_moves),
+            "dwell": float(dwell),
+            "raster_loops": int(raster_loops),
+        }
+        self.batch = sanitize_batch(batch)
+
+    def _emit_update(self, phase: str, idx: int, total: int,
+                     target_x: int, target_y: int,
+                     err_um: float | None = None):
+        self.update.emit({
+            "phase": phase,
+            "idx": idx,
+            "total": total,
+            "target_x": target_x,
+            "target_y": target_y,
+            "err_um": err_um if err_um is not None else 0.0,
+            "batch": self.batch,
+        })
+
+    def run(self):
+        try:
+            p = self.params
+            x_center = p["x_center"]
+            y_center = p["y_center"]
+            step_size = p["step_size"]
+            max_radius = p["max_radius"]
+            n_moves = p["n_moves"]
+            dwell = p["dwell"]
+            raster_loops = p["raster_loops"]
+
+            offsets = (-step_size, 0, step_size)
+            raster_total = max(1, raster_loops * len(offsets) * len(offsets))
+
+            # Phase 1: Raster um die Mitte
+            idx = 0
+            for loop in range(1, raster_loops + 1):
+                for dx in offsets:
+                    for dy in offsets:
+                        idx += 1
+                        tx = x_center + dx
+                        ty = y_center + dy
+                        self.sc.move_abs('X', tx)
+                        self.sc.move_abs('Y', ty)
+                        time.sleep(dwell)
+                        # Fehlerabschätzung in µm
+                        ex_enc = self.sc.enc('X')
+                        ey_enc = self.sc.enc('Y')
+                        spm_x = self.sc.steps_per_m['X']
+                        spm_y = self.sc.steps_per_m['Y']
+                        epm_x = self.sc.enc_per_m['X']
+                        epm_y = self.sc.enc_per_m['Y']
+                        err_um = max(abs(ex_enc/epm_x - tx/spm_x),
+                                     abs(ey_enc/epm_y - ty/spm_y)) * 1e6
+                        self._emit_update("raster", idx, raster_total, tx, ty, err_um)
+
+            # Phase 2: Random-Hops
+            for hop in range(1, n_moves + 1):
+                dx = int(np.random.randint(-max_radius, max_radius + 1))
+                dy = int(np.random.randint(-max_radius, max_radius + 1))
+                tx = x_center + dx
+                ty = y_center + dy
+                self.sc.move_abs('X', tx)
+                self.sc.move_abs('Y', ty)
+                time.sleep(dwell)
+                ex_enc = self.sc.enc('X')
+                ey_enc = self.sc.enc('Y')
+                spm_x = self.sc.steps_per_m['X']
+                spm_y = self.sc.steps_per_m['Y']
+                epm_x = self.sc.enc_per_m['X']
+                epm_y = self.sc.enc_per_m['Y']
+                err_um = max(abs(ex_enc/epm_x - tx/spm_x),
+                             abs(ey_enc/epm_y - ty/spm_y)) * 1e6
+                self._emit_update("random", hop, n_moves, tx, ty, err_um)
+
+            # Phase 3: zurück zur Mitte
+            self.sc.move_abs('X', x_center)
+            self.sc.move_abs('Y', y_center)
+            time.sleep(dwell)
+            ex_enc = self.sc.enc('X')
+            ey_enc = self.sc.enc('Y')
+            spm_x = self.sc.steps_per_m['X']
+            spm_y = self.sc.steps_per_m['Y']
+            epm_x = self.sc.enc_per_m['X']
+            epm_y = self.sc.enc_per_m['Y']
+            err_um = max(abs(ex_enc/epm_x - x_center/spm_x),
+                         abs(ey_enc/epm_y - y_center/spm_y)) * 1e6
+            self._emit_update("center", 1, 1, x_center, y_center, err_um)
+
+            self.finished.emit({
+                "batch": self.batch,
+                "total_moves": raster_total + n_moves + 1,
+                "max_radius": max_radius,
+            })
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
 # ========================== AUTOFOCUS ================================
 # ================================================================
+# IDS Live-View (mit Geraeteindex)
+class CameraController(QLabel):
+    """Qt live-view controller built on IdsCam."""
+
+    centerChanged = Signal(int, int)
+    frameReady = Signal(object, int, int)  # emits (bytes, width, height)
+
+    def __init__(self, parent=None, *, device_index: int = 0, accent_color: str = "#ff2740"):
+        super().__init__(parent)
+        self.setScaledContents(True)
+        self.accent_color = accent_color or "#ff2740"
+
+        self.device_index = int(device_index)
+        self.cam = IdsCam(index=device_index)
+        self._timer: Optional[QTimer] = QTimer(self)
+        self._timer.timeout.connect(self._on_tick)
+        self._timer.start(0)
+
+        self._last_centroid: Optional[tuple[int, int]] = None
+        self._img_w: Optional[int] = None
+        self._img_h: Optional[int] = None
+
+        self.pixel_size_um: Optional[float] = self.cam.pixel_size_um
+        self.sensor_width_px: Optional[int] = self.cam.width
+        self.sensor_height_px: Optional[int] = self.cam.height
+
+    @property
+    def is_dummy(self) -> bool:
+        return bool(getattr(self.cam, "_dummy", False))
+
+    def get_exposure_limits_us(self) -> tuple[float, float, float]:
+        """Expose camera exposure limits for the UI."""
+        return self.cam.get_exposure_limits_us()
+
+    def _on_tick(self) -> None:
+        frame = self.cam.aquise_frame()
+        if frame is None:
+            return
+        h, w = frame.shape
+        self._img_w, self._img_h = w, h
+        self.sensor_width_px, self.sensor_height_px = w, h
+        self.pixel_size_um = self.cam.pixel_size_um
+        self.frameReady.emit(frame.tobytes(), w, h)
+
+    def set_exposure_us(self, val_us: float) -> None:
+        self.cam.set_exposure_us(val_us)
+
+    def update_centroid(self, cx: int, cy: int) -> None:
+        self._last_centroid = (int(cx), int(cy))
+        self.centerChanged.emit(int(cx), int(cy))
+
+    def display_frame(self, qimg: QImage) -> None:
+        self.setPixmap(QPixmap.fromImage(qimg))
+
+    def close(self) -> None:
+        if self._timer:
+            self._timer.stop()
+        self.cam.shutdown()
+        super().close()
+
 # IDS Live-View (mit Geräteindex)
 # ================================================================
 class CameraWindow(QWidget):
@@ -841,6 +1077,7 @@ class CameraWindow(QWidget):
         batch: str = "NoBatch",
         device_index: int = 0,
         label: str = "",
+        spot_detector=None,
     ):
         super().__init__(parent)
         cam_name = (label or f"Cam {device_index}")
@@ -851,7 +1088,7 @@ class CameraWindow(QWidget):
         h = QHBoxLayout(self)
 
         # Live view (left) — expand
-        self.detector = LaserSpotDetector()
+        self.detector = spot_detector or LaserSpotDetector()
 
         self.live = CameraController(
             self,
@@ -1029,6 +1266,7 @@ class CameraWindow(QWidget):
         except Exception:
             pass
 
+
 # ================================================================
 # Plot Widget
 # ================================================================
@@ -1070,6 +1308,7 @@ class StageGUI(QWidget):
         self.sc=StageController()
         self.plot=None
         self._cam_windows=[]
+        self._gitterschieber_windows=[]
         self._batch="NoBatch"; self._dauer_running=False
         self._duration_sec = 15 * 3600  # Default 15h
         self._run_outdir: pathlib.Path | None = None
@@ -1077,9 +1316,12 @@ class StageGUI(QWidget):
         self._meas_max_um = None
         self._dur_max_um  = None
         self._calib_vals  = {"X": None, "Y": None}
+        self._real_use_total: int | None = None
+        self._real_use_raster_total: int = 0
         self._warned_camera_sim = False
         self.statusBar: QLabel | None = None
         self._pending_status: str | None = None
+        self._af_cam = None
 
         # Neu: Zielkamera für Exposure-UI (wird nur für Fallback genutzt)
         self._expo_target_idx = 0
@@ -1088,8 +1330,6 @@ class StageGUI(QWidget):
         sim_msgs = []
         if getattr(pmac, "is_simulated", False):
             sim_msgs.append("Stage-Steuerung im Simulationsmodus (keine PMAC-Verbindung).")
-        if IDS_PEAK_MODULE is None:
-            sim_msgs.append("IDS-Kameras nicht verfügbar – LiveView zeigt Demo-Daten.")
         if sim_msgs:
             self._set_status(" ".join(sim_msgs))
 
@@ -1098,6 +1338,16 @@ class StageGUI(QWidget):
         self.setWindowTitle("Stage-Toolbox")
         self._apply_initial_size()
         root = QVBoxLayout(self); root.setContentsMargins(18,18,18,12); root.setSpacing(14)
+
+        def add_back_btn(container_layout):
+            """Helper: adds a 'Zurück zum Workflow' button to the given layout."""
+            btn = QPushButton("Zurück zum Workflow")
+            btn.setMinimumHeight(32)
+            btn.clicked.connect(self._show_stage_workflow)
+            row = QHBoxLayout()
+            row.addWidget(btn)
+            row.addStretch(1)
+            container_layout.addLayout(row)
 
         # Header
         header = QHBoxLayout(); header.setSpacing(10)
@@ -1123,6 +1373,11 @@ class StageGUI(QWidget):
         self.btnLiveViewTab.setMinimumHeight(32)
         self.btnLiveViewTab.clicked.connect(self._open_live_view)
         header.addWidget(self.btnLiveViewTab)
+
+        self.btnWorkflowHome = QPushButton("Workflow")
+        self.btnWorkflowHome.setMinimumHeight(32)
+        self.btnWorkflowHome.clicked.connect(self._show_stage_workflow)
+        header.addWidget(self.btnWorkflowHome)
 
         # Debounce timer for live search (singleShot)
         self._search_timer = QTimer(self)
@@ -1169,10 +1424,12 @@ class StageGUI(QWidget):
         self.btnAutofocusTile = make_tile("Autofocus", af_img, self._open_autofocus_workflow)
         self.btnLaserTile = make_tile("Laserscan Modul", laser_img, self._open_laserscan_workflow)
         self.btnZTriebTile = make_tile("Z-Trieb", laser_img, self._open_ztrieb_workflow)
+        self.btnGitterschieberTile = make_tile("Gitterschieber", stage_img, self._open_gitterschieber)
         tiles.addWidget(self.btnStageTile)
         tiles.addWidget(self.btnAutofocusTile)
         tiles.addWidget(self.btnLaserTile)
         tiles.addWidget(self.btnZTriebTile)
+        tiles.addWidget(self.btnGitterschieberTile)
         tiles.addStretch(1)
         self.workflowCard.body.addLayout(tiles)
 
@@ -1210,14 +1467,16 @@ class StageGUI(QWidget):
 
         self.btnStart = QPushButton("▶  Test starten  (Ctrl+R)"); self.btnStart.clicked.connect(self._start_test)
         self.btnDauer = QPushButton("⏱️  Dauertest starten  (Ctrl+D)"); self.btnDauer.clicked.connect(self._toggle_dauertest)
+        self.btnRealUseTest = QPushButton("Real-Use-Test"); self.btnRealUseTest.clicked.connect(self._start_real_use_test)
         self.btnOpenFolder = QPushButton("📂 Ordner öffnen"); self.btnOpenFolder.setEnabled(False); self.btnOpenFolder.clicked.connect(self._open_folder)
         self.btnKleberoboter = QPushButton("Datenbank Senden"); self.btnKleberoboter.clicked.connect(self._trigger_kleberoboter)
 
-        for b in (self.btnStart, self.btnDauer, self.btnOpenFolder, self.btnKleberoboter):
+        for b in (self.btnStart, self.btnDauer, self.btnRealUseTest, self.btnOpenFolder, self.btnKleberoboter):
             b.setMinimumHeight(36)
 
         self.cardActions.body.addWidget(self.btnStart)
         self.cardActions.body.addWidget(self.btnDauer)
+        self.cardActions.body.addWidget(self.btnRealUseTest)
         self.cardActions.body.addWidget(self.btnOpenFolder)
         self.cardActions.body.addWidget(self.btnKleberoboter)
 
@@ -1279,10 +1538,38 @@ class StageGUI(QWidget):
 
         self.stack.addWidget(self.stagePage)
 
+        # ===================== Gitterschieber Seite =====================
+        self.gitterschieberPage = QWidget()
+        gsLayout = QVBoxLayout(self.gitterschieberPage)
+        gsLayout.setContentsMargins(0, 0, 0, 0); gsLayout.setSpacing(14)
+
+        gsCard = Card("Gitterschieber")
+        gsLayout.addWidget(gsCard, 1)
+
+        # Gemeinsames Kamerafenster + Aktionen
+        self.gitterschieber_status = QLabel("")
+        cam_provider = lambda: gs.capture_frame()
+        self.gitterschieberCam = LiveCamEmbed(cam_provider, interval_ms=200, parent=self.gitterschieberPage)
+        gsCard.body.addWidget(self.gitterschieberCam)
+
+        btn_bar = QHBoxLayout()
+        btn_particle = QPushButton("Partikelanalyse")
+        btn_angle = QPushButton("Winkel-Detektion")
+        btn_particle.clicked.connect(self._on_gitterschieber_particles)
+        btn_angle.clicked.connect(self._on_gitterschieber_angle)
+        btn_bar.addWidget(btn_particle)
+        btn_bar.addWidget(btn_angle)
+        gsCard.body.addLayout(btn_bar)
+        gsCard.body.addWidget(self.gitterschieber_status)
+
+        gsLayout.addStretch(1)
+        self.stack.addWidget(self.gitterschieberPage)
+
         # ===================== Autofocus Seite =====================
         self.autofocusPage = QWidget()
         autoLayout = QVBoxLayout(self.autofocusPage)
         autoLayout.setContentsMargins(0,0,0,0); autoLayout.setSpacing(14)
+        add_back_btn(autoLayout)
 
         autoHero = Card("Autofocus")
         autoLayout.addWidget(autoHero)
@@ -1293,6 +1580,13 @@ class StageGUI(QWidget):
         else:
             autoHeroImg.setText("Autofocus Kamera")
         autoHero.body.addWidget(autoHeroImg, 0, Qt.AlignCenter)
+
+        # Gemeinsames Kamerafenster oben
+        try:
+            self.autofocusCam = LiveCamEmbed(self._af_frame_provider, interval_ms=200, parent=self.autofocusPage)
+            autoLayout.addWidget(self.autofocusCam)
+        except Exception as exc:
+            autoLayout.addWidget(QLabel(f"Kamera nicht verfügbar: {exc}"))
 
         camCard = Card("Kamera Funktionen")
         autoLayout.addWidget(camCard)
@@ -1356,6 +1650,7 @@ class StageGUI(QWidget):
         self.laserscanPage = QWidget()
         laserLayout = QVBoxLayout(self.laserscanPage)
         laserLayout.setContentsMargins(0,0,0,0); laserLayout.setSpacing(14)
+        add_back_btn(laserLayout)
 
         laserHero = Card("Laserscan Modul")
         laserLayout.addWidget(laserHero)
@@ -1388,6 +1683,7 @@ class StageGUI(QWidget):
         zLayout = QVBoxLayout(self.ztriebPage)
         zLayout.setContentsMargins(0, 0, 0, 0)
         zLayout.setSpacing(14)
+        add_back_btn(zLayout)
         self.ztriebWidget = ZTriebWidget(self)
         zLayout.addWidget(self.ztriebWidget)
         self.stack.addWidget(self.ztriebPage)
@@ -1397,15 +1693,25 @@ class StageGUI(QWidget):
         liveLayout = QVBoxLayout(self.liveViewPage)
         liveLayout.setContentsMargins(0, 0, 0, 0)
         liveLayout.setSpacing(14)
+        add_back_btn(liveLayout)
 
         liveCard = Card("Live View · Produktions-Dashboard")
         liveLayout.addWidget(liveCard, 1)
         self._dashboard_widget = None
+        self._dashboard_scroll = None
         if DASHBOARD_WIDGET_CLS is not None:
             try:
                 self._dashboard_widget = DASHBOARD_WIDGET_CLS()
                 self._dashboard_widget.setMinimumHeight(400)
-                liveCard.body.addWidget(self._dashboard_widget)
+                self._dashboard_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                scroll = QScrollArea()
+                scroll.setWidgetResizable(True)
+                scroll.setFrameShape(QFrame.NoFrame)
+                scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+                scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+                scroll.setWidget(self._dashboard_widget)
+                self._dashboard_scroll = scroll
+                liveCard.body.addWidget(scroll, 1)
             except Exception as exc:
                 msg = QLabel(
                     f"Dashboard konnte nicht geladen werden:\n{exc}"
@@ -1493,15 +1799,67 @@ class StageGUI(QWidget):
             try:
                 self._dashboard_widget = DASHBOARD_WIDGET_CLS()
                 self._dashboard_widget.setMinimumHeight(400)
+                self._dashboard_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
                 layout = self.liveViewPage.layout()
                 if layout and layout.count() > 0:
                     card = layout.itemAt(0).widget()
                     if isinstance(card, Card):
-                        card.body.addWidget(self._dashboard_widget)
+                        scroll = QScrollArea()
+                        scroll.setWidgetResizable(True)
+                        scroll.setFrameShape(QFrame.NoFrame)
+                        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+                        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+                        scroll.setWidget(self._dashboard_widget)
+                        self._dashboard_scroll = scroll
+                        card.body.addWidget(scroll, 1)
             except Exception as exc:
                 self._set_status(f"Dashboard-Start fehlgeschlagen: {exc}")
                 return
         self._set_status("Live View – Produktions-Dashboard geöffnet.")
+
+    def _open_gitterschieber(self):
+        """
+        Gitterschieber-Workflow innerhalb der Stage-Toolbox anzeigen.
+        """
+        try:
+            self.stack.setCurrentWidget(self.gitterschieberPage)
+            self._set_status("Gitterschieber geöffnet.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Gitterschieber", f"Start fehlgeschlagen:\n{exc}")
+
+    def _on_gitterschieber_particles(self):
+        try:
+            frame = self.gitterschieberCam.last_frame() or gs.capture_frame()
+            if frame is None:
+                self.gitterschieber_status.setText("Kein Bild verfügbar.")
+                return
+            gs.process_image(frame.copy())
+            self.gitterschieber_status.setText("Partikelanalyse durchgeführt.")
+        except Exception as exc:
+            self.gitterschieber_status.setText(f"Fehler: {exc}")
+
+    def _on_gitterschieber_angle(self):
+        try:
+            frame = self.gitterschieberCam.last_frame() or gs.capture_frame()
+            if frame is None:
+                self.gitterschieber_status.setText("Kein Bild verfügbar.")
+                return
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            angle = gs.SingleImageGratingAngle(gray)
+            self.gitterschieber_status.setText(f"Winkel: {angle:.3f}°")
+        except Exception as exc:
+            self.gitterschieber_status.setText(f"Fehler: {exc}")
+
+    def _af_frame_provider(self):
+        """Frame-Provider für Autofocus-Kamerakarte."""
+        try:
+            if self._af_cam is None:
+                self._af_cam = IdsCam(index=0, set_min_exposure=False)
+            frame = self._af_cam.aquise_frame()
+            return frame
+        except Exception as exc:
+            print("[WARN] Autofocus-Kamera nicht verfügbar:", exc)
+            return None
 
     # ---------- Helpers ----------
     def _reset_progress(self):
@@ -1704,17 +2062,6 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
 
     def _open_cam_idx(self, idx: int, label: str):
         self._acquire_batch()
-        if IDS_PEAK_MODULE is not None:
-            try:
-                dm = IDS_PEAK_MODULE.DeviceManager.Instance(); dm.Update()
-                if idx >= len(dm.Devices()):
-                    QMessageBox.warning(self, "Kamera", f"Keine Kamera am Index {idx} gefunden. ({label})")
-                    return
-            except Exception as exc:
-                print("[WARN] Kamera-Check fehlgeschlagen:", exc)
-        elif not self._warned_camera_sim:
-            QMessageBox.information(self, "Kamera", "IDS-Kameras nicht verfügbar – öffne Demo-Fenster.")
-            self._warned_camera_sim = True
         try:
             detector = LaserSpotDetector()
             win = CameraWindow(
@@ -1724,7 +2071,9 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
                 label=label,
                 spot_detector=detector,
             )
-            # Exposure beim Öffnen: aktueller UI-Wert (oder Slider-Minimum)
+            if getattr(win, "live", None) and getattr(win.live, "is_dummy", False) and not self._warned_camera_sim:
+                QMessageBox.information(self, "Kamera", "IDS-Kameras nicht verfuegbar - oeffne Demo-Fenster.")
+                self._warned_camera_sim = True
             try:
                 us = int(self.sliderExpo.value())
                 if us <= 0:
@@ -1738,19 +2087,94 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
                 win.live.centerChanged.connect(self._on_live_center_changed)
             except Exception:
                 pass
-            self._set_status(f"Kamera geöffnet: {label} (Index {idx})")
-            # Exposure-UI ggf. aus Live-Remote initialisieren (damit Slider/Min/Max passen)
+            self._set_status(f"Kamera geoeffnet: {label} (Index {idx})")
             try:
-                remote = getattr(win.live, "remote", None)
-                if remote is not None:
-                    self._init_exposure_ui_from_remote(remote)
-                else:
-                    self._init_default_exposure_ui()
-            except Exception as e:
-                print("[WARN] Konnte Exposure-UI nicht aus Live-Remote initialisieren:", e)
-        except SystemExit as e:
-            QMessageBox.critical(self,"Kamera",str(e))
+                cur, mn, mx = win.live.get_exposure_limits_us()
+                self._init_exposure_ui_from_limits(cur_us=cur, min_us=mn, max_us=mx)
+            except Exception:
+                self._init_default_exposure_ui()
+        except Exception as exc:
+            self._err(str(exc))
 
+    # ---------- Real-Use-Test ----------
+    def _start_real_use_test(self):
+        try:
+            x_center, y_center, _ = get_current_pos()
+        except Exception as exc:
+            QMessageBox.warning(self, "Real-Use-Test", f"Referenzposition konnte nicht gelesen werden:\n{exc}")
+            return
+
+        raster_loops = 3
+        raster_total = raster_loops * 3 * 3
+        total_moves = raster_total + 300 + 1
+        self._real_use_raster_total = raster_total
+        self._real_use_total = total_moves
+
+        self.btnRealUseTest.setEnabled(False)
+        self.btnDauer.setEnabled(False)
+        self.btnStart.setEnabled(False)
+
+        self.lblPhase.setText("Real-Use-Test")
+        self.pbar.setMaximum(total_moves)
+        self.pbar.setValue(0)
+        self.pbar.setFormat(f"Real-Use-Test: 0 / {total_moves} (0%)")
+        self._set_status(f"Real-Use-Test läuft (Mitte {x_center}, {y_center})…")
+
+        self.real_use_thread = QThread()
+        self.real_use_worker = RealUseTestWorker(
+            self.sc,
+            x_center=x_center,
+            y_center=y_center,
+            step_size=1500,
+            max_radius=8000,
+            n_moves=300,
+            dwell=0.2,
+            raster_loops=raster_loops,
+            batch=self._batch,
+        )
+        self.real_use_worker.moveToThread(self.real_use_thread)
+        self.real_use_thread.started.connect(self.real_use_worker.run)
+        self.real_use_worker.update.connect(self._real_use_progress)
+        self.real_use_worker.finished.connect(self._real_use_done)
+        self.real_use_worker.error.connect(self._real_use_error)
+        self.real_use_worker.finished.connect(lambda *_: self.real_use_thread.quit())
+        self.real_use_worker.error.connect(lambda *_: self.real_use_thread.quit())
+        self.real_use_thread.start()
+
+    def _real_use_progress(self, data: dict):
+        phase = data.get("phase", "—")
+        idx = int(data.get("idx", 0))
+        total = int(data.get("total", 1))
+        err_um = float(data.get("err_um", 0.0))
+
+        if phase == "raster":
+            overall = idx
+        elif phase == "random":
+            overall = self._real_use_raster_total + idx
+        else:
+            overall = self._real_use_total or idx
+
+        if self._real_use_total:
+            self.pbar.setMaximum(self._real_use_total)
+            self.pbar.setValue(min(overall, self._real_use_total))
+            pct = int(round(100 * self.pbar.value() / max(1, self._real_use_total)))
+            self.pbar.setFormat(f"Real-Use-Test: {self.pbar.value()} / {self._real_use_total} ({pct}%)")
+        self.lblPhase.setText(f"Real-Use-Test · {phase} · Fehler {err_um:.2f} µm")
+
+    def _real_use_done(self, info: dict):
+        self._set_status("Real-Use-Test abgeschlossen.")
+        self.lblPhase.setText("Real-Use-Test fertig")
+        self.btnRealUseTest.setEnabled(True)
+        self.btnDauer.setEnabled(True)
+        self.btnStart.setEnabled(True)
+        self._reset_progress()
+
+    def _real_use_error(self, msg: str):
+        QMessageBox.warning(self, "Real-Use-Test", f"Fehler:\n{msg}")
+        self.btnRealUseTest.setEnabled(True)
+        self.btnDauer.setEnabled(True)
+        self.btnStart.setEnabled(True)
+        self._set_status("Real-Use-Test fehlgeschlagen.")
     # ---------- Dauertest ----------
     def _toggle_dauertest(self):
         if self._dauer_running:
@@ -2242,129 +2666,79 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             except: pass
 
     def _init_default_exposure_ui(self, cur_us: int = 2000, min_us: int = 50, max_us: int = 200000):
+        self._init_exposure_ui_from_limits(cur_us, min_us, max_us, status_prefix="Exposure (Demo)")
+
+    def _init_exposure_ui_from_limits(self, cur_us: float, min_us: float, max_us: float, *, status_prefix: str = "Exposure"):
         cur_us = int(max(min_us, min(max_us, cur_us)))
         self.sliderExpo.blockSignals(True)
         self.spinExpo.blockSignals(True)
-        self.sliderExpo.setMinimum(min_us)
-        self.sliderExpo.setMaximum(max_us)
-        self.sliderExpo.setValue(cur_us)
-        self.spinExpo.setMinimum(min_us / 1000.0)
-        self.spinExpo.setMaximum(max_us / 1000.0)
-        self.spinExpo.setValue(cur_us / 1000.0)
+        self.sliderExpo.setMinimum(int(min_us))
+        self.sliderExpo.setMaximum(int(max_us))
+        self.sliderExpo.setValue(int(cur_us))
+        self.spinExpo.setMinimum(float(min_us) / 1000.0)
+        self.spinExpo.setMaximum(float(max_us) / 1000.0)
+        self.spinExpo.setValue(float(cur_us) / 1000.0)
         self.sliderExpo.blockSignals(False)
         self.spinExpo.blockSignals(False)
-        self._set_status(f"Exposure (Demo): {cur_us/1000.0:.3f} ms")
+        self._set_status(f"{status_prefix}: {cur_us/1000.0:.3f} ms (Range {min_us/1000.0:.3f}-{max_us/1000.0:.3f} ms)")
 
     def _init_exposure_ui_from_device(self, device_index: int):
-        """Liest Limits & aktuellen Wert. Nutzt Live-Remote wenn Fenster offen, sonst kurzzeitig öffnen."""
-        if IDS_PEAK_MODULE is None:
+        """Initialize exposure UI from an IdsCam instance or open live view."""
+        live = self._get_live_controller_if_open(device_index)
+        if live is not None:
+            cur, mn, mx = live.get_exposure_limits_us()
+            self._init_exposure_ui_from_limits(cur, mn, mx)
+            return
+        try:
+            cam = IdsCam(index=device_index, set_min_exposure=False)
+        except Exception as exc:
+            print(f"[WARN] Exposure-Init (device {device_index}): {exc}")
             self._init_default_exposure_ui()
             return
-        remote = self._get_live_remote_if_open(device_index)
-        if remote is not None:
-            self._init_exposure_ui_from_remote(remote)
-            return
-        # ephemeres Öffnen
         try:
-            dm = IDS_PEAK_MODULE.DeviceManager.Instance(); dm.Update()
-        except Exception:
-            IDS_PEAK_MODULE.Library.Initialize()
-            dm = IDS_PEAK_MODULE.DeviceManager.Instance(); dm.Update()
-        devs = dm.Devices()
-        if not devs or device_index >= len(devs):
-            raise RuntimeError(f"Keine Kamera am Index {device_index} gefunden.")
-        dev = devs[device_index].OpenDevice(IDS_PEAK_MODULE.DeviceAccessType_Control)
-        try:
-            remote = dev.RemoteDevice().NodeMaps()[0]
-            self._init_exposure_ui_from_remote(remote)
+            cur, mn, mx = cam.get_exposure_limits_us()
+            self._init_exposure_ui_from_limits(cur, mn, mx)
+        except Exception as exc:
+            print(f"[WARN] Exposure-Init (device {device_index}): {exc}")
+            self._init_default_exposure_ui()
         finally:
-            try: dev.Close()
-            except: pass
-
-    def _init_exposure_ui_from_remote(self, remote):
-        # Auto aus, sofern vorhanden
-        for node_name, entry in [("ExposureAuto", "Off"), ("ExposureMode", "Timed")]:
-            try: remote.FindNode(node_name).SetCurrentEntry(entry)
-            except: pass
-        # Exposure-Knoten finden (robust gegen Namensvarianten)
-        node = None
-        for name in ("ExposureTime", "ExposureTimeAbs", "ExposureTimeUs"):
             try:
-                n = remote.FindNode(name)
-                _ = n.Value()  # Zugriff testen
-                node = n
-                break
-            except:
-                node = None
-        if node is None:
-            raise RuntimeError("ExposureTime-Knoten nicht gefunden.")
+                cam.shutdown()
+            except Exception:
+                pass
 
-        # Limits + aktueller Wert
-        try:
-            min_us = int(max(1, round(node.Minimum())))
-            max_us = int(round(node.Maximum()))
-        except:
-            min_us, max_us = 50, 200000  # Fallback 0.05–200 ms
-
-        try:
-            cur_us = int(round(node.Value()))
-        except:
-            cur_us = min_us
-
-        # UI setzen
-        self.sliderExpo.blockSignals(True)
-        self.spinExpo.blockSignals(True)
-
-        self.sliderExpo.setMinimum(min_us)
-        self.sliderExpo.setMaximum(max_us)
-        self.sliderExpo.setValue(cur_us)
-
-        self.spinExpo.setMinimum(min_us/1000.0)
-        self.spinExpo.setMaximum(max_us/1000.0)
-        self.spinExpo.setValue(cur_us/1000.0)
-
-        self.sliderExpo.blockSignals(False)
-        self.spinExpo.blockSignals(False)
-
-        self._set_status(f"Exposure: {cur_us/1000.0:.3f} ms (Range {min_us/1000.0:.3f}–{max_us/1000.0:.3f} ms)")
-
-    def _get_live_remote_if_open(self, device_index: int):
-        for win in list(self._cam_windows):
+    def _get_live_controller_if_open(self, device_index: int):
+        for win in list(getattr(self, "_cam_windows", [])):
             try:
                 live = getattr(win, "live", None)
-                if live and live.device_index == device_index and hasattr(live, "remote"):
-                    return live.remote
-            except:
+                if live and getattr(live, "device_index", None) == device_index:
+                    return live
+            except Exception:
                 continue
         return None
 
     def _apply_exposure_to_device(self, device_index: int, exposure_us: int):
-        """Setzt Exposure. Nutzt Live-Remote, sonst ephemeres Öffnen."""
-        if IDS_PEAK_MODULE is None:
+        """Set exposure on a device even when no live window is open."""
+        live = self._get_live_controller_if_open(device_index)
+        if live is not None:
+            live.set_exposure_us(int(exposure_us))
+            return
+        try:
+            cam = IdsCam(index=device_index, set_min_exposure=False)
+        except Exception as exc:
             self._set_status(f"Exposure (Demo) gespeichert: {exposure_us/1000.0:.3f} ms")
-            return
-        remote = self._get_live_remote_if_open(device_index)
-        if remote is not None:
-            self._remote_set_exposure(remote, exposure_us)
+            print(f"[WARN] Exposure-Kamera nicht verfuegbar: {exc}")
             return
         try:
-            dm = IDS_PEAK_MODULE.DeviceManager.Instance(); dm.Update()
-        except Exception:
-            IDS_PEAK_MODULE.Library.Initialize()
-            dm = IDS_PEAK_MODULE.DeviceManager.Instance(); dm.Update()
-        devs = dm.Devices()
-        if not devs or device_index >= len(devs):
-            print(f"[WARN] Keine Kamera am Index {device_index} gefunden.")
-            return
-        dev = devs[device_index].OpenDevice(IDS_PEAK_MODULE.DeviceAccessType_Control)
-        try:
-            remote = dev.RemoteDevice().NodeMaps()[0]
-            self._remote_set_exposure(remote, exposure_us)
-        except Exception as e:
-            print("[WARN] Exposure setzen fehlgeschlagen:", e)
+            cam.set_exposure_us(int(exposure_us))
+            self._set_status(f"Exposure gesetzt: {exposure_us/1000.0:.3f} ms")
+        except Exception as exc:
+            print(f"[WARN] Exposure setzen fehlgeschlagen: {exc}")
         finally:
-            try: dev.Close()
-            except: pass
+            try:
+                cam.shutdown()
+            except Exception:
+                pass
 
     def _apply_exposure_to_open_windows(self, exposure_us: int):
         """Wendet die Exposure-Einstellung auf alle aktuell offenen Kamerafenster an."""
@@ -2375,32 +2749,6 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             except Exception as e:
                 print("[WARN] Could not apply exposure to open window:", e)
 
-    def _remote_set_exposure(self, remote, exposure_us: int):
-        try: remote.FindNode("ExposureAuto").SetCurrentEntry("Off")
-        except: pass
-        node = None
-        for name in ("ExposureTime", "ExposureTimeAbs", "ExposureTimeUs"):
-            try:
-                n = remote.FindNode(name)
-                _ = n.Value()
-                node = n
-                break
-            except:
-                continue
-        if node is None:
-            raise RuntimeError("ExposureTime-Knoten nicht gefunden.")
-        try:
-            mn = int(max(1, round(node.Minimum())))
-            mx = int(round(node.Maximum()))
-            exposure_us = int(min(mx, max(mn, exposure_us)))
-        except:
-            pass
-        try:
-            node.SetValue(float(exposure_us))
-            self._set_status(f"Exposure gesetzt: {exposure_us/1000.0:.3f} ms")
-        except Exception as e:
-            print("[WARN] Exposure SetValue fehlgeschlagen:", e)
-
 # ================================================================
 # MAIN
 # ================================================================
@@ -2409,3 +2757,4 @@ if __name__=="__main__":
     apply_dark_theme(app)
     gui=StageGUI(); gui.show()
     sys.exit(app.exec())
+

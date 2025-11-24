@@ -1,339 +1,324 @@
-"""Lightweight wrapper around IDS peak cameras for the Stage-Toolbox."""
+"""Minimal IDS peak camera wrapper with optional live streaming helper."""
 
 from __future__ import annotations
 
 import ctypes
-import math
+import time
+import threading
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import QLabel
 
+"""
+Requires the IDS peak SDK (including the Python bindings) to be installed
+for real camera operation: https://en.ids-imaging.com/ids-peak-sdk.html
+"""
 try:
-    from ids_peak import ids_peak as _ids_peak_module
+    from ids_peak import ids_peak as _ids_peak
     IDS_PEAK_AVAILABLE = True
-    IDS_PEAK_IMPORT_ERROR = None
-except Exception as exc:  # pragma: no cover - hardware SDK optional
-    _ids_peak_module = None
+    IDS_PEAK_IMPORT_ERROR: Optional[Exception] = None
+except Exception as exc:
+    _ids_peak = None
     IDS_PEAK_AVAILABLE = False
     IDS_PEAK_IMPORT_ERROR = exc
-    print(f"[INFO] IDS peak SDK nicht verfügbar ({exc}); LiveView verwendet Demo-Bilder.")
-
-IDS_PEAK_MODULE = _ids_peak_module
 
 
-class CameraController(QLabel):
-    """Live-view QLabel that handles IDS peak cameras and a simulation fallback."""
+class IdsCam:
+    """
+    Minimal IDS peak camera wrapper.
 
-    centerChanged = Signal(int, int)
-    frameReady = Signal(object, int, int)  # emits (bytes, width, height)
+    - Auto-initializes IDS peak when available
+    - Selects Mono12 if supported (else Mono8)
+    - Sets max resolution and (optionally) minimum exposure
+    - Starts acquisition immediately
 
-    def __init__(
-        self,
-        parent=None,
-        *,
-        device_index: int = 0,
-        ids_peak_module=None,
-        accent_color: str = "#ff2740",
-    ):
-        super().__init__(parent)
-        self.setScaledContents(True)
+    If the SDK is missing or no camera is found, the class falls back to
+    a dummy mode and returns synthetic black frames instead of raising.
+    """
 
-        # External dependencies & configuration
-        self.device_index = int(device_index)
-        self._ids_peak = ids_peak_module if ids_peak_module is not None else _ids_peak_module
-        self.accent_color = accent_color or "#ff2740"
-
-        # Runtime state (shared between real & dummy modes)
-        self.pixel_size_um: Optional[float] = None
-        self.sensor_width_px: Optional[int] = None
-        self.sensor_height_px: Optional[int] = None
-        self._img_w: Optional[int] = None
-        self._img_h: Optional[int] = None
-        self._timer: Optional[QTimer] = None
-        self._dummy_mode = False
-        self._dummy_tick = 0
-        self._dummy_exposure_us = 2000
-        self._last_centroid: Optional[tuple[int, int]] = None
-
+    def __init__(self, index: int = 0, *, set_min_exposure: bool = True) -> None:
+        """
+        Parameters
+        ----------
+        index : int
+            Camera index in the IDS DeviceManager (ignored in dummy mode).
+        set_min_exposure : bool
+            If True, exposure is forced to the minimum on init. Disable when
+            you only want to query limits without touching the camera.
+        """
+        self.index = index
+        self.dev = None
+        self.remote = None
+        self.ds = None
+        self.buf = None
+        self.width = 0
+        self.height = 0
+        self.pixel_size_um = None
+        self.pixel_format = "Mono8"
+        self._dummy = False
+        self._set_min_exposure_on_init = bool(set_min_exposure)
+        self._exposure_us: float | None = None
         self._init_camera()
 
-    @property
-    def is_dummy(self) -> bool:
-        return bool(self._dummy_mode)
-
-    # ------------------------------------------------------------------
-    # Initialisation helpers
-    # ------------------------------------------------------------------
     def _init_camera(self) -> None:
-        """Connect to a real IDS camera, otherwise fall back to the dummy pipeline."""
-        p = self._ids_peak
-        if p is None:
-            self._init_dummy_pipeline("IDS peak SDK nicht verfügbar.")
+        """Initialize real IDS camera if possible, otherwise switch to dummy mode."""
+        if _ids_peak is None:
+            self._init_dummy("IDS peak SDK not available")
             return
         try:
-            p.Library.Initialize()
-            dm = p.DeviceManager.Instance()
+            _ids_peak.Library.Initialize()
+            dm = _ids_peak.DeviceManager.Instance()
             dm.Update()
             devs = dm.Devices()
             if not devs:
-                raise RuntimeError("Keine IDS-Kamera gefunden.")
-            idx = max(0, min(self.device_index, len(devs) - 1))
-            self.dev = devs[idx].OpenDevice(p.DeviceAccessType_Control)
+                self._init_dummy("no IDS camera found")
+                return
+
+            self.dev = devs[self.index].OpenDevice(_ids_peak.DeviceAccessType_Control)
             self.remote = self.dev.RemoteDevice().NodeMaps()[0]
 
-            for node, entry in [
-                ("AcquisitionMode", "Continuous"),
-                ("TriggerSelector", "FrameStart"),
-                ("TriggerMode", "Off"),
-                ("PixelFormat", "Mono8"),
-            ]:
-                try:
-                    self.remote.FindNode(node).SetCurrentEntry(entry)
-                except Exception:
-                    pass
+            self.pixel_format = self._select_pixel_format()
+            self.remote.FindNode("PixelFormat").SetCurrentEntry(self.pixel_format)
+            self.remote.FindNode("AcquisitionMode").SetCurrentEntry("Continuous")
+            self.remote.FindNode("TriggerMode").SetCurrentEntry("Off")
 
-            self._configure_max_resolution()
-            self.pixel_size_um = self._detect_pixel_size_um()
+            w = self.remote.FindNode("Width")
+            h = self.remote.FindNode("Height")
+            w.SetValue(int(w.Maximum()))
+            h.SetValue(int(h.Maximum()))
+            self.width = int(w.Value())
+            self.height = int(h.Value())
+
+            self.pixel_size_um = float(self.remote.FindNode("SensorPixelWidth").Value())
+
+            if self._set_min_exposure_on_init:
+                self._set_min_exposure()
+            else:
+                try:
+                    node = self._find_exposure_node()
+                    self._exposure_us = float(node.Value())
+                except Exception:
+                    self._exposure_us = None
 
             self.ds = self.dev.DataStreams()[0].OpenDataStream()
             payload = self.remote.FindNode("PayloadSize").Value()
-            self._bufs = [self.ds.AllocAndAnnounceBuffer(payload) for _ in range(3)]
-            for buf in self._bufs:
-                self.ds.QueueBuffer(buf)
+            self.buf = self.ds.AllocAndAnnounceBuffer(payload)
+            self.ds.QueueBuffer(self.buf)
+
             self.ds.StartAcquisition()
-            try:
-                self.remote.FindNode("AcquisitionStart").Execute()
-            except Exception:
-                pass
-
-            self._timer = QTimer(self)
-            self._timer.timeout.connect(self._grab)
-            self._timer.start(0)
+            self.remote.FindNode("AcquisitionStart").Execute()
         except Exception as exc:
-            self._init_dummy_pipeline(str(exc))
+            self._init_dummy(f"camera init failed: {exc}")
 
-    def _configure_max_resolution(self) -> None:
-        """Force the camera to use maximum width/height."""
-        if not hasattr(self, "remote"):
-            return
+    def _init_dummy(self, reason: str) -> None:
+        """
+        Enter dummy mode (no SDK or no camera).
 
-        def _set_node_to_max(name: str) -> Optional[int]:
-            try:
-                node = self.remote.FindNode(name)
-            except Exception:
-                return None
-            max_val = None
-            try:
-                max_val = int(getattr(node, "Maximum")())
-            except Exception:
-                try:
-                    max_node = self.remote.FindNode(f"{name}Max")
-                    max_val = int(max_node.Value())
-                except Exception:
-                    pass
-            try:
-                if max_val is not None:
-                    node.SetValue(max_val)
-            except Exception:
-                pass
-            try:
-                return int(node.Value())
-            except Exception:
-                return None
+        Frames returned by aquise_frame() will be black images with a fixed size.
+        """
+        self._dummy = True
+        self.dev = None
+        self.remote = None
+        self.ds = None
+        self.buf = None
+        self.width = 640
+        self.height = 480
+        self.pixel_size_um = 2.2
+        self.pixel_format = "Mono8"
+        self._exposure_us = 2000.0
+        print(f"[IdsCam] Dummy mode active ({reason}).")
 
-        self.sensor_width_px = _set_node_to_max("Width")
-        self.sensor_height_px = _set_node_to_max("Height")
-        try:
-            sensor_w = int(self.remote.FindNode("SensorWidth").Value())
-            if sensor_w:
-                self.sensor_width_px = sensor_w
-        except Exception:
-            pass
-        try:
-            sensor_h = int(self.remote.FindNode("SensorHeight").Value())
-            if sensor_h:
-                self.sensor_height_px = sensor_h
-        except Exception:
-            pass
+    def _select_pixel_format(self) -> str:
+        """Return Mono12 if supported by the camera, otherwise Mono8."""
+        entries = {
+            e.SymbolicValue() for e in self.remote.FindNode("PixelFormat").Entries()
+        }
+        return "Mono12" if "Mono12" in entries else "Mono8"
 
-    def _detect_pixel_size_um(self) -> float:
-        """Read pixel size from the camera node map with unit heuristics."""
-        p = self._ids_peak
-        if p is None or not hasattr(self, "remote"):
-            raise RuntimeError("Keine Kamera-Remote für Pixelgröße verfügbar.")
-        candidates = [
-            "SensorPixelWidth",
-            "SensorPixelHeight",
-            "PixelSize",
-            "SensorPixelSize",
-        ]
-        for name in candidates:
+    def _find_exposure_node(self):
+        """Find the exposure node across common naming variants."""
+        for name in ("ExposureTime", "ExposureTimeAbs", "ExposureTimeUs"):
             try:
-                node = self.remote.FindNode(name)
-                val = float(node.Value())
-                if val < 0.001:
-                    val_um = val * 1e6
-                elif val < 1.0:
-                    val_um = val * 1e3
-                else:
-                    val_um = val
-                print(f"[INFO] Pixelgröße aus Node {name}: {val_um:.3f} µm")
-                return val_um
+                n = self.remote.FindNode(name)
+                _ = n.Value()
+                return n
             except Exception:
                 continue
-        raise RuntimeError("Pixelgröße konnte nicht aus der Kamera gelesen werden.")
+        raise RuntimeError("ExposureTime node not found.")
 
-    def _init_dummy_pipeline(self, reason: str | None = None) -> None:
-        """Set up simulation mode with a moving laser dot."""
-        self._dummy_mode = True
-        if reason:
-            print(f"[SIM][CameraController] Verwende Demo-Modus ({reason}).")
-        self.pixel_size_um = 2.2
-        self.sensor_width_px = 1280
-        self.sensor_height_px = 1024
-        self._img_w = self.sensor_width_px
-        self._img_h = self.sensor_height_px
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._grab_dummy)
-        self._timer.start(50)
+    def _set_min_exposure(self) -> None:
+        """Set exposure time to the minimum supported value."""
+        n = self._find_exposure_node()
+        exp = float(n.Minimum())
+        n.SetValue(exp)
+        self._exposure_us = exp
 
-    # ------------------------------------------------------------------
-    # Public controls
-    # ------------------------------------------------------------------
-    def set_exposure_us(self, val_us: float) -> None:
-        """Apply exposure (µs) to the active camera/dummy pipeline."""
-        if getattr(self, "_dummy_mode", False):
-            self._dummy_exposure_us = int(max(1, round(float(val_us))))
-            print(
-                f"[SIM][CameraController] Exposure gesetzt auf {self._dummy_exposure_us} µs (Demo)."
-            )
+    def set_exposure_us(self, us: float) -> None:
+        """
+        Set exposure time in microseconds. Has no effect in dummy mode.
+
+        Parameters
+        ----------
+        us : float
+            Desired exposure time.
+        """
+        if self._dummy or self.remote is None:
+            self._exposure_us = float(us)
             return
-        if not hasattr(self, "remote") or self._ids_peak is None:
+        n = self._find_exposure_node()
+        mn, mx = float(n.Minimum()), float(n.Maximum())
+        exp = max(mn, min(mx, float(us)))
+        n.SetValue(exp)
+        self._exposure_us = exp
+
+    def get_exposure_limits_us(self) -> tuple[float, float, float]:
+        """
+        Return (current, minimum, maximum) exposure times in microseconds.
+
+        In dummy mode, returns a fixed placeholder range.
+        """
+        if self._dummy or self.remote is None:
+            cur = float(self._exposure_us if self._exposure_us is not None else 2000.0)
+            return cur, 50.0, 200000.0
+        node = self._find_exposure_node()
+        cur = float(node.Value())
+        mn = float(node.Minimum())
+        mx = float(node.Maximum())
+        self._exposure_us = cur
+        return cur, mn, mx
+
+    def set_resolution(self, width: int, height: int) -> None:
+        """
+        Set sensor resolution. In dummy mode, this only changes the dummy frame size.
+
+        Parameters
+        ----------
+        width : int
+            Desired width.
+        height : int
+            Desired height.
+        """
+        if self._dummy or self.remote is None:
+            self.width = int(width)
+            self.height = int(height)
+            return
+        wn = self.remote.FindNode("Width")
+        hn = self.remote.FindNode("Height")
+        wn.SetValue(max(int(wn.Minimum()), min(int(wn.Maximum()), int(width))))
+        hn.SetValue(max(int(hn.Minimum()), min(int(hn.Maximum()), int(height))))
+        self.width = int(wn.Value())
+        self.height = int(hn.Value())
+
+    def get_pixel_size_um(self) -> float:
+        """
+        Return physical pixel size in µm.
+
+        In dummy mode, this returns a fixed placeholder value.
+        """
+        return float(self.pixel_size_um)
+
+    def get_resolution(self) -> tuple[int, int]:
+        """Return current resolution as (width, height)."""
+        return self.width, self.height
+
+    def get_model_info(self) -> dict:
+        """
+        Return basic camera metadata.
+
+        In dummy mode, fields will contain placeholder values.
+        """
+        if self._dummy or self.dev is None:
+            return {
+                "model": "DUMMY",
+                "serial": "DUMMY",
+                "id": "DUMMY",
+                "display_name": "IdsCam Dummy",
+                "pixel_format": self.pixel_format,
+            }
+        return {
+            "model": self.dev.ModelName(),
+            "serial": self.dev.SerialNumber(),
+            "id": self.dev.ID(),
+            "display_name": self.dev.DisplayName(),
+            "pixel_format": self.pixel_format,
+        }
+
+    def aquise_frame(self, timeout_ms: int = 50) -> np.ndarray:
+        """
+        Capture a single frame.
+
+        Returns
+        -------
+        numpy.ndarray
+            uint8 for Mono8, uint16 for Mono12. In dummy mode, a black frame.
+        """
+        if self._dummy or self.ds is None:
+            return np.zeros((self.height, self.width), dtype=np.uint8)
+
+        buf = self.ds.WaitForFinishedBuffer(timeout_ms)
+        w, h = buf.Width(), buf.Height()
+        ptr, size = int(buf.BasePtr()), buf.Size()
+        arr = (ctypes.c_ubyte * size).from_address(ptr)
+
+        bpp = 1 if self.pixel_format == "Mono8" else 2
+        raw = bytes(memoryview(arr)[: w * h * bpp])
+        dtype = np.uint8 if bpp == 1 else np.uint16
+        frame = np.frombuffer(raw, dtype=dtype).reshape(h, w)
+
+        self.ds.QueueBuffer(buf)
+        return frame
+
+    def start_stream(self, callback, interval_s: float = 0.0) -> threading.Event:
+        """
+        Start a simple live acquisition loop that calls `callback(frame)`.
+
+        This runs in a background thread and works for both real camera
+        and dummy mode.
+
+        Parameters
+        ----------
+        callback : callable
+            Function that will be called as callback(frame) for each frame.
+        interval_s : float
+            Optional sleep time between frames in seconds
+            (0.0 = as fast as possible).
+
+        Returns
+        -------
+        threading.Event
+            Event that can be set() to stop the stream.
+        """
+        stop_event = threading.Event()
+
+        def _loop():
+            while not stop_event.is_set():
+                frame = self.aquise_frame()
+                callback(frame)
+                if interval_s > 0:
+                    time.sleep(interval_s)
+
+        t = threading.Thread(target=_loop, daemon=True)
+        t.start()
+        return stop_event
+
+    def shutdown(self) -> None:
+        """
+        Stop acquisition and release resources.
+
+        Safe to call in dummy mode; no-op if no real camera was opened.
+        """
+        if self._dummy:
             return
         try:
-            try:
-                self.remote.FindNode("ExposureAuto").SetCurrentEntry("Off")
-            except Exception:
-                pass
-            node = None
-            for name in ("ExposureTime", "ExposureTimeAbs", "ExposureTimeUs"):
-                try:
-                    candidate = self.remote.FindNode(name)
-                    _ = candidate.Value()
-                    node = candidate
-                    break
-                except Exception:
-                    continue
-            if node is None:
-                raise RuntimeError("ExposureTime-Knoten nicht gefunden.")
-            try:
-                mn = int(max(1, round(node.Minimum())))
-                mx = int(round(node.Maximum()))
-                value = int(min(mx, max(mn, int(round(float(val_us))))))
-            except Exception:
-                value = int(round(float(val_us)))
-            node.SetValue(float(value))
-            print(f"[INFO] CameraController: Exposure gesetzt auf {value} µs")
-        except Exception as exc:
-            print("[WARN] CameraController: Exposure setzen fehlgeschlagen:", exc)
-
-    # ------------------------------------------------------------------
-    # Frame grabbing (real/dummy)
-    # ------------------------------------------------------------------
-    def _grab(self) -> None:
-        if getattr(self, "_dummy_mode", False):
-            self._grab_dummy()
-            return
-        try:
-            buf = self.ds.WaitForFinishedBuffer(50)
-        except Exception:
-            return
-        if not buf:
-            return
-        try:
-            w, h, ptr, size = (
-                buf.Width(),
-                buf.Height(),
-                int(buf.BasePtr()),
-                buf.Size(),
-            )
-            self._img_w = int(w)
-            self._img_h = int(h)
-            arr = (ctypes.c_ubyte * size).from_address(ptr)
-            try:
-                frame_bytes = bytes(memoryview(arr)[: w * h])
-            except Exception:
-                view = memoryview(arr)[: w * h]
-                frame_bytes = bytes(view)
-            self._emit_frame(frame_bytes, w, h)
-        finally:
-            try:
-                self.ds.QueueBuffer(buf)
-            except Exception:
-                pass
-
-    def _grab_dummy(self) -> None:
-        try:
-            w = int(self.sensor_width_px or 640)
-            h = int(self.sensor_height_px or 480)
-            self._img_w = w
-            self._img_h = h
-            frame = np.zeros((h, w), dtype=np.uint8)
-            frame_bytes = frame.tobytes()
-            self._emit_frame(frame_bytes, w, h)
+            if self.remote is not None:
+                self.remote.FindNode("AcquisitionStop").Execute()
+            if self.ds is not None:
+                self.ds.StopAcquisition()
+                if self.buf is not None:
+                    self.ds.RevokeBuffer(self.buf)
+            if self.dev is not None:
+                self.dev.Close()
+            if _ids_peak is not None:
+                _ids_peak.Library.Close()
         except Exception:
             pass
-
-    def _emit_frame(self, frame_bytes: bytes, w: int, h: int) -> None:
-        try:
-            self.frameReady.emit(frame_bytes, w, h)
-        except Exception:
-            pass
-
-    def update_centroid(self, cx: int, cy: int) -> None:
-        """Update centroid from external detector and notify listeners."""
-        self._last_centroid = (int(cx), int(cy))
-        try:
-            self.centerChanged.emit(int(cx), int(cy))
-        except Exception:
-            pass
-
-    def display_frame(self, qimg: QImage) -> None:
-        try:
-            self.setPixmap(QPixmap.fromImage(qimg))
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------------
-    # Cleanup
-    # ------------------------------------------------------------------
-    def close(self) -> None:
-        """Release timers, camera handles and buffers."""
-        try:
-            if self._timer:
-                self._timer.stop()
-        except Exception:
-            pass
-        if not getattr(self, "_dummy_mode", False):
-            p = self._ids_peak
-            for fn in (
-                lambda: self.remote.FindNode("AcquisitionStop").Execute()
-                if hasattr(self, "remote")
-                else None,
-                self.ds.StopAcquisition if hasattr(self, "ds") else None,
-                lambda: [self.ds.RevokeBuffer(b) for b in self._bufs]
-                if hasattr(self, "_bufs")
-                else None,
-                self.dev.Close if hasattr(self, "dev") else None,
-                p.Library.Close if p is not None else None,
-            ):
-                if fn is None:
-                    continue
-                try:
-                    fn()
-                except Exception:
-                    pass
-        super().close()
