@@ -12,6 +12,12 @@ import seaborn as sns
 import os
 import sys
 import pathlib
+BASE_DIR = pathlib.Path(__file__).resolve().parent
+for _sub in ("Hardware", "Algorithmen"):
+    _cand = BASE_DIR / _sub
+    if _cand.exists():
+        sys.path.insert(0, str(_cand))
+
 from DinoLiteController import DinoLiteController, DummyDinoLite
 from EightMotorcontroller import MotorController
 import tifffile as tif

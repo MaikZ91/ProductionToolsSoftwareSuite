@@ -35,6 +35,13 @@ import time
 import threading
 from typing import Optional
 
+# Ensure relocated modules are importable (./Hardware, ./Algorithmen)
+_BASE_DIR = pathlib.Path(__file__).resolve().parent
+for _sub in ("Hardware", "Algorithmen"):
+    _cand = _BASE_DIR / _sub
+    if _cand.exists():
+        sys.path.insert(0, str(_cand))
+
 import cv2
 import numpy as np
 import matplotlib
@@ -63,7 +70,7 @@ from laser_spot_detection import LaserSpotDetector
 from z_trieb import ZTriebWidget
 
 # ========================== DATENBANK / INFRA ==========================
-BASE_DIR = pathlib.Path(__file__).resolve().parent
+BASE_DIR = _BASE_DIR
 
 def resolve_data_root() -> pathlib.Path:
     """Find the Stage-Teststand root, honoring env override and existing directories."""
@@ -1077,6 +1084,7 @@ class CameraWindow(QWidget):
         batch: str = "NoBatch",
         device_index: int = 0,
         label: str = "",
+        spot_detector=None,
     ):
         super().__init__(parent)
         cam_name = (label or f"Cam {device_index}")
