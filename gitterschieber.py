@@ -18,14 +18,15 @@ for _sub in ("Hardware", "Algorithmen"):
     if _cand.exists():
         sys.path.insert(0, str(_cand))
 
-from DinoLiteController import DinoLiteController, DummyDinoLite
-from EightMotorcontroller import MotorController
-import tifffile as tif
-from AngleAnalysisFunctions import (
-    AnalysePiezoAngleFFT,
+
+from ie_Framework.Hardware.Camera.DinoLiteController import DinoLiteController, DummyDinoLite
+from ie_Framework.Hardware.Motor.EightMotorcontroller import MotorController
+from ie_Framework.Algorithm.AngleAnalysisFunctions import (AnalysePiezoAngleFFT,
     AnalysePiezoAngleGratingEdge,
-    SingleImageGratingAngle,
-)
+    SingleImageGratingAngle)
+
+import tifffile as tif
+
 
 #unterdrücke Plots
 matplotlib.use('Agg')
