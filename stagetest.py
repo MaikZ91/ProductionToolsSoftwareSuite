@@ -55,7 +55,7 @@ from PySide6.QtCore    import QObject, QThread, Signal, Qt, QTimer, QSize, QRegu
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QLineEdit, QTextEdit,
     QProgressBar, QMessageBox, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QFrame, QSizePolicy, QSpacerItem, QComboBox, QSpinBox, QToolButton,
+    QFrame, QSizePolicy, QSpacerItem, QComboBox, QToolButton,
     QStackedWidget, QSlider, QDoubleSpinBox, QDialog, QListWidget,
     QScrollArea
 )
@@ -1543,29 +1543,29 @@ class StageGUI(QWidget):
         for b in (self.btnStart, self.btnDauer, self.btnOpenFolder, self.btnKleberoboter):
             b.setMinimumHeight(36)
 
+        # Dauertest-Button + Dauer-Dropdown nebeneinander
+        dauerRow = QHBoxLayout(); dauerRow.setSpacing(8)
+        dauerRow.addWidget(self.btnDauer, 1)
+        self.comboDur = QComboBox()
+        self._dur_presets = [
+            ("15 h (Standard)", 15*3600),
+            ("1 h", 1*3600),
+            ("4 h", 4*3600),
+            ("8 h", 8*3600),
+            ("24 h", 24*3600),
+            ("30 min", 30*60),
+            ("10 min", 10*60),
+        ]
+        for label, seconds in self._dur_presets:
+            self.comboDur.addItem(label, seconds)
+        self.comboDur.setFixedWidth(150)
+        self.comboDur.currentIndexChanged.connect(self._on_duration_mode_changed)
+        dauerRow.addWidget(self.comboDur, 0, Qt.AlignRight)
+
         self.cardActions.body.addWidget(self.btnStart)
-        self.cardActions.body.addWidget(self.btnDauer)
+        self.cardActions.body.addLayout(dauerRow)
         self.cardActions.body.addWidget(self.btnOpenFolder)
         self.cardActions.body.addWidget(self.btnKleberoboter)
-
-        # --- Dauertest-Dauer (NEU) ---
-        durRow = QHBoxLayout()
-        lblDur = QLabel("Dauer")
-        self.comboDur = QComboBox()
-        self.comboDur.addItems(["15 h (Standard)","1 h","4 h","8 h","24 h","Benutzerdefiniert"])
-        self.comboDur.setCurrentIndex(0)
-
-        self.spinHours = QSpinBox(); self.spinHours.setRange(0, 240); self.spinHours.setValue(15)
-        self.spinMinutes = QSpinBox(); self.spinMinutes.setRange(0, 59); self.spinMinutes.setValue(0)
-        self.spinHours.setEnabled(False); self.spinMinutes.setEnabled(False)
-        self.comboDur.currentIndexChanged.connect(self._on_duration_mode_changed)
-        self.spinHours.valueChanged.connect(self._on_custom_duration_changed)
-        self.spinMinutes.valueChanged.connect(self._on_custom_duration_changed)
-
-        durRow.addWidget(lblDur); durRow.addWidget(self.comboDur, 1)
-        durRow.addWidget(QLabel("h")); durRow.addWidget(self.spinHours)
-        durRow.addWidget(QLabel("min")); durRow.addWidget(self.spinMinutes)
-        self.cardActions.body.addLayout(durRow)
 
         # Right: Status + Plot + QA
         self.cardStatus = Card("Status / Fortschritt")
@@ -2005,19 +2005,11 @@ class StageGUI(QWidget):
             self.lblTimer.setText(self._fmt_hms(self._duration_sec))
 
     def _on_duration_mode_changed(self, idx: int):
-        presets = [15*3600, 1*3600, 4*3600, 8*3600, 24*3600]
-        custom = (idx == 5)
-        self.spinHours.setEnabled(custom)
-        self.spinMinutes.setEnabled(custom)
-        if not custom:
-            self._set_duration_sec(presets[idx])
-        else:
-            self._on_custom_duration_changed()
-
-    def _on_custom_duration_changed(self):
-        hours = self.spinHours.value()
-        minutes = self.spinMinutes.value()
-        self._set_duration_sec(hours*3600 + minutes*60)
+        try:
+            secs = int(self.comboDur.itemData(idx))
+        except Exception:
+            secs = 15*3600
+        self._set_duration_sec(secs)
 
     # ---------- Test ----------
     def _start_test(self):
