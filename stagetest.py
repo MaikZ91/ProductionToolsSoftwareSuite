@@ -567,10 +567,12 @@ def make_tile(text: str, icon_path: str, clicked_cb):
 
 class LiveCamEmbed(QWidget):
     """Einfacher Live-Kameraview für BGR/Mono Frames mit Frame-Provider."""
-    def __init__(self, frame_provider, *, interval_ms: int = 200, parent=None):
+    def __init__(self, frame_provider, *, interval_ms: int = 200, start_immediately: bool = True, parent=None):
         super().__init__(parent)
         self._frame_provider = frame_provider
         self._last_frame = None
+        self._interval_ms = interval_ms
+        self._autostart = bool(start_immediately)
         self.label = QLabel("Kein Bild")
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setMinimumHeight(320)
@@ -581,7 +583,25 @@ class LiveCamEmbed(QWidget):
         layout.addWidget(self.status)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(interval_ms)
+        if self._autostart and self.isVisible():
+            self.start()
+
+    def start(self):
+        if not self._timer.isActive():
+            self._timer.start(self._interval_ms)
+
+    def stop(self):
+        if self._timer.isActive():
+            self._timer.stop()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._autostart:
+            self.start()
+
+    def hideEvent(self, event):
+        self.stop()
+        super().hideEvent(event)
 
     def last_frame(self):
         return self._last_frame
@@ -895,119 +915,149 @@ class DauertestWorker(QObject):
             })
 
 
-class RealUseTestWorker(QObject):
+class CombinedTestWorker(QObject):
     update   = Signal(dict)
     finished = Signal(dict)
     error    = Signal(str)
 
-    def __init__(self, sc, *,
-                 x_center: int,
-                 y_center: int,
-                 step_size: int = 1500,
-                 max_radius: int = 8000,
-                 n_moves: int = 300,
-                 dwell: float = 0.2,
-                 raster_loops: int = 3,
-                 batch: str = "NoBatch"):
+    def __init__(
+        self,
+        sc,
+        *,
+        batch: str = "NoBatch",
+        out_dir: pathlib.Path | None = None,
+        center_x: int = 0,
+        center_y: int = 0,
+        small_step: int = 500,
+        small_radius: int = 2000,
+        small_phase_sec: float = 120.0,
+        large_phase_sec: float = 30.0,
+        dwell_small: float = 0.2,
+        dwell_large: float = 0.1,
+        limit_um: float = DUR_MAX_UM,
+        stop_at_ts: float | None = None,
+    ):
         super().__init__()
         self.sc = sc
-        self.params = {
-            "x_center": int(x_center),
-            "y_center": int(y_center),
-            "step_size": int(step_size),
-            "max_radius": int(max_radius),
-            "n_moves": int(n_moves),
-            "dwell": float(dwell),
-            "raster_loops": int(raster_loops),
-        }
         self.batch = sanitize_batch(batch)
+        self.out_dir = out_dir
+        self.center_x = int(center_x)
+        self.center_y = int(center_y)
+        self.small_step = int(max(1, small_step))
+        self.small_radius = int(max(1, small_radius))
+        self.small_phase_sec = float(small_phase_sec)
+        self.large_phase_sec = float(large_phase_sec)
+        self.dwell_small = float(dwell_small)
+        self.dwell_large = float(dwell_large)
+        self.limit_um = float(limit_um)
+        self.max_abs_um = 0.0
+        self._running = True
+        self.start_ts = time.time()
+        self.stop_at_ts = float(stop_at_ts) if stop_at_ts else None
 
-    def _emit_update(self, phase: str, idx: int, total: int,
-                     target_x: int, target_y: int,
-                     err_um: float | None = None):
+        self.pos_infodict={"x_counter":[],"y_counter":[],"Time [min]":[],
+                           "x_position [m]":[],"y_position [m]":[],
+                           "pos_error_x [m]":[],"pos_error_y [m]":[]}
+        base_name = f"{self.batch}_combined_values.csv"
+        self.savefile = (self.out_dir / base_name) if self.out_dir else pathlib.Path(base_name)
+
+    def stop(self):
+        self._running = False
+
+    def _clamp(self, axis: str, val: int) -> int:
+        lo = self.sc.low_lim[axis]
+        hi = self.sc.high_lim[axis]
+        return int(min(max(val, lo), hi))
+
+    def _log_move(self, phase: str, idx: int, total: int, tx: int, ty: int, move_idx: int, dwell: float):
+        self.sc.move_abs('X', tx)
+        self.sc.move_abs('Y', ty)
+        time.sleep(dwell)
+
+        # Nutze gleiche Fehlerberechnung wie im Referenz-Dauertest:
+        # (EncoderSteps / EncPerMeter) - (MotorSteps / StepsPerMeter)
+        x_enc, y_enc = get_stage_encoders()
+        spm_x = self.sc.steps_per_m['X']; spm_y = self.sc.steps_per_m['Y']
+        epm_x = self.sc.enc_per_m['X'];   epm_y = self.sc.enc_per_m['Y']
+        err_x = (x_enc/epm_x) - (tx/spm_x)
+        err_y = (y_enc/epm_y) - (ty/spm_y)
+        err_um = max(abs(err_x), abs(err_y)) * 1e6
+        self.max_abs_um = max(self.max_abs_um, float(err_um))
+        runtime = round((time.time()-self.start_ts)/60, 2)
+
+        self.pos_infodict["Time [min]"].append(runtime)
+        self.pos_infodict["x_counter"].append(move_idx)
+        self.pos_infodict["y_counter"].append(move_idx)
+        self.pos_infodict["x_position [m]"].append(round(x_enc/epm_x,6))
+        self.pos_infodict["y_position [m]"].append(round(y_enc/epm_y,6))
+        self.pos_infodict["pos_error_x [m]"].append(round(err_x,8))
+        self.pos_infodict["pos_error_y [m]"].append(round(err_y,8))
+
         self.update.emit({
             "phase": phase,
             "idx": idx,
             "total": total,
-            "target_x": target_x,
-            "target_y": target_y,
-            "err_um": err_um if err_um is not None else 0.0,
+            "target_x": tx,
+            "target_y": ty,
+            "err_um": err_um,
+            "max_abs_um": float(self.max_abs_um),
+            "limit_um": float(self.limit_um),
+            "t": runtime,
+            "ex": err_x,
+            "ey": err_y,
             "batch": self.batch,
         })
 
     def run(self):
         try:
-            p = self.params
-            x_center = p["x_center"]
-            y_center = p["y_center"]
-            step_size = p["step_size"]
-            max_radius = p["max_radius"]
-            n_moves = p["n_moves"]
-            dwell = p["dwell"]
-            raster_loops = p["raster_loops"]
+            move_idx = 0
+            phase = "small"
+            small_idx = 0
+            large_idx = 0
+            now = time.time()
+            target_stop = self.stop_at_ts or float("inf")
 
-            offsets = (-step_size, 0, step_size)
-            raster_total = max(1, raster_loops * len(offsets) * len(offsets))
+            while self._running and now < target_stop:
+                phase_duration = self.small_phase_sec if phase == "small" else self.large_phase_sec
+                dwell = self.dwell_small if phase == "small" else self.dwell_large
+                phase_end = min(target_stop, now + phase_duration)
+                # rough estimate for progress in this phase
+                est_total = max(1, int(max(1.0, (phase_end - now) / max(0.01, dwell))))
 
-            # Phase 1: Raster um die Mitte
-            idx = 0
-            for loop in range(1, raster_loops + 1):
-                for dx in offsets:
-                    for dy in offsets:
-                        idx += 1
-                        tx = x_center + dx
-                        ty = y_center + dy
-                        self.sc.move_abs('X', tx)
-                        self.sc.move_abs('Y', ty)
-                        time.sleep(dwell)
-                        # Fehlerabschätzung in µm
-                        ex_enc = self.sc.enc('X')
-                        ey_enc = self.sc.enc('Y')
-                        spm_x = self.sc.steps_per_m['X']
-                        spm_y = self.sc.steps_per_m['Y']
-                        epm_x = self.sc.enc_per_m['X']
-                        epm_y = self.sc.enc_per_m['Y']
-                        err_um = max(abs(ex_enc/epm_x - tx/spm_x),
-                                     abs(ey_enc/epm_y - ty/spm_y)) * 1e6
-                        self._emit_update("raster", idx, raster_total, tx, ty, err_um)
+                while self._running and (time.time() < phase_end):
+                    if phase == "small":
+                        small_idx += 1
+                        dx_raw = int(np.random.randint(-self.small_radius, self.small_radius + 1))
+                        dy_raw = int(np.random.randint(-self.small_radius, self.small_radius + 1))
+                        dx = int(round(dx_raw / self.small_step)) * self.small_step
+                        dy = int(round(dy_raw / self.small_step)) * self.small_step
+                        tx = self._clamp('X', self.center_x + dx)
+                        ty = self._clamp('Y', self.center_y + dy)
+                        move_idx += 1
+                        self._log_move("small", small_idx, est_total, tx, ty, move_idx, dwell)
+                    else:
+                        large_idx += 1
+                        tx = int(np.random.randint(self.sc.low_lim['X'], self.sc.high_lim['X'] + 1))
+                        ty = int(np.random.randint(self.sc.low_lim['Y'], self.sc.high_lim['Y'] + 1))
+                        move_idx += 1
+                        self._log_move("large", large_idx, est_total, tx, ty, move_idx, dwell)
+                    if self.stop_at_ts and time.time() >= self.stop_at_ts:
+                        break
+                now = time.time()
+                phase = "large" if phase == "small" else "small"
 
-            # Phase 2: Random-Hops
-            for hop in range(1, n_moves + 1):
-                dx = int(np.random.randint(-max_radius, max_radius + 1))
-                dy = int(np.random.randint(-max_radius, max_radius + 1))
-                tx = x_center + dx
-                ty = y_center + dy
-                self.sc.move_abs('X', tx)
-                self.sc.move_abs('Y', ty)
-                time.sleep(dwell)
-                ex_enc = self.sc.enc('X')
-                ey_enc = self.sc.enc('Y')
-                spm_x = self.sc.steps_per_m['X']
-                spm_y = self.sc.steps_per_m['Y']
-                epm_x = self.sc.enc_per_m['X']
-                epm_y = self.sc.enc_per_m['Y']
-                err_um = max(abs(ex_enc/epm_x - tx/spm_x),
-                             abs(ey_enc/epm_y - ty/spm_y)) * 1e6
-                self._emit_update("random", hop, n_moves, tx, ty, err_um)
+            # Zurück zur Mitte, wenn nicht abgebrochen
+            if self._running:
+                move_idx += 1
+                self._log_move("center", 1, 1, self.center_x, self.center_y, move_idx, self.dwell_small)
 
-            # Phase 3: zurück zur Mitte
-            self.sc.move_abs('X', x_center)
-            self.sc.move_abs('Y', y_center)
-            time.sleep(dwell)
-            ex_enc = self.sc.enc('X')
-            ey_enc = self.sc.enc('Y')
-            spm_x = self.sc.steps_per_m['X']
-            spm_y = self.sc.steps_per_m['Y']
-            epm_x = self.sc.enc_per_m['X']
-            epm_y = self.sc.enc_per_m['Y']
-            err_um = max(abs(ex_enc/epm_x - x_center/spm_x),
-                         abs(ey_enc/epm_y - y_center/spm_y)) * 1e6
-            self._emit_update("center", 1, 1, x_center, y_center, err_um)
-
+            save_stage_test(str(self.savefile), self.pos_infodict, batch=self.batch)
             self.finished.emit({
                 "batch": self.batch,
-                "total_moves": raster_total + n_moves + 1,
-                "max_radius": max_radius,
+                "total_moves": move_idx,
+                "dur_max_um": float(self.max_abs_um),
+                "limit_um": float(self.limit_um),
+                "out": str(self.savefile),
             })
         except Exception as exc:
             self.error.emit(str(exc))
@@ -1284,6 +1334,7 @@ class LivePlot(FigureCanvas):
         self.setParent(parent)
         self.ax = fig.add_subplot(111)
         self.batch = sanitize_batch(batch)
+        self.mode = "Dauertest"
         self._apply_titles()
         style_ax(self.ax)
         self.line_ex, = self.ax.plot([], [], label="Error X")
@@ -1292,16 +1343,27 @@ class LivePlot(FigureCanvas):
         self.t,self.ex,self.ey = [],[],[]
 
     def _apply_titles(self):
-        self.ax.set_title(f"Dauertest – Positionsfehler · Charge: {self.batch}", fontweight="semibold")
-        self.ax.set_xlabel("Zeit [min]"); self.ax.set_ylabel("Fehler [µm]")
+        self.ax.set_title(f"{self.mode} – Positionsfehler · Charge: {self.batch}", fontweight="semibold")
+        self.ax.set_xlabel("Zeit [min]"); self.ax.set_ylabel("Fehler [m]")
 
     def set_batch(self, batch: str):
         self.batch = sanitize_batch(batch); self._apply_titles(); self.draw_idle()
 
+    def set_mode(self, mode: str):
+        self.mode = mode
+        self._apply_titles()
+        self.draw_idle()
+
+    def reset(self):
+        self.t.clear(); self.ex.clear(); self.ey.clear()
+        self.line_ex.set_data([], [])
+        self.line_ey.set_data([], [])
+        self.ax.relim(); self.ax.autoscale_view(); self.draw_idle()
+
     def add_data(self, data):
-        ex_um = float(data.get("ex", 0.0)) * 1e6
-        ey_um = float(data.get("ey", 0.0)) * 1e6
-        self.t.append(data["t"]); self.ex.append(ex_um); self.ey.append(ey_um)
+        ex_m = float(data.get("ex", 0.0))
+        ey_m = float(data.get("ey", 0.0))
+        self.t.append(data["t"]); self.ex.append(ex_m); self.ey.append(ey_m)
         self.line_ex.set_data(self.t,self.ex); self.line_ey.set_data(self.t,self.ey)
         self.ax.relim(); self.ax.autoscale_view(); self.draw_idle()
 
@@ -1323,8 +1385,9 @@ class StageGUI(QWidget):
         self._meas_max_um = None
         self._dur_max_um  = None
         self._calib_vals  = {"X": None, "Y": None}
-        self._real_use_total: int | None = None
-        self._real_use_raster_total: int = 0
+        self._combined_total: int | None = None
+        self._combined_small: int = 0
+        self._combined_large: int = 0
         self._warned_camera_sim = False
         self.statusBar: QLabel | None = None
         self._pending_status: str | None = None
@@ -1474,16 +1537,14 @@ class StageGUI(QWidget):
 
         self.btnStart = QPushButton("▶  Test starten  (Ctrl+R)"); self.btnStart.clicked.connect(self._start_test)
         self.btnDauer = QPushButton("⏱️  Dauertest starten  (Ctrl+D)"); self.btnDauer.clicked.connect(self._toggle_dauertest)
-        self.btnRealUseTest = QPushButton("Real-Use-Test"); self.btnRealUseTest.clicked.connect(self._start_real_use_test)
         self.btnOpenFolder = QPushButton("📂 Ordner öffnen"); self.btnOpenFolder.setEnabled(False); self.btnOpenFolder.clicked.connect(self._open_folder)
         self.btnKleberoboter = QPushButton("Datenbank Senden"); self.btnKleberoboter.clicked.connect(self._trigger_kleberoboter)
 
-        for b in (self.btnStart, self.btnDauer, self.btnRealUseTest, self.btnOpenFolder, self.btnKleberoboter):
+        for b in (self.btnStart, self.btnDauer, self.btnOpenFolder, self.btnKleberoboter):
             b.setMinimumHeight(36)
 
         self.cardActions.body.addWidget(self.btnStart)
         self.cardActions.body.addWidget(self.btnDauer)
-        self.cardActions.body.addWidget(self.btnRealUseTest)
         self.cardActions.body.addWidget(self.btnOpenFolder)
         self.cardActions.body.addWidget(self.btnKleberoboter)
 
@@ -1556,7 +1617,12 @@ class StageGUI(QWidget):
         # Gemeinsames Kamerafenster + Aktionen
         self.gitterschieber_status = QLabel("")
         cam_provider = lambda: gs.capture_frame()
-        self.gitterschieberCam = LiveCamEmbed(cam_provider, interval_ms=200, parent=self.gitterschieberPage)
+        self.gitterschieberCam = LiveCamEmbed(
+            cam_provider,
+            interval_ms=200,
+            start_immediately=False,
+            parent=self.gitterschieberPage,
+        )
         gsCard.body.addWidget(self.gitterschieberCam)
 
         btn_bar = QHBoxLayout()
@@ -1590,7 +1656,12 @@ class StageGUI(QWidget):
 
         # Gemeinsames Kamerafenster oben
         try:
-            self.autofocusCam = LiveCamEmbed(self._af_frame_provider, interval_ms=200, parent=self.autofocusPage)
+            self.autofocusCam = LiveCamEmbed(
+                self._af_frame_provider,
+                interval_ms=200,
+                start_immediately=False,
+                parent=self.autofocusPage,
+            )
             autoLayout.addWidget(self.autofocusCam)
         except Exception as exc:
             autoLayout.addWidget(QLabel(f"Kamera nicht verfügbar: {exc}"))
@@ -1788,6 +1859,11 @@ class StageGUI(QWidget):
 
     def _open_autofocus_workflow(self):
         self.stack.setCurrentWidget(self.autofocusPage)
+        try:
+            if getattr(self, "autofocusCam", None):
+                self.autofocusCam.start()
+        except Exception:
+            pass
         if self._autofocus_buttons:
             self._autofocus_buttons[0].setFocus()
         self._set_status("Autofocus – wähle eine Kamera.")
@@ -1830,6 +1906,11 @@ class StageGUI(QWidget):
         """
         try:
             self.stack.setCurrentWidget(self.gitterschieberPage)
+            try:
+                if getattr(self, "gitterschieberCam", None):
+                    self.gitterschieberCam.start()
+            except Exception:
+                pass
             self._set_status("Gitterschieber geöffnet.")
         except Exception as exc:
             QMessageBox.warning(self, "Gitterschieber", f"Start fehlgeschlagen:\n{exc}")
@@ -2103,86 +2184,7 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
         except Exception as exc:
             self._err(str(exc))
 
-    # ---------- Real-Use-Test ----------
-    def _start_real_use_test(self):
-        try:
-            x_center, y_center, _ = get_current_pos()
-        except Exception as exc:
-            QMessageBox.warning(self, "Real-Use-Test", f"Referenzposition konnte nicht gelesen werden:\n{exc}")
-            return
-
-        raster_loops = 3
-        raster_total = raster_loops * 3 * 3
-        total_moves = raster_total + 300 + 1
-        self._real_use_raster_total = raster_total
-        self._real_use_total = total_moves
-
-        self.btnRealUseTest.setEnabled(False)
-        self.btnDauer.setEnabled(False)
-        self.btnStart.setEnabled(False)
-
-        self.lblPhase.setText("Real-Use-Test")
-        self.pbar.setMaximum(total_moves)
-        self.pbar.setValue(0)
-        self.pbar.setFormat(f"Real-Use-Test: 0 / {total_moves} (0%)")
-        self._set_status(f"Real-Use-Test läuft (Mitte {x_center}, {y_center})…")
-
-        self.real_use_thread = QThread()
-        self.real_use_worker = RealUseTestWorker(
-            self.sc,
-            x_center=x_center,
-            y_center=y_center,
-            step_size=1500,
-            max_radius=8000,
-            n_moves=300,
-            dwell=0.2,
-            raster_loops=raster_loops,
-            batch=self._batch,
-        )
-        self.real_use_worker.moveToThread(self.real_use_thread)
-        self.real_use_thread.started.connect(self.real_use_worker.run)
-        self.real_use_worker.update.connect(self._real_use_progress)
-        self.real_use_worker.finished.connect(self._real_use_done)
-        self.real_use_worker.error.connect(self._real_use_error)
-        self.real_use_worker.finished.connect(lambda *_: self.real_use_thread.quit())
-        self.real_use_worker.error.connect(lambda *_: self.real_use_thread.quit())
-        self.real_use_thread.start()
-
-    def _real_use_progress(self, data: dict):
-        phase = data.get("phase", "—")
-        idx = int(data.get("idx", 0))
-        total = int(data.get("total", 1))
-        err_um = float(data.get("err_um", 0.0))
-
-        if phase == "raster":
-            overall = idx
-        elif phase == "random":
-            overall = self._real_use_raster_total + idx
-        else:
-            overall = self._real_use_total or idx
-
-        if self._real_use_total:
-            self.pbar.setMaximum(self._real_use_total)
-            self.pbar.setValue(min(overall, self._real_use_total))
-            pct = int(round(100 * self.pbar.value() / max(1, self._real_use_total)))
-            self.pbar.setFormat(f"Real-Use-Test: {self.pbar.value()} / {self._real_use_total} ({pct}%)")
-        self.lblPhase.setText(f"Real-Use-Test · {phase} · Fehler {err_um:.2f} µm")
-
-    def _real_use_done(self, info: dict):
-        self._set_status("Real-Use-Test abgeschlossen.")
-        self.lblPhase.setText("Real-Use-Test fertig")
-        self.btnRealUseTest.setEnabled(True)
-        self.btnDauer.setEnabled(True)
-        self.btnStart.setEnabled(True)
-        self._reset_progress()
-
-    def _real_use_error(self, msg: str):
-        QMessageBox.warning(self, "Real-Use-Test", f"Fehler:\n{msg}")
-        self.btnRealUseTest.setEnabled(True)
-        self.btnDauer.setEnabled(True)
-        self.btnStart.setEnabled(True)
-        self._set_status("Real-Use-Test fehlgeschlagen.")
-    # ---------- Dauertest ----------
+    # ---------- Dauertest (kleine + große Bewegungen) ----------
     def _toggle_dauertest(self):
         if self._dauer_running:
             self._stop_dauertest()
@@ -2205,47 +2207,91 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             self.plot=LivePlot(self, batch=self._batch); self.plotHolder.addWidget(self.plot)
         else:
             self.plot.set_batch(self._batch)
+            self.plot.reset()
+        self.plot.set_mode("Dauertest")
 
         self._dauer_running = True
         self._set_dauer_button(True)
-        self._set_status("Dauertest läuft…")
+
+        try:
+            x_center, y_center, _ = get_current_pos()
+        except Exception as exc:
+            QMessageBox.warning(self, "Dauertest", f"Referenzposition konnte nicht gelesen werden:\n{exc}")
+            self._dauer_running = False
+            self._set_dauer_button(False)
+            return
+
+        # Parameter: kleine Bewegungen + große Bewegungen (Verhältnis 120s : 30s)
+        avail_x = max(0, self.sc.high_lim.get("X", 0) - self.sc.low_lim.get("X", 0))
+        avail_y = max(0, self.sc.high_lim.get("Y", 0) - self.sc.low_lim.get("Y", 0))
+        avail_range = max(1, min(avail_x, avail_y))
+        small_step = max(500, int(avail_range * 0.01))
+        small_radius = max(2000, int(avail_range * 0.05))
+
+        self.lblPhase.setText(f"Dauertest (120s klein / 30s groß)")
+        self.pbar.setMaximum(self._duration_sec)
+        self.pbar.setValue(0)
+        self.pbar.setFormat(f"Dauertest: 0 / {self._fmt_hms(self._duration_sec)}")
+        self._set_status(f"Dauertest läuft (Step {small_step}, Radius {small_radius})…")
 
         self._dauer_start  = time.time()
         self._dauer_target = self._dauer_start + self._duration_sec
-        self._update_timer()
+        if hasattr(self, "timer") and self.timer.isActive():
+            self.timer.stop()
+        self.timer=QTimer(self); self.timer.timeout.connect(self._update_timer); self.timer.start(1000)
 
         self.dauer_thread=QThread()
-        self.dauer_worker=DauertestWorker(
+        self.dauer_worker=CombinedTestWorker(
             self.sc,
             batch=self._batch,
-            stop_at_ts=self._dauer_target,
-            start_ts=self._dauer_start,
             out_dir=out_dir,
-            dur_limit_um=DUR_MAX_UM
+            center_x=x_center,
+            center_y=y_center,
+            small_step=small_step,
+            small_radius=small_radius,
+            dwell_small=0.2,
+            dwell_large=0.1,
+            limit_um=DUR_MAX_UM,
+            stop_at_ts=self._dauer_target,
+            small_phase_sec=120.0,
+            large_phase_sec=30.0,
         )
         self.dauer_worker.moveToThread(self.dauer_thread)
         self.dauer_thread.started.connect(self.dauer_worker.run)
         self.dauer_worker.update.connect(self._live_update_dur)
         self.dauer_worker.finished.connect(self._dauer_finished)
+        self.dauer_worker.error.connect(self._dauer_error)
+        self.dauer_worker.finished.connect(lambda *_: self.dauer_thread.quit())
+        self.dauer_worker.error.connect(lambda *_: self.dauer_thread.quit())
+        self.dauer_thread.finished.connect(self.dauer_worker.deleteLater)
+        self.dauer_thread.finished.connect(self.dauer_thread.deleteLater)
         self.dauer_thread.start()
 
-        self.timer=QTimer(self); self.timer.timeout.connect(self._update_timer); self.timer.start(1000)
-
     def _live_update_dur(self, data: dict):
-        self.plot.add_data(data)
+        if self.plot:
+            try:
+                self.plot.add_data(data)
+            except Exception as e:
+                print("[WARN] Dauertest Plot-Update fehlgeschlagen:", e)
+        phase = data.get("phase", "—")
+        idx = int(data.get("idx", 0))
+        total = int(data.get("total", 1))
         max_um = float(data.get("max_abs_um", 0.0))
         limit  = float(data.get("limit_um", DUR_MAX_UM))
         ok = (max_um <= limit)
         self._set_chip(self.chipDurQA, f"Dauertest QA (Limit {limit:.1f} µm): Max = {max_um:.2f} µm → {'OK' if ok else 'WARN/FAIL'}", ok=ok)
+        elapsed_sec = max(0, int(float(data.get("t", 0.0)) * 60))
+        self.pbar.setMaximum(self._duration_sec)
+        self.pbar.setValue(min(elapsed_sec, self._duration_sec))
+        pct = int(round(100 * self.pbar.value() / max(1, self._duration_sec)))
+        self.pbar.setFormat(f"Dauertest: {self._fmt_hms(self.pbar.value())} / {self._fmt_hms(self._duration_sec)} ({pct}%)")
+        self.lblPhase.setText(f"Dauertest · {phase} · Fehler {float(data.get('err_um',0.0)):.2f} µm (Max {max_um:.2f} µm)")
 
     def _dauer_finished(self, d):
-        print(f"[INFO][{self._batch}] Dauertest abgeschlossen → {d['out']}")
+        print(f"[INFO][{self._batch}] Dauertest abgeschlossen → {d.get('out')}")
         self._set_status("Dauertest beendet.")
         self._dauer_running = False
         self._set_dauer_button(False)
-        if hasattr(self,'timer') and self.timer.isActive():
-            self.timer.stop()
-        self.lblTimer.setText("00:00:00")
 
         outdir = self._ensure_run_dir()
         try:
@@ -2292,6 +2338,12 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
                 self._set_status("Bereit für neue Stage – klicke »✨ Neue Stage testen« zum Zurücksetzen.")
         except Exception as e:
             print("[WARN] Frage nach Reset fehlgeschlagen:", e)
+
+    def _dauer_error(self, msg: str):
+        QMessageBox.warning(self, "Dauertest", f"Fehler:\n{msg}")
+        self._dauer_running = False
+        self._set_dauer_button(False)
+        self._set_status("Dauertest fehlgeschlagen.")
 
     def _stop_dauertest(self):
         if not self._dauer_running: return
@@ -2764,4 +2816,3 @@ if __name__=="__main__":
     apply_dark_theme(app)
     gui=StageGUI(); gui.show()
     sys.exit(app.exec())
-
