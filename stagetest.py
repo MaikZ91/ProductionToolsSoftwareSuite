@@ -64,9 +64,9 @@ from PySide6.QtGui     import (
     QRegularExpressionValidator, QIcon, QImage
 )
 
+from ie_Framework.Algorithm.laser_spot_detection import LaserSpotDetector
+from ie_Framework.Hardware.Camera.ids_camera import IdsCam
 import gitterschieber as gs
-from ids_camera import IdsCam
-from laser_spot_detection import LaserSpotDetector
 from z_trieb import ZTriebWidget
 
 # ========================== DATENBANK / INFRA ==========================
