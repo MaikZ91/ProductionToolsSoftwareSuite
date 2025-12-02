@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections import deque
 
 import pandas as pd
 
@@ -56,15 +57,16 @@ from PySide6.QtWidgets import (
     QProgressBar, QMessageBox, QVBoxLayout, QHBoxLayout, QGridLayout,
     QFrame, QSizePolicy, QSpacerItem, QComboBox, QToolButton, QTableView,
     QStackedWidget, QSlider, QDoubleSpinBox, QDialog, QListWidget,
-    QScrollArea, QCheckBox, QFormLayout, QGroupBox
+    QScrollArea, QCheckBox, QFormLayout, QGroupBox, QHeaderView, QAbstractItemView, QDial
 )
 from PySide6.QtGui     import (
     QPixmap, QPalette, QColor, QFont, QShortcut, QKeySequence,
     QRegularExpressionValidator, QIcon, QImage, QPainter, QPen
 )
 
-from ie_Framework.Algorithm.laser_spot_detection import LaserSpotDetector
-from ie_Framework.Hardware.Camera.ids_camera import IdsCam
+import autofocus
+from autofocus import IdsCam, LaserSpotDetector, LiveLaserController
+from commonIE import dbConnector
 import commonIE
 from commonIE import miltenyiBarcode
 import datenbank as db
@@ -86,13 +88,13 @@ MEAS_MAX_UM = 10.0   # Max. |Delta| in Messung
 # ================================================================
 # THEME
 # ================================================================
-ACCENT   = "#ff2740"
-BG       = "#0b0b0f"
-BG_ELEV  = "#121218"
-FG       = "#e8e8ea"
-FG_MUTED = "#9ea0a6"
-BORDER   = "#222230"
-HOVER    = "#1b1b26"
+ACCENT   = "#3FA7D6"   # Klarer Industrie-Akzent (Blau)
+BG       = "#0c1016"
+BG_ELEV  = "#141a22"
+FG       = "#e4e7ec"
+FG_MUTED = "#9aa3b3"
+BORDER   = "#1e2631"
+HOVER    = "#1a2330"
 
 plt.rcParams.update({
     "figure.facecolor": BG_ELEV,
@@ -126,9 +128,9 @@ QLabel {{ color: {FG}; font-size: 13px; }}
 QLineEdit, QTextEdit {{
   background-color: {BG_ELEV};
   color: {FG};
-  padding: 10px 12px;
+  padding: 8px 10px;
   border: 1px solid {BORDER};
-  border-radius: 10px;
+  border-radius: 8px;
   selection-background-color: {ACCENT};
 }}
 QLineEdit:focus, QTextEdit:focus {{ border-color: {ACCENT}; }}
@@ -136,30 +138,78 @@ QLineEdit:focus, QTextEdit:focus {{ border-color: {ACCENT}; }}
 QPushButton {{
   background-color: {BG_ELEV};
   color: {FG};
-  padding: 10px 14px;
+  padding: 8px 12px;
   border: 1px solid {BORDER};
-  border-radius: 12px;
+  border-radius: 10px;
   font-weight: 600;
-  min-height: 40px;
+  min-height: 34px;
 }}
 QPushButton:hover {{ background-color: {HOVER}; border-color: {ACCENT}; }}
 QPushButton:pressed {{ background-color: {ACCENT}; color: #0b0b0f; border-color: {ACCENT}; }}
 QPushButton:disabled {{ background: #14141b; color: {FG_MUTED}; border-color: {BORDER}; }}
+QPushButton[variant="primary"] {{
+  background-color: {ACCENT};
+  color: #0b0b0f;
+  border-color: {ACCENT};
+  box-shadow: none;
+}}
+QPushButton[variant="primary"]:hover {{ background-color: #34b58f; border-color: #34b58f; }}
+QPushButton[variant="primary"]:pressed {{ background-color: #259270; }}
+QPushButton[variant="ghost"] {{
+  background-color: transparent;
+  color: {FG};
+  border-color: {BORDER};
+}}
+QPushButton[variant="ghost"]:hover {{ background-color: {HOVER}; border-color: {ACCENT}; }}
+QLineEdit[variant="metric"] {{
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  padding: 6px 10px;
+}}
+QLabel[role="section"] {{
+  color: {FG};
+  font-weight: 700;
+  font-size: 12px;
+}}
 
 QProgressBar {{
   background: {BG_ELEV};
   color: {FG};
   border: 1px solid {BORDER};
-  border-radius: 10px;
+  border-radius: 8px;
   text-align: center;
-  height: 20px;
+  height: 18px;
 }}
-QProgressBar::chunk {{ background-color: {ACCENT}; border-radius: 8px; }}
+QProgressBar::chunk {{ background-color: {ACCENT}; border-radius: 6px; }}
+
+QComboBox, QSpinBox, QDoubleSpinBox {{
+  background-color: {BG_ELEV};
+  color: {FG};
+  padding: 6px 10px;
+  border: 1px solid {BORDER};
+  border-radius: 8px;
+  min-height: 32px;
+}}
+QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{ border-color: {ACCENT}; }}
+QComboBox::drop-down {{ border: none; width: 22px; }}
+QSlider::groove:horizontal {{
+  border: 1px solid {BORDER};
+  height: 6px;
+  background: {BG_ELEV};
+  border-radius: 5px;
+}}
+QSlider::handle:horizontal {{
+  background: {ACCENT};
+  border: 1px solid {ACCENT};
+  width: 14px;
+  margin: -5px 0;
+  border-radius: 8px;
+}}
 
 QFrame#Card {{
   background-color: {BG_ELEV};
   border: 1px solid {BORDER};
-  border-radius: 16px;
+  border-radius: 12px;
 }}
 QLabel#CardTitle {{
   color: {FG};
@@ -174,6 +224,24 @@ QLabel#Chip {{
   border-radius: 999px;
   border: 1px solid {BORDER};
   font-size: 12px;
+}}
+
+QToolButton[variant="tile"] {{
+  background-color: {BG_ELEV};
+  color: {FG};
+  border: 1px solid {BORDER};
+  border-radius: 12px;
+  padding: 10px;
+  font-weight: 700;
+}}
+QToolButton[variant="tile"]:hover {{
+  background-color: {HOVER};
+  border-color: {ACCENT};
+}}
+QToolButton[variant="tile"]:pressed {{
+  background-color: {ACCENT};
+  color: #0b0b0f;
+  border-color: {ACCENT};
 }}
 """
 
@@ -405,9 +473,20 @@ class Dashboard(QWidget):
         self.table.setSortingEnabled(True)
         self.table.setModel(self.proxy_model)
         self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Stretch)
+        header.setMinimumSectionSize(90)
+        self.table.verticalHeader().setDefaultSectionSize(26)
+        self.table.setFixedHeight(230)
 
-        entry_group = QGroupBox("Neuen Datensatz senden")
-        entry_layout = QVBoxLayout()
+        entry_card = Card("Neuen Datensatz senden")
+        entry_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        entry_card.setMinimumHeight(210)
+        entry_card.setMaximumHeight(280)
+        entry_layout = entry_card.body
 
         common_form = QFormLayout()
         self.le_barcode = QLineEdit()
@@ -458,8 +537,8 @@ class Dashboard(QWidget):
         self.entry_stack.addWidget(w_stage)
 
         btn_row = QHBoxLayout()
-        self.btn_send = QPushButton("Senden")
-        self.btn_clear = QPushButton("Felder leeren")
+        self.btn_send = UiFactory.button("Senden", variant="primary")
+        self.btn_clear = UiFactory.button("Felder leeren", variant="ghost")
         btn_row.addStretch()
         btn_row.addWidget(self.btn_clear)
         btn_row.addWidget(self.btn_send)
@@ -467,7 +546,6 @@ class Dashboard(QWidget):
         entry_layout.addLayout(common_form)
         entry_layout.addWidget(self.entry_stack)
         entry_layout.addLayout(btn_row)
-        entry_group.setLayout(entry_layout)
 
         self.btn_send.clicked.connect(self.send_current_entry)
         self.btn_clear.clicked.connect(self.clear_entry_fields)
@@ -475,8 +553,10 @@ class Dashboard(QWidget):
         main_layout.addWidget(title)
         main_layout.addLayout(kpi_layout)
         main_layout.addLayout(controls)
-        main_layout.addWidget(self.table)
-        main_layout.addWidget(entry_group)
+        main_layout.addWidget(self.table, 1)
+        main_layout.addSpacing(10)
+        main_layout.addWidget(entry_card, 0)
+        main_layout.addStretch(1)
         self.setLayout(main_layout)
 
         if not self._filter_connected:
@@ -540,48 +620,11 @@ class Dashboard(QWidget):
                 pass
 
     def fetch_data_from_db(self, testtype: str, limit: int = LIMIT_ROWS) -> pd.DataFrame:
-        if not self._open_conn():
-            return pd.DataFrame()
-
         try:
-            raw = self.conn.getLastTests(limit, testtype)
+            return db.fetch_test_data(testtype, limit=limit)
         except Exception as e:
             QMessageBox.warning(self, "DB Fehler", f"Datenabruf fehlgeschlagen:\n{e}")
-            self._close_conn()
             return pd.DataFrame()
-
-        self._close_conn()
-
-        if isinstance(raw, pd.DataFrame):
-            df = raw.copy()
-        elif isinstance(raw, str):
-            df = self._parse_string_to_df(raw)
-        else:
-            df = pd.DataFrame({"_raw": [str(raw)]})
-
-        if "ok" not in df.columns:
-            df["ok"] = pd.NA
-
-        for col in ("StartTest", "EndTest"):
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors="coerce")
-
-        return df
-
-    def _parse_string_to_df(self, raw: str) -> pd.DataFrame:
-        try:
-            obj = json.loads(raw)
-            if isinstance(obj, list):
-                return pd.DataFrame(obj)
-            if isinstance(obj, dict):
-                return pd.DataFrame([obj])
-        except Exception:
-            pass
-        try:
-            return pd.read_csv(io.StringIO(raw))
-        except Exception:
-            pass
-        return pd.DataFrame({"raw": [raw]})
 
     def update_data(self):
         key = self.combo_testtype.currentText()
@@ -641,7 +684,7 @@ class Dashboard(QWidget):
             return
 
         try:
-            barcode_obj = ie_Framework.miltenyiBarcode.mBarcode(barcode_str)
+            barcode_obj = miltenyiBarcode.mBarcode(barcode_str)
         except Exception as e:
             QMessageBox.warning(self, "Barcode Fehler", f"Konnte Barcode nicht erzeugen:\n{e}")
             return
@@ -696,15 +739,79 @@ class Card(QFrame):
     def __init__(self, title: str = "", right_widget: QWidget | None = None, parent=None):
         super().__init__(parent)
         self.setObjectName("Card")
-        lay = QVBoxLayout(self); lay.setContentsMargins(18,16,18,16); lay.setSpacing(12)
+        lay = QVBoxLayout(self); lay.setContentsMargins(14,12,14,12); lay.setSpacing(10)
         header = QHBoxLayout(); header.setSpacing(8)
         self.title = QLabel(title); self.title.setObjectName("CardTitle")
         header.addWidget(self.title)
         header.addStretch(1)
         if right_widget: header.addWidget(right_widget, 0, Qt.AlignRight)
         lay.addLayout(header)
-        self.body = QVBoxLayout(); self.body.setSpacing(10)
+        self.body = QVBoxLayout(); self.body.setSpacing(8)
         lay.addLayout(self.body)
+
+# ================================================================
+# UI Factory (wiederverwendbare Komponenten)
+# ================================================================
+class UiFactory:
+    LABEL_WIDTH = 112
+    FIELD_HEIGHT = 34
+
+    @staticmethod
+    def button(text: str, *, variant: str = "default", min_height: int | None = None, tooltip: str | None = None) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setProperty("variant", variant)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setAutoDefault(False)
+        btn.setMinimumHeight(min_height or UiFactory.FIELD_HEIGHT)
+        if tooltip:
+            btn.setToolTip(tooltip)
+        return btn
+
+    @staticmethod
+    def line_edit(placeholder: str = "", *, read_only: bool = False, width: int | None = None) -> QLineEdit:
+        le = QLineEdit()
+        le.setPlaceholderText(placeholder)
+        le.setReadOnly(read_only)
+        le.setMinimumHeight(UiFactory.FIELD_HEIGHT)
+        if read_only:
+            le.setProperty("variant", "metric")
+        if width:
+            le.setFixedWidth(width)
+        return le
+
+    @staticmethod
+    def chip(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setObjectName("Chip")
+        return lbl
+
+    @staticmethod
+    def section_label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setProperty("role", "section")
+        return lbl
+
+    @staticmethod
+    def form_row(label_text: str, widget: QWidget) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        lbl = UiFactory.section_label(label_text)
+        lbl.setFixedWidth(UiFactory.LABEL_WIDTH)
+        row.addWidget(lbl)
+        row.addWidget(widget, 1)
+        return row
+
+    @staticmethod
+    def metric_field(label_text: str, placeholder: str = "") -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        lbl = UiFactory.section_label(label_text)
+        lbl.setFixedWidth(UiFactory.LABEL_WIDTH)
+        field = UiFactory.line_edit(placeholder, read_only=True)
+        row.addWidget(lbl)
+        row.addWidget(field, 1)
+        row.field = field  # type: ignore[attr-defined]
+        return row
 
 # ================================================================
 # Workflow-Kacheln (Icons sicher laden)
@@ -720,22 +827,13 @@ def _safe_icon(path: str) -> QIcon:
 def make_tile(text: str, icon_path: str, clicked_cb):
     btn = QToolButton()
     btn.setIcon(_safe_icon(icon_path))
-    btn.setIconSize(QSize(72, 72))
+    btn.setIconSize(QSize(64, 64))
     btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
     btn.setText(text)
-    btn.setMinimumSize(130, 100)
-    btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+    btn.setMinimumSize(120, 90)
+    btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
     btn.setAutoRaise(False)
-    btn.setStyleSheet("""
-        QToolButton {
-            background-color: %s;
-            border: 1px solid %s;
-            border-radius: 14px;
-            padding: 10px;
-            font-weight: 600;
-        }
-        QToolButton:hover { background-color: %s; border-color: %s; }
-    """ % (BG_ELEV, BORDER, HOVER, ACCENT))
+    btn.setProperty("variant", "tile")
     btn.clicked.connect(clicked_cb)
     return btn
 
@@ -792,9 +890,7 @@ class LiveCamEmbed(QWidget):
             return
         self._last_frame = frame
         try:
-            qimg = self._to_qimage(frame)
-            pm = QPixmap.fromImage(qimg)
-            pm = pm.scaled(self.label.width(), self.label.height(), Qt.KeepAspectRatio)
+            pm = frame_to_qpixmap(frame, (self.label.width(), self.label.height()))
             self.label.setPixmap(pm)
             self.status.setText("Livebild aktualisiert.")
         except Exception as exc:
@@ -814,194 +910,108 @@ class LiveCamEmbed(QWidget):
         raise ValueError("Unsupported frame shape.")
 
 
-def _ensure_gray8(frame: np.ndarray) -> tuple[np.ndarray, int, int]:
-    """Return (gray_frame_uint8, width, height) for any supported input frame."""
-    if frame.ndim == 3 and frame.shape[2] == 3:
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    if frame.dtype != np.uint8:
-        max_val = float(frame.max() or 1.0)
-        frame = np.clip(frame.astype(np.float32) / max_val * 255.0, 0, 255).astype(np.uint8)
-    gray = np.ascontiguousarray(frame)
-    h, w = gray.shape
-    return gray, w, h
-
-
-def _simulate_dummy_centroid(tick: int, width: int, height: int) -> tuple[int, int]:
-    """Pseudo-random moving centroid for dummy mode (mirrors old detector logic)."""
-    cx = int(width / 2 + np.sin(tick / 12.0) * (width * 0.25))
-    cy = int(height / 2 + np.cos(tick / 15.0) * (height * 0.25))
-    return cx, cy
-
-
-def paint_laser_overlay(
-    frame: np.ndarray,
-    detector: LaserSpotDetector,
-    *,
-    accent_color: str = ACCENT,
-    ref_point: tuple[int, int] | None = None,
-    is_dummy: bool = False,
-    simulate_fn=None,
-) -> tuple[QImage, tuple[int, int]]:
-    """Draw laser overlays for a frame and return the QImage plus centroid."""
-    gray, width, height = _ensure_gray8(frame)
-    frame_bytes = gray.tobytes()
-    if is_dummy:
-        if simulate_fn is not None:
-            cx, cy = simulate_fn(width, height)
-        else:
-            cx, cy = (width // 2, height // 2)
+def frame_to_qpixmap(frame, target_size=None) -> QPixmap:
+    """Convert BGR/gray frame into a QPixmap, scaled to target_size when given."""
+    if frame.ndim == 2:
+        arr = frame
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr.astype(np.float32) / float(arr.max() or 1) * 255.0, 0, 255).astype(np.uint8)
+        h, w = arr.shape
+        qimg = QImage(arr.data, w, h, w, QImage.Format_Grayscale8)
+    elif frame.ndim == 3 and frame.shape[2] == 3:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
     else:
-        cx, cy = detector.detect_laser_spot(gray)
-    ref = ref_point
-    qimg = QImage(frame_bytes, width, height, width, QImage.Format_Grayscale8).copy()
-    if qimg.format() != QImage.Format_ARGB32:
-        qimg = qimg.convertToFormat(QImage.Format_ARGB32)
-    painter = QPainter(qimg)
-    try:
-        pen_cam = QPen(QColor(accent_color))
-        pen_cam.setWidth(3)
-        pen_cam.setStyle(Qt.DashLine)
-        painter.setPen(pen_cam)
-        cx0 = width // 2
-        cy0 = height // 2
-        painter.drawLine(cx0, 0, cx0, height)
-        painter.drawLine(0, cy0, width, cy0)
-    except Exception:
-        pass
-    try:
-        pen_l = QPen(QColor(accent_color))
-        pen_l.setWidth(3)
-        pen_l.setCapStyle(Qt.RoundCap)
-        painter.setPen(pen_l)
-        size = max(6, min(width, height) // 20)
-        painter.drawLine(max(0, cx - size), cy, min(width, cx + size), cy)
-        painter.drawLine(cx, max(0, cy - size), cx, min(height, cy + size))
-    except Exception:
-        pass
-    if ref is not None:
-        try:
-            rx, ry = ref
-            pen_r = QPen(QColor("#ffd60a"))
-            pen_r.setWidth(2)
-            painter.setPen(pen_r)
-            rsize = max(6, min(width, height) // 30)
-            painter.drawEllipse(
-                int(rx - rsize // 2),
-                int(ry - rsize // 2),
-                int(rsize),
-                int(rsize),
-            )
-            pen_line = QPen(QColor("#ffd60a"))
-            pen_line.setStyle(Qt.DashLine)
-            painter.setPen(pen_line)
-            painter.drawLine(rx, ry, cx, cy)
-        except Exception:
-            pass
-    try:
-        painter.end()
-    except Exception:
-        pass
-    return qimg, (cx, cy)
-
-
-class LiveLaserController(QObject):
-    """Simple live controller that grabs frames and emits overlays for laser centering."""
-
-    frameReady = Signal(QImage)
-    centerChanged = Signal(int, int)
-
-    def __init__(self, device_index: int, detector: LaserSpotDetector, parent=None):
-        super().__init__(parent)
-        self.device_index = device_index
-        self.detector = detector
-        self.cam: IdsCam | None = None
-        self.is_dummy = False
-        self._sim_tick = 0
-        self._ref_point: tuple[int, int] | None = None
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        self._init_camera()
-
-    def _init_camera(self):
-        try:
-            self.cam = IdsCam(index=self.device_index, set_min_exposure=False)
-            self.is_dummy = bool(getattr(self.cam, "_dummy", False))
-        except Exception as exc:
-            self.cam = None
-            self.is_dummy = True
-            print(f"[WARN] Kamera konnte nicht initialisiert werden: {exc}")
-
-    def start(self, interval_ms: int = 120):
-        if not self._timer.isActive():
-            self._timer.start(interval_ms)
-
-    def stop(self):
-        if self._timer.isActive():
-            self._timer.stop()
-
-    def shutdown(self):
-        self.stop()
-        try:
-            if self.cam is not None:
-                self.cam.shutdown()
-        except Exception:
-            pass
-
-    def _tick(self):
-        if self.cam is None:
-            return
-        try:
-            frame = self.cam.aquise_frame()
-            if frame is None:
-                return
-            qimg, (cx, cy) = paint_laser_overlay(
-                frame,
-                self.detector,
-                ref_point=self._ref_point,
-                is_dummy=self.is_dummy,
-                simulate_fn=self._next_dummy_centroid if self.is_dummy else None,
-            )
-            self.frameReady.emit(qimg)
-            self.centerChanged.emit(int(cx), int(cy))
-        except Exception as exc:
-            print(f"[WARN] Live-Frame fehlgeschlagen: {exc}")
-
-    # ---- Camera controls -------------------------------------------------
-    def set_exposure_us(self, exposure_us: int):
-        if self.cam is None:
-            return
-        try:
-            self.cam.set_exposure_us(int(exposure_us))
-        except Exception as exc:
-            print(f"[WARN] Exposure setzen fehlgeschlagen: {exc}")
-
-    def get_exposure_limits_us(self) -> tuple[float, float, float]:
-        if self.cam is None:
-            return 2000.0, 50.0, 200000.0
-        try:
-            return self.cam.get_exposure_limits_us()
-        except Exception as exc:
-            print(f"[WARN] Exposure-Limits nicht lesbar: {exc}")
-            return 2000.0, 50.0, 200000.0
-
-    def _next_dummy_centroid(self, width: int, height: int) -> tuple[int, int]:
-        """Advance dummy centroid tick and return simulated center."""
-        cx, cy = _simulate_dummy_centroid(self._sim_tick, width, height)
-        self._sim_tick += 1
-        return cx, cy
-
-    # ---- Reference point handling ---------------------------------------
-    def set_reference_point(self, x: int | None, y: int | None):
-        if x is None or y is None:
-            self._ref_point = None
+        raise ValueError("Unsupported frame shape.")
+    pm = QPixmap.fromImage(qimg)
+    if target_size is not None:
+        if isinstance(target_size, QSize):
+            w, h = target_size.width(), target_size.height()
         else:
-            self._ref_point = (int(x), int(y))
+            w, h = target_size
+        if w and h:
+            pm = pm.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    return pm
 
-    def clear_reference_point(self):
-        self._ref_point = None
 
-    def get_reference_point(self) -> tuple[int, int] | None:
-        return self._ref_point
+class GitterschieberLiveChart(QWidget):
+    """Live-Chart fǬr Partikelcount und mittlere Gr��e (angelehnt an alte GUI)."""
+    add_data = Signal(int, object)
+
+    def __init__(self, parent=None, max_points: int = 300):
+        super().__init__(parent)
+        fig = Figure(figsize=(4, 2.2), tight_layout=True)
+        self.canvas = FigureCanvas(fig)
+        self.ax = fig.add_subplot(111)
+        self.ax.set_facecolor(BG)
+        for spine in self.ax.spines.values():
+            spine.set_color(BORDER); spine.set_linewidth(0.8)
+        self.ax.tick_params(colors=FG_MUTED)
+        self.ax.grid(True, alpha=0.25, color=BORDER)
+        self.ax.set_xlabel("Frame", color=FG_MUTED)
+        self.ax.set_ylabel("Anzahl", color=FG)
+
+        self.ax2 = self.ax.twinx()
+        self.ax2.set_ylabel("Durchmesser [px]", color="#ffd166")
+        self.ax2.tick_params(colors=FG_MUTED)
+
+        self.x = deque(maxlen=max_points)
+        self.counts = deque(maxlen=max_points)
+        self.mean_sizes = deque(maxlen=max_points)
+        self.counter = 0
+
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(6)
+        title = QLabel("Live: Partikel & �~-Gr��Ye", self)
+        title.setStyleSheet("font-weight:600;")
+        lay.addWidget(title)
+        lay.addWidget(self.canvas)
+
+        self.line_count, = self.ax.plot([], [], linewidth=2.0, label="Count", color="#5cc8ff")
+        self.line_mean, = self.ax2.plot([], [], linewidth=1.8, linestyle="--", label="�~-Durchmesser", color="#ffd166")
+
+        lines = [self.line_count, self.line_mean]
+        labels = [l.get_label() for l in lines]
+        leg = self.ax.legend(lines, labels, loc="upper left", frameon=True)
+        leg.get_frame().set_alpha(0.2)
+        leg.get_frame().set_facecolor(BG_ELEV)
+        leg.get_frame().set_edgecolor(BORDER)
+        for text in leg.get_texts():
+            text.set_color(FG)
+
+        self.add_data.connect(self._on_add)
+
+    def reset(self):
+        self.counter = 0
+        self.x.clear(); self.counts.clear(); self.mean_sizes.clear()
+        self.line_count.set_data([], []); self.line_mean.set_data([], [])
+        self.canvas.draw_idle()
+
+    def _on_add(self, count: int, mean_d):
+        self.counter += 1
+        self.x.append(self.counter)
+        self.counts.append(count)
+        self.mean_sizes.append(np.nan if mean_d is None else float(mean_d))
+
+        self.line_count.set_data(self.x, self.counts)
+        self.line_mean.set_data(self.x, self.mean_sizes)
+
+        xmax = self.counter + 2
+        xmin = max(0, xmax - len(self.x) - 2)
+        self.ax.set_xlim(xmin, xmax)
+
+        ymax_left = max(5, (max(self.counts) if len(self.counts) else 5) * 1.25)
+        self.ax.set_ylim(0, ymax_left)
+
+        valid_sizes = [v for v in list(self.mean_sizes) if np.isfinite(v)]
+        if valid_sizes:
+            max_right = max(valid_sizes); min_right = min(valid_sizes)
+            pad = max(1.0, 0.1 * (max_right - min_right if max_right > min_right else 1.0))
+            self.ax2.set_ylim(max(0, min_right - pad), max_right + pad)
+        else:
+            self.ax2.set_ylim(0, 10)
+
+        self.canvas.draw_idle()
 
 
 class CameraWindow(QWidget):
@@ -1181,7 +1191,9 @@ class StageGUI(QWidget):
         self._warned_camera_sim = False
         self.statusBar: QLabel | None = None
         self._pending_status: str | None = None
-        self._af_cam = None
+        self._gitterschieber_total_count = 0
+        self._gs_particle_img = pathlib.Path(__file__).with_name('particle_dialog_image.jpg')
+        self._gs_angle_img = pathlib.Path(__file__).with_name('angle_dialog_image.jpg')
 
         # Neu: Zielkamera für Exposure-UI (wird nur für Fallback genutzt)
         self._expo_target_idx = 0
@@ -1201,8 +1213,7 @@ class StageGUI(QWidget):
 
         def add_back_btn(container_layout):
             """Helper: adds a 'Zurück zum Workflow' button to the given layout."""
-            btn = QPushButton("Zurück zum Workflow")
-            btn.setMinimumHeight(32)
+            btn = UiFactory.button("Zurück zum Workflow", variant="ghost", min_height=36)
             btn.clicked.connect(self._show_stage_workflow)
             row = QHBoxLayout()
             row.addWidget(btn)
@@ -1210,17 +1221,13 @@ class StageGUI(QWidget):
             container_layout.addLayout(row)
 
         # Header
-        header = QHBoxLayout(); header.setSpacing(10)
+        header = QHBoxLayout(); header.setSpacing(8)
         title = QLabel("Stage-Toolbox"); f = QFont("Inter", 18, QFont.Bold); title.setFont(f)
         header.addWidget(title); header.addStretch(1)
-        self.chipBatch = QLabel("Charge: NoBatch"); self.chipBatch.setObjectName("Chip")
-        header.addWidget(self.chipBatch)
         # Seriennummer-Suche (sucht im Stage-Teststand-Datenordner nach Dateien/Ordnern)
-        self.edSearchSN = QLineEdit(); self.edSearchSN.setPlaceholderText("Seriennummer suchen…")
-        self.edSearchSN.setFixedWidth(220)
+        self.edSearchSN = UiFactory.line_edit("Seriennummer suchen…", width=240)
         header.addWidget(self.edSearchSN)
-        self.btnFindSN = QPushButton("Find SN")
-        self.btnFindSN.setMinimumHeight(28)
+        self.btnFindSN = UiFactory.button("Find SN", variant="ghost", min_height=32)
         self.btnFindSN.clicked.connect(lambda: self._on_search_sn())
         self.edSearchSN.returnPressed.connect(lambda: self.btnFindSN.click())
         # Live search: update as the user types (debounced)
@@ -1229,13 +1236,11 @@ class StageGUI(QWidget):
         self.edSearchSN.installEventFilter(self)
         header.addWidget(self.btnFindSN)
 
-        self.btnLiveViewTab = QPushButton("LIVE VIEW")
-        self.btnLiveViewTab.setMinimumHeight(32)
+        self.btnLiveViewTab = UiFactory.button("LIVE VIEW", variant="ghost", min_height=32)
         self.btnLiveViewTab.clicked.connect(self._open_live_view)
         header.addWidget(self.btnLiveViewTab)
 
-        self.btnWorkflowHome = QPushButton("Workflow")
-        self.btnWorkflowHome.setMinimumHeight(32)
+        self.btnWorkflowHome = UiFactory.button("Workflow", variant="ghost", min_height=32)
         self.btnWorkflowHome.clicked.connect(self._show_stage_workflow)
         header.addWidget(self.btnWorkflowHome)
 
@@ -1256,6 +1261,22 @@ class StageGUI(QWidget):
         self._sn_popup.itemClicked.connect(lambda it: self._open_selected_sn(it))
         self._sn_popup.itemDoubleClicked.connect(lambda it: self._open_selected_sn(it))
         root.addLayout(header)
+
+        # Summary Bar (globale Info)
+        self.chipBatch = UiFactory.chip("Charge: NoBatch")
+        self.lblTimer = UiFactory.chip("15:00:00")
+        self.chipMeasQA = UiFactory.chip("Messung QA: —")
+        self.chipDurQA  = UiFactory.chip(f"Dauertest QA (Limit {resolve_stage.DUR_MAX_UM:.1f} µm): —")
+
+        summaryCard = Card("Übersicht")
+        summaryRow = QHBoxLayout(); summaryRow.setSpacing(10)
+        summaryRow.addWidget(self.chipBatch)
+        summaryRow.addWidget(self.lblTimer)
+        summaryRow.addWidget(self.chipMeasQA)
+        summaryRow.addWidget(self.chipDurQA)
+        summaryRow.addStretch(1)
+        summaryCard.body.addLayout(summaryRow)
+        root.addWidget(summaryCard)
 
         assets_dir = pathlib.Path(__file__).resolve().parent / "assets"
         stage_img = str((assets_dir / "stage_tile.png").resolve())
@@ -1279,7 +1300,7 @@ class StageGUI(QWidget):
 
         self.workflowCard = Card("Workflow")
         stageLayout.addWidget(self.workflowCard)
-        tiles = QHBoxLayout(); tiles.setSpacing(12)
+        tiles = QHBoxLayout(); tiles.setSpacing(10); tiles.setContentsMargins(2, 2, 2, 2)
         self.btnStageTile = make_tile("Stage", stage_img, self._show_stage_workflow)
         self.btnAutofocusTile = make_tile("Autofocus", af_img, self._open_autofocus_workflow)
         self.btnLaserTile = make_tile("Laserscan Modul", laser_img, self._open_laserscan_workflow)
@@ -1294,7 +1315,8 @@ class StageGUI(QWidget):
         self.workflowCard.body.addLayout(tiles)
 
         # Hauptgrid
-        grid = QGridLayout(); grid.setHorizontalSpacing(14); grid.setVerticalSpacing(14)
+        grid = QGridLayout(); grid.setHorizontalSpacing(12); grid.setVerticalSpacing(12)
+        grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
         stageLayout.addLayout(grid, 1)
 
         # Left: Controls + Meta
@@ -1302,36 +1324,29 @@ class StageGUI(QWidget):
         grid.addWidget(self.cardBatch, 0, 0)
 
         # Operator
-        opLay = QHBoxLayout()
-        self.edOperator = QLineEdit(); self.edOperator.setPlaceholderText("Bediener: z. B. M. Zschach")
-        opLay.addWidget(QLabel("Operator")); opLay.addWidget(self.edOperator)
-        self.cardBatch.body.addLayout(opLay)
+        self.edOperator = UiFactory.line_edit("Bediener: z. B. M. Zschach")
+        self.cardBatch.body.addLayout(UiFactory.form_row("Operator", self.edOperator))
 
         # Batch
-        self.edBatch = QLineEdit(); self.edBatch.setPlaceholderText("Chargennummer, z. B. B2025-10-30-01")
+        self.edBatch = UiFactory.line_edit("Chargennummer, z. B. B2025-10-30-01")
         regex = QRegularExpression(r"^[A-Za-z0-9._-]{0,64}$")
         self.edBatch.setValidator(QRegularExpressionValidator(regex))
-        hb = QHBoxLayout()
-        hb.addWidget(QLabel("Charge")); hb.addWidget(self.edBatch)
-        self.cardBatch.body.addLayout(hb)
+        self.cardBatch.body.addLayout(UiFactory.form_row("Charge", self.edBatch))
 
         # Bemerkungen
         self.txtNotes = QTextEdit(); self.txtNotes.setPlaceholderText("Bemerkungen zum Lauf…")
         self.txtNotes.setFixedHeight(100)
-        self.cardBatch.body.addWidget(QLabel("Bemerkungen"))
+        self.cardBatch.body.addWidget(UiFactory.section_label("Bemerkungen"))
         self.cardBatch.body.addWidget(self.txtNotes)
 
         # Actions
         self.cardActions = Card("Aktionen")
         grid.addWidget(self.cardActions, 1, 0)
 
-        self.btnStart = QPushButton("▶  Test starten  (Ctrl+R)"); self.btnStart.clicked.connect(self._start_test)
-        self.btnDauer = QPushButton("⏱️  Dauertest starten  (Ctrl+D)"); self.btnDauer.clicked.connect(self._toggle_dauertest)
-        self.btnOpenFolder = QPushButton("📂 Ordner öffnen"); self.btnOpenFolder.setEnabled(False); self.btnOpenFolder.clicked.connect(self._open_folder)
-        self.btnKleberoboter = QPushButton("Datenbank Senden"); self.btnKleberoboter.clicked.connect(self._trigger_kleberoboter)
-
-        for b in (self.btnStart, self.btnDauer, self.btnOpenFolder, self.btnKleberoboter):
-            b.setMinimumHeight(36)
+        self.btnStart = UiFactory.button("Test starten (Ctrl+R)", variant="primary", min_height=42); self.btnStart.clicked.connect(self._start_test)
+        self.btnDauer = UiFactory.button("Dauertest starten (Ctrl+D)", variant="primary", min_height=42); self.btnDauer.clicked.connect(self._toggle_dauertest)
+        self.btnOpenFolder = UiFactory.button("Ordner öffnen", variant="ghost"); self.btnOpenFolder.setEnabled(False); self.btnOpenFolder.clicked.connect(self._open_folder)
+        self.btnKleberoboter = UiFactory.button("Datenbank senden", variant="ghost"); self.btnKleberoboter.clicked.connect(self._trigger_kleberoboter)
 
         # Dauertest-Button + Dauer-Dropdown nebeneinander
         dauerRow = QHBoxLayout(); dauerRow.setSpacing(8)
@@ -1367,22 +1382,13 @@ class StageGUI(QWidget):
 
         # Kalibrierdaten
         self.cardStatus.body.addItem(QSpacerItem(0,6, QSizePolicy.Minimum, QSizePolicy.Fixed))
-        self.lblCalibTitle = QLabel("Kalibrierung"); self.lblCalibTitle.setObjectName("CardTitle")
-        self.cardStatus.body.addWidget(self.lblCalibTitle)
+        self.cardStatus.body.addWidget(UiFactory.section_label("Kalibrierung"))
         self.lblCalib = QLabel("—")
         self.cardStatus.body.addWidget(self.lblCalib)
 
-        # QA-Chips
-        self.cardStatus.body.addItem(QSpacerItem(0,6, QSizePolicy.Minimum, QSizePolicy.Fixed))
-        qaRow = QHBoxLayout()
-        self.chipMeasQA = QLabel("Messung QA: —"); self.chipMeasQA.setObjectName("Chip")
-        self.chipDurQA  = QLabel(f"Dauertest QA (Limit {resolve_stage.DUR_MAX_UM:.1f} µm): —"); self.chipDurQA.setObjectName("Chip")
-        qaRow.addWidget(self.chipMeasQA); qaRow.addWidget(self.chipDurQA)
-        self.cardStatus.body.addLayout(qaRow)
-
         # Neue Stage testen
         self.cardStatus.body.addItem(QSpacerItem(0,8, QSizePolicy.Minimum, QSizePolicy.Fixed))
-        self.btnNewStage = QPushButton("✨ Neue Stage testen")
+        self.btnNewStage = UiFactory.button("Neue Stage testen", variant="primary")
         self.btnNewStage.setVisible(False)
         self.btnNewStage.clicked.connect(self._new_stage)
         self.cardStatus.body.addWidget(self.btnNewStage)
@@ -1390,8 +1396,6 @@ class StageGUI(QWidget):
         # Live-Plot Card
         self.cardPlot = Card("Live-Plot")
         grid.addWidget(self.cardPlot, 1, 1)
-        self.lblTimer = QLabel("15:00:00"); self.lblTimer.setObjectName("Chip")
-        self.cardPlot.layout().itemAt(0).layout().addWidget(self.lblTimer, 0, Qt.AlignRight)
         self.plotHolder = QVBoxLayout(); self.cardPlot.body.addLayout(self.plotHolder)
 
         self.stack.addWidget(self.stagePage)
@@ -1404,26 +1408,83 @@ class StageGUI(QWidget):
         gsCard = Card("Gitterschieber")
         gsLayout.addWidget(gsCard, 1)
 
-        # Gemeinsames Kamerafenster + Aktionen
-        self.gitterschieber_status = QLabel("")
+        gsGrid = QGridLayout(); gsGrid.setSpacing(12); gsGrid.setContentsMargins(0, 0, 0, 0)
+        gsCard.body.addLayout(gsGrid)
+
+        # Linke Spalte: Kamera + Status + Chart
+        leftCol = QVBoxLayout(); leftCol.setSpacing(10)
         cam_provider = lambda: gs.capture_frame()
         self.gitterschieberCam = LiveCamEmbed(
             cam_provider,
-            interval_ms=200,
+            interval_ms=150,
             start_immediately=False,
             parent=self.gitterschieberPage,
         )
-        gsCard.body.addWidget(self.gitterschieberCam)
+        leftCol.addWidget(self.gitterschieberCam)
 
-        btn_bar = QHBoxLayout()
-        btn_particle = QPushButton("Partikelanalyse")
-        btn_angle = QPushButton("Winkel-Detektion")
-        btn_particle.clicked.connect(self._on_gitterschieber_particles)
-        btn_angle.clicked.connect(self._on_gitterschieber_angle)
-        btn_bar.addWidget(btn_particle)
-        btn_bar.addWidget(btn_angle)
-        gsCard.body.addLayout(btn_bar)
-        gsCard.body.addWidget(self.gitterschieber_status)
+        angleRow = QHBoxLayout(); angleRow.setSpacing(8)
+        angleRow.addWidget(UiFactory.section_label("Angle:"))
+        self.gitterschieberAngleLabel = UiFactory.chip("0.0°")
+        self.gitterschieberAngleLabel.setFont(QFont("Inter", 14, QFont.Bold))
+        angleRow.addWidget(self.gitterschieberAngleLabel)
+        angleRow.addStretch(1)
+        leftCol.addLayout(angleRow)
+
+        frameRow = UiFactory.metric_field("Frame", "Frame Count")
+        self.gitterschieberFrameCount = frameRow.field
+        totalRow = UiFactory.metric_field("Total", "Total Count")
+        self.gitterschieberTotalCount = totalRow.field
+        leftCol.addLayout(frameRow)
+        leftCol.addLayout(totalRow)
+
+        self.gitterschieberChart = GitterschieberLiveChart(self.gitterschieberPage)
+        leftCol.addWidget(self.gitterschieberChart)
+        gsGrid.addLayout(leftCol, 0, 0, 2, 1)
+
+        # Rechte Spalte: Aktionen + Empfindlichkeit
+        rightCol = QVBoxLayout(); rightCol.setSpacing(12)
+        dialWrap = QVBoxLayout()
+        dialLabel = QLabel("Angle Dial"); dialLabel.setStyleSheet("font-weight:600;")
+        self.gitterschieberDial = QDial()
+        self.gitterschieberDial.setNotchesVisible(True)
+        self.gitterschieberDial.setRange(-180, 180)
+        self.gitterschieberDial.setValue(0)
+        self.gitterschieberDial.setToolTip("Winkelanzeige (read-only)")
+        self.gitterschieberDial.setEnabled(False)
+        dialWrap.addWidget(dialLabel)
+        dialWrap.addWidget(self.gitterschieberDial)
+        rightCol.addLayout(dialWrap)
+        self.btnGitterschieberParticle = UiFactory.button("Partikel Detektion", variant="primary", min_height=44)
+        self.btnGitterschieberAngle = UiFactory.button("Winkel Justage", variant="primary", min_height=44)
+        self.btnGitterschieberAutofocus = UiFactory.button("Autofokus", variant="ghost", min_height=40)
+        self.btnGitterschieberParticle.clicked.connect(self._on_gitterschieber_particles)
+        self.btnGitterschieberAngle.clicked.connect(self._on_gitterschieber_angle)
+        self.btnGitterschieberAutofocus.clicked.connect(self._on_gitterschieber_autofocus)
+
+        rightCol.addWidget(self.btnGitterschieberParticle)
+        rightCol.addWidget(self.btnGitterschieberAngle)
+        rightCol.addWidget(self.btnGitterschieberAutofocus)
+
+        sensWrap = QVBoxLayout()
+        lblSens = QLabel("Empfindlichkeit")
+        self.gitterschieberSensLabel = QLabel("balanced_high")
+        self.gitterschieberSensSlider = QSlider(Qt.Horizontal)
+        self.gitterschieberSensSlider.setRange(0, 100)
+        self.gitterschieberSensSlider.setValue(int(gs.DETECTION_SENSITIVITY * 100))
+        self.gitterschieberSensSlider.valueChanged.connect(self._on_gitterschieber_sensitivity_changed)
+        self._update_gitterschieber_sens_label(self.gitterschieberSensSlider.value())
+        sensRow = QHBoxLayout()
+        sensRow.addWidget(self.gitterschieberSensSlider, 1)
+        sensRow.addWidget(self.gitterschieberSensLabel)
+        sensWrap.addWidget(lblSens)
+        sensWrap.addLayout(sensRow)
+        rightCol.addLayout(sensWrap)
+
+        rightCol.addStretch(1)
+        self.gitterschieber_status = QLabel("")
+        rightCol.addWidget(self.gitterschieber_status)
+        gsGrid.addLayout(rightCol, 0, 1)
+        gsGrid.setColumnStretch(0, 3); gsGrid.setColumnStretch(1, 1)
 
         gsLayout.addStretch(1)
         self.stack.addWidget(self.gitterschieberPage)
@@ -1470,8 +1531,7 @@ class StageGUI(QWidget):
             ("MacSEQ", 3, "MacSEQ"),
         ]
         for idx, (text, device_idx, label) in enumerate(cams):
-            btn = QPushButton(text)
-            btn.setMinimumHeight(90)
+            btn = UiFactory.button(text, variant="primary", min_height=90)
             btn.clicked.connect(lambda _, i=device_idx, lbl=label: self._open_cam_idx(i, lbl))
             camGrid.addWidget(btn, idx // 2, idx % 2)
             self._autofocus_buttons.append(btn)
@@ -1570,16 +1630,9 @@ class StageGUI(QWidget):
         if DASHBOARD_WIDGET_CLS is not None:
             try:
                 self._dashboard_widget = DASHBOARD_WIDGET_CLS()
-                self._dashboard_widget.setMinimumHeight(400)
+                self._dashboard_widget.setMinimumHeight(650)
                 self._dashboard_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-                scroll = QScrollArea()
-                scroll.setWidgetResizable(True)
-                scroll.setFrameShape(QFrame.NoFrame)
-                scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-                scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-                scroll.setWidget(self._dashboard_widget)
-                self._dashboard_scroll = scroll
-                liveCard.body.addWidget(scroll, 1)
+                liveCard.body.addWidget(self._dashboard_widget, 1)
             except Exception as exc:
                 msg = QLabel(
                     f"Dashboard konnte nicht geladen werden:\n{exc}"
@@ -1671,20 +1724,13 @@ class StageGUI(QWidget):
         if self._dashboard_widget is None and DASHBOARD_WIDGET_CLS is not None:
             try:
                 self._dashboard_widget = DASHBOARD_WIDGET_CLS()
-                self._dashboard_widget.setMinimumHeight(400)
+                self._dashboard_widget.setMinimumHeight(650)
                 self._dashboard_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
                 layout = self.liveViewPage.layout()
                 if layout and layout.count() > 0:
                     card = layout.itemAt(0).widget()
                     if isinstance(card, Card):
-                        scroll = QScrollArea()
-                        scroll.setWidgetResizable(True)
-                        scroll.setFrameShape(QFrame.NoFrame)
-                        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-                        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-                        scroll.setWidget(self._dashboard_widget)
-                        self._dashboard_scroll = scroll
-                        card.body.addWidget(scroll, 1)
+                        card.body.addWidget(self._dashboard_widget, 1)
             except Exception as exc:
                 self._set_status(f"Dashboard-Start fehlgeschlagen: {exc}")
                 return
@@ -1696,9 +1742,29 @@ class StageGUI(QWidget):
         """
         try:
             self.stack.setCurrentWidget(self.gitterschieberPage)
+            self._gitterschieber_total_count = 0
+            try:
+                self.gitterschieberFrameCount.clear()
+                self.gitterschieberTotalCount.setText("0")
+                self.gitterschieberAngleLabel.setText("0.0°")
+                try:
+                    self.gitterschieberDial.setValue(0)
+                except Exception:
+                    pass
+                self.gitterschieberChart.reset()
+            except Exception:
+                pass
             try:
                 if getattr(self, "gitterschieberCam", None):
                     self.gitterschieberCam.start()
+            except Exception:
+                pass
+            try:
+                self._update_gitterschieber_sens_label(self.gitterschieberSensSlider.value())
+            except Exception:
+                pass
+            try:
+                self.btnGitterschieberParticle.setFocus()
             except Exception:
                 pass
             self._set_status("Gitterschieber geöffnet.")
@@ -1707,36 +1773,159 @@ class StageGUI(QWidget):
 
     def _on_gitterschieber_particles(self):
         try:
+            if not self._show_gitterschieber_dialog(
+                "Partikel-Detektion",
+                "Bitte die Vergrößerung am Mikroskop auf die höchste Stufe stellen\n"
+                "und mit dem Handrad auf das Live-Bild fokussieren.\n\n"
+                "Sobald das Bild passt, \"Analyse starten\" wählen.",
+                "Analyse starten",
+                self._gs_particle_img,
+            ):
+                return
             frame = self.gitterschieberCam.last_frame() or gs.capture_frame()
             if frame is None:
-                self.gitterschieber_status.setText("Kein Bild verfügbar.")
+                self._set_gitterschieber_status("Kein Bild verfügbar.")
                 return
-            gs.process_image(frame.copy())
-            self.gitterschieber_status.setText("Partikelanalyse durchgeführt.")
+            result = gs.process_image(frame.copy(), sensitivity=gs.DETECTION_SENSITIVITY)
+            df = result.get("dataframe")
+            count = int(result.get("count", len(df) if df is not None else 0))
+            self._update_gitterschieber_metrics(count, df)
+            overlay = result.get("overlay")
+            if overlay is not None:
+                self._show_gitterschieber_overlay(overlay)
+            self._set_gitterschieber_status(f"Partikelanalyse: {count} gefunden.")
         except Exception as exc:
-            self.gitterschieber_status.setText(f"Fehler: {exc}")
+            self._set_gitterschieber_status(f"Fehler: {exc}")
 
     def _on_gitterschieber_angle(self):
         try:
+            if not self._show_gitterschieber_dialog(
+                "Winkel-Analyse",
+                "Bitte die Vergrößerung wie im Referenzbild einstellen,\n"
+                "dann mit dem Handrad auf das Live-Bild fokussieren.\n\n"
+                "Wenn das Bild passt, \"Analyse starten\" drücken.",
+                "Analyse starten",
+                self._gs_angle_img,
+            ):
+                return
             frame = self.gitterschieberCam.last_frame() or gs.capture_frame()
             if frame is None:
-                self.gitterschieber_status.setText("Kein Bild verfügbar.")
+                self._set_gitterschieber_status("Kein Bild verfügbar.")
                 return
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             angle = gs.SingleImageGratingAngle(gray)
-            self.gitterschieber_status.setText(f"Winkel: {angle:.3f}°")
+            self.gitterschieberAngleLabel.setText(f"{angle:.2f}°")
+            try:
+                self.gitterschieberDial.setValue(int(round(angle)))
+            except Exception:
+                pass
+            self._set_gitterschieber_status(f"Winkel: {angle:.2f}°")
         except Exception as exc:
-            self.gitterschieber_status.setText(f"Fehler: {exc}")
+            self._set_gitterschieber_status(f"Fehler: {exc}")
+
+    def _on_gitterschieber_autofocus(self):
+        self._set_gitterschieber_status("Autofokus aktuell nicht integriert.")
+
+    def _on_gitterschieber_sensitivity_changed(self, val: int):
+        gs.DETECTION_SENSITIVITY = float(val) / 100.0
+        self._update_gitterschieber_sens_label(val)
+        frame = self.gitterschieberCam.last_frame()
+        if frame is None:
+            return
+        try:
+            result = gs.process_image(frame.copy(), sensitivity=gs.DETECTION_SENSITIVITY)
+            df = result.get("dataframe")
+            count = int(result.get("count", len(df) if df is not None else 0))
+            self._update_gitterschieber_metrics(count, df, accumulate=False)
+            overlay = result.get("overlay")
+            if overlay is not None:
+                self._show_gitterschieber_overlay(overlay)
+        except Exception:
+            pass
+
+    def _update_gitterschieber_metrics(self, count: int, df: pd.DataFrame | None, *, accumulate: bool = True):
+        try:
+            self.gitterschieberFrameCount.setText(str(count))
+            if accumulate:
+                self._gitterschieber_total_count += count
+            self.gitterschieberTotalCount.setText(str(self._gitterschieber_total_count))
+        except Exception:
+            pass
+        mean_d = None
+        try:
+            if df is not None and not df.empty:
+                mean_d = float(df["equiv_diam_px"].mean())
+        except Exception:
+            mean_d = None
+        try:
+            self.gitterschieberChart.add_data.emit(count, mean_d)
+        except Exception:
+            pass
+
+    def _show_gitterschieber_overlay(self, frame):
+        try:
+            if getattr(self, "gitterschieberCam", None):
+                self.gitterschieberCam.stop()
+            pm = frame_to_qpixmap(frame, (self.gitterschieberCam.label.width(), self.gitterschieberCam.label.height()))
+            self.gitterschieberCam.label.setPixmap(pm)
+            QTimer.singleShot(1200, lambda: self.gitterschieberCam.start())
+        except Exception as exc:
+            self._set_gitterschieber_status(f"Overlay-Fehler: {exc}")
+
+    def _update_gitterschieber_sens_label(self, slider_val: int):
+        try:
+            self.gitterschieberSensLabel.setText(self._gitterschieber_sens_text(slider_val / 100.0))
+        except Exception:
+            pass
+
+    def _gitterschieber_sens_text(self, val: float) -> str:
+        if val < 0.33:
+            return "balanced_low"
+        if val < 0.66:
+            return "balanced_mid"
+        return "balanced_high"
+
+    def _set_gitterschieber_status(self, text: str):
+        if hasattr(self, "gitterschieber_status") and self.gitterschieber_status is not None:
+            self.gitterschieber_status.setText(text)
+
+    def _show_gitterschieber_dialog(self, title: str, text: str, accept_label: str = "OK", pixmap_path: pathlib.Path | None = None) -> bool:
+        """Zeigt einen dunklen Hinweisdialog mit optionalem Bild an."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle(title)
+        box.setText(text)
+        if pixmap_path:
+            try:
+                p = pathlib.Path(pixmap_path)
+                if p.exists():
+                    pm = QPixmap(str(p))
+                    if not pm.isNull():
+                        box.setIconPixmap(pm.scaledToWidth(280, Qt.SmoothTransformation))
+            except Exception:
+                pass
+        box.setStyleSheet("""
+            QMessageBox { background-color:#0f1115; color:#eaeaea; }
+            QMessageBox QLabel { color:#eaeaea; font-size:11pt; }
+            QMessageBox QPushButton {
+                background:#1b2030; color:#f0f0f0; border:1px solid #222638;
+                border-radius:8px; padding:6px 14px; font-weight:600;
+            }
+            QMessageBox QPushButton:hover { background:#242b3f; }
+            QMessageBox QPushButton:pressed { background:#29314a; }
+        """)
+        start_btn = box.addButton(accept_label, QMessageBox.AcceptRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(start_btn)
+        box.exec()
+        return box.clickedButton() is start_btn
 
     def _af_frame_provider(self):
-        """Frame-Provider für Autofocus-Kamerakarte."""
+        """Frame-Provider fuer Autofocus-Kamerakarte."""
         try:
-            if self._af_cam is None:
-                self._af_cam = IdsCam(index=0, set_min_exposure=False)
-            frame = self._af_cam.aquise_frame()
-            return frame
+            return autofocus.acquire_frame(device_index=0)
         except Exception as exc:
-            print("[WARN] Autofocus-Kamera nicht verfügbar:", exc)
+            print("[WARN] Autofocus-Kamera nicht verfuegbar:", exc)
             return None
 
     # ---------- Helpers ----------
@@ -1924,7 +2113,7 @@ f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_ma
 
     def _set_chip(self, lbl: QLabel, text: str, ok: bool):
         lbl.setText(text)
-        color = "#2ecc71" if ok else "#ff2740"
+        color = "#3cb179" if ok else "#d95c5c"
         lbl.setText(f'<span style="color:{color}">{text}</span>')
 
     def _err(self,msg):
@@ -2527,22 +2716,11 @@ f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_ma
             self._init_exposure_ui_from_limits(cur, mn, mx)
             return
         try:
-            cam = IdsCam(index=device_index, set_min_exposure=False)
-        except Exception as exc:
-            print(f"[WARN] Exposure-Init (device {device_index}): {exc}")
-            self._init_default_exposure_ui()
-            return
-        try:
-            cur, mn, mx = cam.get_exposure_limits_us()
+            cur, mn, mx = autofocus.get_exposure_limits(device_index)
             self._init_exposure_ui_from_limits(cur, mn, mx)
         except Exception as exc:
             print(f"[WARN] Exposure-Init (device {device_index}): {exc}")
             self._init_default_exposure_ui()
-        finally:
-            try:
-                cam.shutdown()
-            except Exception:
-                pass
 
     def _get_live_controller_if_open(self, device_index: int):
         for win in list(getattr(self, "_cam_windows", [])):
@@ -2569,21 +2747,11 @@ f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_ma
             live.set_exposure_us(int(exposure_us))
             return
         try:
-            cam = IdsCam(index=device_index, set_min_exposure=False)
-        except Exception as exc:
-            self._set_status(f"Exposure (Demo) gespeichert: {exposure_us/1000.0:.3f} ms")
-            print(f"[WARN] Exposure-Kamera nicht verfuegbar: {exc}")
-            return
-        try:
-            cam.set_exposure_us(int(exposure_us))
+            autofocus.set_exposure(device_index, exposure_us)
             self._set_status(f"Exposure gesetzt: {exposure_us/1000.0:.3f} ms")
         except Exception as exc:
+            self._set_status(f"Exposure (Demo) gespeichert: {exposure_us/1000.0:.3f} ms")
             print(f"[WARN] Exposure setzen fehlgeschlagen: {exc}")
-        finally:
-            try:
-                cam.shutdown()
-            except Exception:
-                pass
 
     def _apply_exposure_to_open_windows(self, exposure_us: int):
         """Wendet die Exposure-Einstellung auf alle aktuell offenen Kamerafenster an."""
