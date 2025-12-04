@@ -73,12 +73,6 @@ import datenbank as db
 import gitterschieber as gs
 from z_trieb import ZTriebWidget
 import stage_control as resolve_stage
-try:
-    import gui as new_gui
-    _NEW_GUI_IMPORT_ERROR = None
-except Exception as _exc:  # import fallback so legacy GUI still works
-    new_gui = None
-    _NEW_GUI_IMPORT_ERROR = _exc
 
 
 # ========================== DATENBANK / INFRA ==========================
@@ -2850,52 +2844,11 @@ f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_ma
             except Exception as e:
                 print("[WARN] Could not apply exposure to open window:", e)
 
-
-# ================================================================
-# APP LAUNCHERS
-# ================================================================
-def _run_new_gui():
-    """
-    Start the new, design-overhauled GUI from gui.py.
-    Falls back to the legacy StageGUI when the import fails.
-    """
-    if new_gui is None:
-        raise RuntimeError(f"Neues GUI-Modul konnte nicht geladen werden: {_NEW_GUI_IMPORT_ERROR}")
-
-    app = QApplication(sys.argv)
-    if hasattr(new_gui, "GLOBAL_STYLESHEET"):
-        app.setStyleSheet(new_gui.GLOBAL_STYLESHEET)
-
-    # Apply the font configuration used by the new GUI if present
-    try:
-        ui_font = new_gui.FONTS.get("ui", "Segoe UI")
-    except Exception:
-        ui_font = "Segoe UI"
-    font = QFont(ui_font)
-    font.setPixelSize(14)
-    app.setFont(font)
-
-    window = new_gui.MainWindow()
-    window.show()
-    sys.exit(app.exec())
-
-
-def _run_legacy_gui():
-    """Keep the previous GUI available to avoid losing existing Funktionalität."""
-    app = QApplication(sys.argv)
-    apply_dark_theme(app)
-    gui = StageGUI()
-    gui.show()
-    sys.exit(app.exec())
-
-
 # ================================================================
 # MAIN
 # ================================================================
 if __name__=="__main__":
-    use_legacy = ("--legacy" in sys.argv) or (os.getenv("RESOLVE_USE_LEGACY_GUI") == "1")
-
-    if use_legacy or new_gui is None:
-        _run_legacy_gui()
-    else:
-        _run_new_gui()
+    app=QApplication(sys.argv)
+    apply_dark_theme(app)
+    gui=StageGUI(); gui.show()
+    sys.exit(app.exec())
