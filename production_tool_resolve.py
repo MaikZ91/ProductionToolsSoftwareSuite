@@ -88,13 +88,15 @@ MEAS_MAX_UM = 10.0   # Max. |Delta| in Messung
 # ================================================================
 # THEME
 # ================================================================
-ACCENT   = "#3FA7D6"   # Klarer Industrie-Akzent (Blau)
-BG       = "#0c1016"
-BG_ELEV  = "#141a22"
-FG       = "#e4e7ec"
-FG_MUTED = "#9aa3b3"
-BORDER   = "#1e2631"
-HOVER    = "#1a2330"
+ACCENT      = "#5ce2cf"   # Frisches Mint als neuer Akzent
+ACCENT_ALT  = "#f0b74a"   # Warme Zweitfarbe f�r Highlights
+BG          = "#080f1a"   # Dunkles Navy
+BG_ELEV     = "#111b2b"   # Erh�hte Paneele
+BG_ELEV_ALT = "#0c1424"
+FG          = "#e8edf5"
+FG_MUTED    = "#9fb2c8"
+BORDER      = "#1b2a3f"
+HOVER       = "#16243a"
 
 plt.rcParams.update({
     "figure.facecolor": BG_ELEV,
@@ -111,7 +113,7 @@ plt.rcParams.update({
     "grid.linewidth": 0.6,
     "axes.grid": True,
     "font.size": 10.5,
-    "font.sans-serif": ["Inter", "Segoe UI", "DejaVu Sans", "Arial"],
+    "font.sans-serif": ["Manrope", "Inter", "Segoe UI", "DejaVu Sans", "Arial"],
     "legend.facecolor": BG_ELEV,
     "legend.edgecolor": BORDER,
 })
@@ -120,74 +122,92 @@ QT_STYLESHEET = f"""
 * {{
   background: transparent;
   color: {FG};
-  font-family: Inter, "Segoe UI", Arial;
+  font-family: "Manrope", "Segoe UI", Arial;
 }}
 QWidget {{ background-color: {BG}; }}
-QLabel {{ color: {FG}; font-size: 13px; }}
+QLabel {{ color: {FG}; font-size: 13px; letter-spacing: 0.2px; }}
+
+QFrame#Hero {{
+  background-color: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 {BG_ELEV}, stop:1 {BG_ELEV_ALT});
+  border: 1px solid {BORDER};
+  border-radius: 16px;
+  padding: 4px;
+}}
+QLabel#HeroTitle {{
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+}}
+QLabel#HeroSubtitle {{
+  color: {FG_MUTED};
+  font-size: 12px;
+}}
 
 QLineEdit, QTextEdit {{
   background-color: {BG_ELEV};
   color: {FG};
-  padding: 8px 10px;
+  padding: 9px 12px;
   border: 1px solid {BORDER};
-  border-radius: 8px;
+  border-radius: 10px;
   selection-background-color: {ACCENT};
 }}
-QLineEdit:focus, QTextEdit:focus {{ border-color: {ACCENT}; }}
+QLineEdit:focus, QTextEdit:focus {{ border-color: {ACCENT}; background-color: {BG_ELEV_ALT}; }}
 
 QPushButton {{
   background-color: {BG_ELEV};
   color: {FG};
-  padding: 8px 12px;
+  padding: 9px 14px;
   border: 1px solid {BORDER};
-  border-radius: 10px;
-  font-weight: 600;
+  border-radius: 12px;
+  font-weight: 700;
   min-height: 34px;
 }}
 QPushButton:hover {{ background-color: {HOVER}; border-color: {ACCENT}; }}
-QPushButton:pressed {{ background-color: {ACCENT}; color: #0b0b0f; border-color: {ACCENT}; }}
+QPushButton:pressed {{ background-color: {ACCENT}; color: #051017; border-color: {ACCENT}; }}
 QPushButton:disabled {{ background: #14141b; color: {FG_MUTED}; border-color: {BORDER}; }}
 QPushButton[variant="primary"] {{
   background-color: {ACCENT};
-  color: #0b0b0f;
+  color: #041014;
   border-color: {ACCENT};
-  box-shadow: none;
 }}
-QPushButton[variant="primary"]:hover {{ background-color: #34b58f; border-color: #34b58f; }}
-QPushButton[variant="primary"]:pressed {{ background-color: #259270; }}
+QPushButton[variant="primary"]:hover {{ background-color: #6ef0d9; border-color: #6ef0d9; }}
+QPushButton[variant="primary"]:pressed {{ background-color: #46bfa9; }}
 QPushButton[variant="ghost"] {{
   background-color: transparent;
   color: {FG};
   border-color: {BORDER};
 }}
 QPushButton[variant="ghost"]:hover {{ background-color: {HOVER}; border-color: {ACCENT}; }}
+QPushButton[variant="ghost"]:pressed {{ border-color: {ACCENT_ALT}; color: {ACCENT_ALT}; }}
 QLineEdit[variant="metric"] {{
   font-weight: 700;
   letter-spacing: 0.2px;
-  padding: 6px 10px;
+  padding: 7px 10px;
 }}
 QLabel[role="section"] {{
   color: {FG};
-  font-weight: 700;
+  font-weight: 800;
   font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
 }}
 
 QProgressBar {{
   background: {BG_ELEV};
   color: {FG};
   border: 1px solid {BORDER};
-  border-radius: 8px;
+  border-radius: 10px;
   text-align: center;
-  height: 18px;
+  height: 20px;
 }}
-QProgressBar::chunk {{ background-color: {ACCENT}; border-radius: 6px; }}
+QProgressBar::chunk {{ background-color: {ACCENT}; border-radius: 8px; }}
 
 QComboBox, QSpinBox, QDoubleSpinBox {{
   background-color: {BG_ELEV};
   color: {FG};
-  padding: 6px 10px;
+  padding: 8px 11px;
   border: 1px solid {BORDER};
-  border-radius: 8px;
+  border-radius: 10px;
   min-height: 32px;
 }}
 QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{ border-color: {ACCENT}; }}
@@ -196,43 +216,44 @@ QSlider::groove:horizontal {{
   border: 1px solid {BORDER};
   height: 6px;
   background: {BG_ELEV};
-  border-radius: 5px;
+  border-radius: 6px;
 }}
 QSlider::handle:horizontal {{
   background: {ACCENT};
   border: 1px solid {ACCENT};
-  width: 14px;
-  margin: -5px 0;
-  border-radius: 8px;
+  width: 16px;
+  margin: -6px 0;
+  border-radius: 10px;
 }}
 
 QFrame#Card {{
-  background-color: {BG_ELEV};
+  background-color: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 {BG_ELEV}, stop:1 {BG_ELEV_ALT});
   border: 1px solid {BORDER};
-  border-radius: 12px;
+  border-radius: 14px;
 }}
 QLabel#CardTitle {{
   color: {FG};
-  font-weight: 700;
+  font-weight: 800;
   font-size: 14px;
+  letter-spacing: 0.2px;
 }}
 
 QLabel#Chip {{
-  background-color: {HOVER};
+  background-color: rgba(92, 226, 207, 0.08);
   color: {FG};
-  padding: 6px 10px;
+  padding: 7px 12px;
   border-radius: 999px;
-  border: 1px solid {BORDER};
+  border: 1px solid {ACCENT};
   font-size: 12px;
 }}
 
 QToolButton[variant="tile"] {{
-  background-color: {BG_ELEV};
+  background-color: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {BG_ELEV}, stop:1 {BG_ELEV_ALT});
   color: {FG};
   border: 1px solid {BORDER};
-  border-radius: 12px;
-  padding: 10px;
-  font-weight: 700;
+  border-radius: 14px;
+  padding: 12px 10px 10px 10px;
+  font-weight: 800;
 }}
 QToolButton[variant="tile"]:hover {{
   background-color: {HOVER};
@@ -240,7 +261,7 @@ QToolButton[variant="tile"]:hover {{
 }}
 QToolButton[variant="tile"]:pressed {{
   background-color: {ACCENT};
-  color: #0b0b0f;
+  color: #041014;
   border-color: {ACCENT};
 }}
 """
@@ -827,10 +848,10 @@ def _safe_icon(path: str) -> QIcon:
 def make_tile(text: str, icon_path: str, clicked_cb):
     btn = QToolButton()
     btn.setIcon(_safe_icon(icon_path))
-    btn.setIconSize(QSize(64, 64))
+    btn.setIconSize(QSize(72, 72))
     btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
     btn.setText(text)
-    btn.setMinimumSize(120, 90)
+    btn.setMinimumSize(136, 110)
     btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
     btn.setAutoRaise(False)
     btn.setProperty("variant", "tile")
@@ -1222,7 +1243,7 @@ class StageGUI(QWidget):
 
         # Header
         header = QHBoxLayout(); header.setSpacing(8)
-        title = QLabel("Stage-Toolbox"); f = QFont("Inter", 18, QFont.Bold); title.setFont(f)
+        title = QLabel("Stage-Toolbox"); f = QFont("Manrope", 18, QFont.Bold); title.setFont(f)
         header.addWidget(title); header.addStretch(1)
         # Seriennummer-Suche (sucht im Stage-Teststand-Datenordner nach Dateien/Ordnern)
         self.edSearchSN = UiFactory.line_edit("Seriennummer suchen…", width=240)
@@ -1265,18 +1286,41 @@ class StageGUI(QWidget):
         # Summary Bar (globale Info)
         self.chipBatch = UiFactory.chip("Charge: NoBatch")
         self.lblTimer = UiFactory.chip("15:00:00")
-        self.chipMeasQA = UiFactory.chip("Messung QA: —")
-        self.chipDurQA  = UiFactory.chip(f"Dauertest QA (Limit {resolve_stage.DUR_MAX_UM:.1f} µm): —")
+        self.chipMeasQA = UiFactory.chip("Messung QA: ?")
+        self.chipDurQA  = UiFactory.chip(f"Dauertest QA (Limit {resolve_stage.DUR_MAX_UM:.1f} ?m): ?")
 
-        summaryCard = Card("Übersicht")
-        summaryRow = QHBoxLayout(); summaryRow.setSpacing(10)
-        summaryRow.addWidget(self.chipBatch)
-        summaryRow.addWidget(self.lblTimer)
-        summaryRow.addWidget(self.chipMeasQA)
-        summaryRow.addWidget(self.chipDurQA)
-        summaryRow.addStretch(1)
-        summaryCard.body.addLayout(summaryRow)
-        root.addWidget(summaryCard)
+        hero = QFrame()
+        hero.setObjectName("Hero")
+        heroLayout = QHBoxLayout(hero)
+        heroLayout.setContentsMargins(14, 10, 14, 10)
+        heroLayout.setSpacing(12)
+
+        heroText = QVBoxLayout(); heroText.setSpacing(6)
+        heroTitle = QLabel("Resolve Production Suite")
+        heroTitle.setObjectName("HeroTitle")
+        heroSubtitle = QLabel("Gefuehrte Workflows fuer Stage, Autofocus, Laserscan & QA.")
+        heroSubtitle.setObjectName("HeroSubtitle")
+        heroText.addWidget(heroTitle)
+        heroText.addWidget(heroSubtitle)
+
+        chipRow = QHBoxLayout(); chipRow.setSpacing(8)
+        chipRow.addWidget(self.chipBatch)
+        chipRow.addWidget(self.lblTimer)
+        chipRow.addWidget(self.chipMeasQA)
+        chipRow.addWidget(self.chipDurQA)
+        chipRow.addStretch(1)
+        heroText.addLayout(chipRow)
+        heroLayout.addLayout(heroText, 1)
+
+        heroActions = QVBoxLayout(); heroActions.setSpacing(6)
+        btnHeroWorkflow = UiFactory.button("Workflow oeffnen", variant="primary", min_height=38)
+        btnHeroWorkflow.clicked.connect(self._show_stage_workflow)
+        btnHeroLive = UiFactory.button("Live View starten", variant="ghost", min_height=34)
+        btnHeroLive.clicked.connect(self._open_live_view)
+        heroActions.addWidget(btnHeroWorkflow)
+        heroActions.addWidget(btnHeroLive)
+        heroLayout.addLayout(heroActions, 0)
+        root.addWidget(hero)
 
         assets_dir = pathlib.Path(__file__).resolve().parent / "assets"
         stage_img = str((assets_dir / "stage_tile.png").resolve())
