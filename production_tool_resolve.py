@@ -73,6 +73,12 @@ import datenbank as db
 import gitterschieber as gs
 from z_trieb import ZTriebWidget
 import stage_control as resolve_stage
+try:
+    import gui as new_gui
+    _NEW_GUI_IMPORT_ERROR = None
+except Exception as _exc:  # import fallback so legacy GUI still works
+    new_gui = None
+    _NEW_GUI_IMPORT_ERROR = _exc
 
 
 # ========================== DATENBANK / INFRA ==========================
@@ -156,11 +162,11 @@ QLineEdit:focus, QTextEdit:focus {{ border-color: {ACCENT}; background-color: {B
 QPushButton {{
   background-color: {BG_ELEV};
   color: {FG};
-  padding: 9px 14px;
+  padding: 4px 10px;
   border: 1px solid {BORDER};
-  border-radius: 12px;
+  border-radius: 9px;
   font-weight: 700;
-  min-height: 34px;
+  min-height: 26px;
 }}
 QPushButton:hover {{ background-color: {HOVER}; border-color: {ACCENT}; }}
 QPushButton:pressed {{ background-color: {ACCENT}; color: #051017; border-color: {ACCENT}; }}
@@ -241,8 +247,8 @@ QLabel#CardTitle {{
 QLabel#Chip {{
   background-color: rgba(92, 226, 207, 0.08);
   color: {FG};
-  padding: 7px 12px;
-  border-radius: 999px;
+  padding: 4px 8px;
+  border-radius: 10px;
   border: 1px solid {ACCENT};
   font-size: 12px;
 }}
@@ -251,8 +257,8 @@ QToolButton[variant="tile"] {{
   background-color: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {BG_ELEV}, stop:1 {BG_ELEV_ALT});
   color: {FG};
   border: 1px solid {BORDER};
-  border-radius: 14px;
-  padding: 12px 10px 10px 10px;
+  border-radius: 12px;
+  padding: 6px 6px 6px 6px;
   font-weight: 800;
 }}
 QToolButton[variant="tile"]:hover {{
@@ -760,14 +766,14 @@ class Card(QFrame):
     def __init__(self, title: str = "", right_widget: QWidget | None = None, parent=None):
         super().__init__(parent)
         self.setObjectName("Card")
-        lay = QVBoxLayout(self); lay.setContentsMargins(14,12,14,12); lay.setSpacing(10)
-        header = QHBoxLayout(); header.setSpacing(8)
+        lay = QVBoxLayout(self); lay.setContentsMargins(8,6,8,6); lay.setSpacing(5)
+        header = QHBoxLayout(); header.setSpacing(6)
         self.title = QLabel(title); self.title.setObjectName("CardTitle")
         header.addWidget(self.title)
         header.addStretch(1)
         if right_widget: header.addWidget(right_widget, 0, Qt.AlignRight)
         lay.addLayout(header)
-        self.body = QVBoxLayout(); self.body.setSpacing(8)
+        self.body = QVBoxLayout(); self.body.setSpacing(5)
         lay.addLayout(self.body)
 
 # ================================================================
@@ -775,7 +781,7 @@ class Card(QFrame):
 # ================================================================
 class UiFactory:
     LABEL_WIDTH = 112
-    FIELD_HEIGHT = 34
+    FIELD_HEIGHT = 28
 
     @staticmethod
     def button(text: str, *, variant: str = "default", min_height: int | None = None, tooltip: str | None = None) -> QPushButton:
@@ -839,19 +845,31 @@ class UiFactory:
 # ================================================================
 def _safe_icon(path: str) -> QIcon:
     try:
+        if not path:
+            return QIcon()
         if os.path.exists(path):
             return QIcon(path)
     except Exception:
         pass
     return QIcon()
 
+def _first_existing(paths) -> str:
+    """Return first existing path from iterable, else empty string."""
+    for cand in paths:
+        try:
+            if cand and os.path.exists(cand):
+                return str(pathlib.Path(cand).resolve())
+        except Exception:
+            continue
+    return ""
+
 def make_tile(text: str, icon_path: str, clicked_cb):
     btn = QToolButton()
     btn.setIcon(_safe_icon(icon_path))
-    btn.setIconSize(QSize(72, 72))
+    btn.setIconSize(QSize(42, 42))
     btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
     btn.setText(text)
-    btn.setMinimumSize(136, 110)
+    btn.setMinimumSize(90, 72)
     btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
     btn.setAutoRaise(False)
     btn.setProperty("variant", "tile")
@@ -1150,7 +1168,7 @@ class CameraWindow(QWidget):
 # ================================================================
 class LivePlot(FigureCanvas):
     def __init__(self, parent=None, batch: str = "NoBatch"):
-        fig = Figure(figsize=(7.2, 4.2), dpi=110, facecolor=BG_ELEV)
+        fig = Figure(figsize=(4.6, 2.4), dpi=110, facecolor=BG_ELEV)
         super().__init__(fig)
         self.setParent(parent)
         self.ax = fig.add_subplot(111)
@@ -1230,7 +1248,7 @@ class StageGUI(QWidget):
     def _build_ui(self):
         self.setWindowTitle("Stage-Toolbox")
         self._apply_initial_size()
-        root = QVBoxLayout(self); root.setContentsMargins(18,18,18,12); root.setSpacing(14)
+        root = QVBoxLayout(self); root.setContentsMargins(8,8,8,6); root.setSpacing(6)
 
         def add_back_btn(container_layout):
             """Helper: adds a 'Zurück zum Workflow' button to the given layout."""
@@ -1242,13 +1260,13 @@ class StageGUI(QWidget):
             container_layout.addLayout(row)
 
         # Header
-        header = QHBoxLayout(); header.setSpacing(8)
-        title = QLabel("Stage-Toolbox"); f = QFont("Manrope", 18, QFont.Bold); title.setFont(f)
+        header = QHBoxLayout(); header.setSpacing(4)
+        title = QLabel("Stage-Toolbox"); f = QFont("Manrope", 16, QFont.Bold); title.setFont(f)
         header.addWidget(title); header.addStretch(1)
         # Seriennummer-Suche (sucht im Stage-Teststand-Datenordner nach Dateien/Ordnern)
         self.edSearchSN = UiFactory.line_edit("Seriennummer suchen…", width=240)
         header.addWidget(self.edSearchSN)
-        self.btnFindSN = UiFactory.button("Find SN", variant="ghost", min_height=32)
+        self.btnFindSN = UiFactory.button("Find SN", variant="ghost", min_height=26)
         self.btnFindSN.clicked.connect(lambda: self._on_search_sn())
         self.edSearchSN.returnPressed.connect(lambda: self.btnFindSN.click())
         # Live search: update as the user types (debounced)
@@ -1257,11 +1275,11 @@ class StageGUI(QWidget):
         self.edSearchSN.installEventFilter(self)
         header.addWidget(self.btnFindSN)
 
-        self.btnLiveViewTab = UiFactory.button("LIVE VIEW", variant="ghost", min_height=32)
+        self.btnLiveViewTab = UiFactory.button("LIVE VIEW", variant="ghost", min_height=26)
         self.btnLiveViewTab.clicked.connect(self._open_live_view)
         header.addWidget(self.btnLiveViewTab)
 
-        self.btnWorkflowHome = UiFactory.button("Workflow", variant="ghost", min_height=32)
+        self.btnWorkflowHome = UiFactory.button("Workflow", variant="ghost", min_height=26)
         self.btnWorkflowHome.clicked.connect(self._show_stage_workflow)
         header.addWidget(self.btnWorkflowHome)
 
@@ -1292,10 +1310,10 @@ class StageGUI(QWidget):
         hero = QFrame()
         hero.setObjectName("Hero")
         heroLayout = QHBoxLayout(hero)
-        heroLayout.setContentsMargins(14, 10, 14, 10)
-        heroLayout.setSpacing(12)
+        heroLayout.setContentsMargins(8, 4, 8, 4)
+        heroLayout.setSpacing(4)
 
-        heroText = QVBoxLayout(); heroText.setSpacing(6)
+        heroText = QVBoxLayout(); heroText.setSpacing(2)
         heroTitle = QLabel("Resolve Production Suite")
         heroTitle.setObjectName("HeroTitle")
         heroSubtitle = QLabel("Gefuehrte Workflows fuer Stage, Autofocus, Laserscan & QA.")
@@ -1303,29 +1321,31 @@ class StageGUI(QWidget):
         heroText.addWidget(heroTitle)
         heroText.addWidget(heroSubtitle)
 
-        chipRow = QHBoxLayout(); chipRow.setSpacing(8)
+        chipRow = QHBoxLayout(); chipRow.setSpacing(4)
         chipRow.addWidget(self.chipBatch)
         chipRow.addWidget(self.lblTimer)
         chipRow.addWidget(self.chipMeasQA)
         chipRow.addWidget(self.chipDurQA)
         chipRow.addStretch(1)
         heroText.addLayout(chipRow)
-        heroLayout.addLayout(heroText, 1)
 
-        heroActions = QVBoxLayout(); heroActions.setSpacing(6)
-        btnHeroWorkflow = UiFactory.button("Workflow oeffnen", variant="primary", min_height=38)
+        buttonsRow = QHBoxLayout(); buttonsRow.setSpacing(6)
+        btnHeroWorkflow = UiFactory.button("Workflow oeffnen", variant="primary", min_height=28)
         btnHeroWorkflow.clicked.connect(self._show_stage_workflow)
-        btnHeroLive = UiFactory.button("Live View starten", variant="ghost", min_height=34)
+        btnHeroLive = UiFactory.button("Live View starten", variant="ghost", min_height=26)
         btnHeroLive.clicked.connect(self._open_live_view)
-        heroActions.addWidget(btnHeroWorkflow)
-        heroActions.addWidget(btnHeroLive)
-        heroLayout.addLayout(heroActions, 0)
+        buttonsRow.addWidget(btnHeroWorkflow)
+        buttonsRow.addWidget(btnHeroLive)
+        buttonsRow.addStretch(1)
+        heroText.addLayout(buttonsRow)
+
+        heroLayout.addLayout(heroText, 1)
         root.addWidget(hero)
 
-        assets_dir = pathlib.Path(__file__).resolve().parent / "assets"
-        stage_img = str((assets_dir / "stage_tile.png").resolve())
-        af_img    = str((assets_dir / "autofocus_tile.png").resolve())
-        laser_img = str((assets_dir / "laserscan_tile.png").resolve())
+        images_dir = _BASE_DIR / "images"
+        stage_img = _first_existing([images_dir / "stage.png", _BASE_DIR / "assets" / "stage_tile.png"])
+        af_img    = _first_existing([images_dir / "autofocus.png", _BASE_DIR / "assets" / "autofocus_tile.png"])
+        laser_img = _first_existing([images_dir / "laserscan.png", _BASE_DIR / "assets" / "laserscan_tile.png"])
 
         # --- WORKFLOW (Kacheln) ---
         # Seitenumschaltung (in ScrollArea, damit Vollbild sauber aussieht)
@@ -1334,17 +1354,18 @@ class StageGUI(QWidget):
         self.contentScroll.setWidgetResizable(True)
         self.contentScroll.setFrameShape(QFrame.NoFrame)
         self.contentScroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.contentScroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.contentScroll.setWidget(self.stack)
         root.addWidget(self.contentScroll, 1)
 
         # ===================== Stage Seite =====================
         self.stagePage = QWidget()
         stageLayout = QVBoxLayout(self.stagePage)
-        stageLayout.setContentsMargins(0,0,0,0); stageLayout.setSpacing(14)
+        stageLayout.setContentsMargins(0,0,0,0); stageLayout.setSpacing(8)
 
         self.workflowCard = Card("Workflow")
         stageLayout.addWidget(self.workflowCard)
-        tiles = QHBoxLayout(); tiles.setSpacing(10); tiles.setContentsMargins(2, 2, 2, 2)
+        tiles = QHBoxLayout(); tiles.setSpacing(8); tiles.setContentsMargins(0, 0, 0, 0)
         self.btnStageTile = make_tile("Stage", stage_img, self._show_stage_workflow)
         self.btnAutofocusTile = make_tile("Autofocus", af_img, self._open_autofocus_workflow)
         self.btnLaserTile = make_tile("Laserscan Modul", laser_img, self._open_laserscan_workflow)
@@ -1359,41 +1380,44 @@ class StageGUI(QWidget):
         self.workflowCard.body.addLayout(tiles)
 
         # Hauptgrid
-        grid = QGridLayout(); grid.setHorizontalSpacing(12); grid.setVerticalSpacing(12)
+        grid = QGridLayout(); grid.setHorizontalSpacing(10); grid.setVerticalSpacing(0)
         grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
         stageLayout.addLayout(grid, 1)
 
-        # Left: Controls + Meta
-        self.cardBatch = Card("Meta")
-        grid.addWidget(self.cardBatch, 0, 0)
+        # Left: Setup (Meta + Aktionen)
+        self.cardSetup = Card("Setup")
+        grid.addWidget(self.cardSetup, 0, 0)
 
+        setupGrid = QGridLayout(); setupGrid.setSpacing(8); setupGrid.setContentsMargins(0,0,0,0)
+        self.cardSetup.body.addLayout(setupGrid)
+
+        metaCol = QVBoxLayout(); metaCol.setSpacing(8)
         # Operator
         self.edOperator = UiFactory.line_edit("Bediener: z. B. M. Zschach")
-        self.cardBatch.body.addLayout(UiFactory.form_row("Operator", self.edOperator))
+        metaCol.addLayout(UiFactory.form_row("Operator", self.edOperator))
 
         # Batch
         self.edBatch = UiFactory.line_edit("Chargennummer, z. B. B2025-10-30-01")
         regex = QRegularExpression(r"^[A-Za-z0-9._-]{0,64}$")
         self.edBatch.setValidator(QRegularExpressionValidator(regex))
-        self.cardBatch.body.addLayout(UiFactory.form_row("Charge", self.edBatch))
+        metaCol.addLayout(UiFactory.form_row("Charge", self.edBatch))
 
         # Bemerkungen
-        self.txtNotes = QTextEdit(); self.txtNotes.setPlaceholderText("Bemerkungen zum Lauf…")
-        self.txtNotes.setFixedHeight(100)
-        self.cardBatch.body.addWidget(UiFactory.section_label("Bemerkungen"))
-        self.cardBatch.body.addWidget(self.txtNotes)
+        self.txtNotes = QTextEdit(); self.txtNotes.setPlaceholderText("Bemerkungen zum Lauf.")
+        self.txtNotes.setFixedHeight(50)
+        metaCol.addWidget(UiFactory.section_label("Bemerkungen"))
+        metaCol.addWidget(self.txtNotes)
 
-        # Actions
-        self.cardActions = Card("Aktionen")
-        grid.addWidget(self.cardActions, 1, 0)
+        setupGrid.addLayout(metaCol, 0, 0)
 
-        self.btnStart = UiFactory.button("Test starten (Ctrl+R)", variant="primary", min_height=42); self.btnStart.clicked.connect(self._start_test)
-        self.btnDauer = UiFactory.button("Dauertest starten (Ctrl+D)", variant="primary", min_height=42); self.btnDauer.clicked.connect(self._toggle_dauertest)
-        self.btnOpenFolder = UiFactory.button("Ordner öffnen", variant="ghost"); self.btnOpenFolder.setEnabled(False); self.btnOpenFolder.clicked.connect(self._open_folder)
-        self.btnKleberoboter = UiFactory.button("Datenbank senden", variant="ghost"); self.btnKleberoboter.clicked.connect(self._trigger_kleberoboter)
+        actionsCol = QVBoxLayout(); actionsCol.setSpacing(6)
+        self.btnStart = UiFactory.button("Test starten (Ctrl+R)", variant="primary", min_height=28); self.btnStart.clicked.connect(self._start_test)
+        self.btnDauer = UiFactory.button("Dauertest starten (Ctrl+D)", variant="primary", min_height=28); self.btnDauer.clicked.connect(self._toggle_dauertest)
+        self.btnOpenFolder = UiFactory.button("Ordner ?ffnen", variant="ghost", min_height=32); self.btnOpenFolder.setEnabled(False); self.btnOpenFolder.clicked.connect(self._open_folder)
+        self.btnKleberoboter = UiFactory.button("Datenbank senden", variant="ghost", min_height=26); self.btnKleberoboter.clicked.connect(self._trigger_kleberoboter)
 
         # Dauertest-Button + Dauer-Dropdown nebeneinander
-        dauerRow = QHBoxLayout(); dauerRow.setSpacing(8)
+        dauerRow = QHBoxLayout(); dauerRow.setSpacing(6)
         dauerRow.addWidget(self.btnDauer, 1)
         self.comboDur = QComboBox()
         self._dur_presets = [
@@ -1407,40 +1431,51 @@ class StageGUI(QWidget):
         ]
         for label, seconds in self._dur_presets:
             self.comboDur.addItem(label, seconds)
-        self.comboDur.setFixedWidth(150)
+        self.comboDur.setFixedWidth(140)
         self.comboDur.currentIndexChanged.connect(self._on_duration_mode_changed)
         dauerRow.addWidget(self.comboDur, 0, Qt.AlignRight)
 
-        self.cardActions.body.addWidget(self.btnStart)
-        self.cardActions.body.addLayout(dauerRow)
-        self.cardActions.body.addWidget(self.btnOpenFolder)
-        self.cardActions.body.addWidget(self.btnKleberoboter)
+        actionsCol.addWidget(self.btnStart)
+        actionsCol.addLayout(dauerRow)
+        actionsCol.addWidget(self.btnOpenFolder)
+        actionsCol.addWidget(self.btnKleberoboter)
+        actionsCol.addStretch(1)
+
+        setupGrid.addLayout(actionsCol, 0, 1)
+        setupGrid.setColumnStretch(0, 2); setupGrid.setColumnStretch(1, 1)
 
         # Right: Status + Plot + QA
-        self.cardStatus = Card("Status / Fortschritt")
+        self.cardStatus = Card("Status & Live-Plot")
         grid.addWidget(self.cardStatus, 0, 1)
-        self.lblPhase = QLabel("—")
+        statusRow = QHBoxLayout(); statusRow.setSpacing(8)
+
+        statusCol = QVBoxLayout(); statusCol.setSpacing(4)
+        self.lblPhase = QLabel("-")
         self.pbar = QProgressBar(); self._reset_progress()
-        self.cardStatus.body.addWidget(self.lblPhase)
-        self.cardStatus.body.addWidget(self.pbar)
-
-        # Kalibrierdaten
-        self.cardStatus.body.addItem(QSpacerItem(0,6, QSizePolicy.Minimum, QSizePolicy.Fixed))
-        self.cardStatus.body.addWidget(UiFactory.section_label("Kalibrierung"))
-        self.lblCalib = QLabel("—")
-        self.cardStatus.body.addWidget(self.lblCalib)
-
-        # Neue Stage testen
-        self.cardStatus.body.addItem(QSpacerItem(0,8, QSizePolicy.Minimum, QSizePolicy.Fixed))
-        self.btnNewStage = UiFactory.button("Neue Stage testen", variant="primary")
+        statusCol.addWidget(self.lblPhase)
+        statusCol.addWidget(self.pbar)
+        statusCol.addWidget(UiFactory.section_label("Kalibrierung"))
+        self.lblCalib = QLabel("-")
+        statusCol.addWidget(self.lblCalib)
+        self.btnNewStage = UiFactory.button("Neue Stage testen", variant="primary", min_height=32)
         self.btnNewStage.setVisible(False)
         self.btnNewStage.clicked.connect(self._new_stage)
-        self.cardStatus.body.addWidget(self.btnNewStage)
+        statusCol.addWidget(self.btnNewStage)
+        statusCol.addStretch(1)
 
-        # Live-Plot Card
-        self.cardPlot = Card("Live-Plot")
-        grid.addWidget(self.cardPlot, 1, 1)
-        self.plotHolder = QVBoxLayout(); self.cardPlot.body.addLayout(self.plotHolder)
+        plotCol = QVBoxLayout(); plotCol.setSpacing(4)
+        self.plotContainer = QWidget()
+        self.plotContainer.setMinimumHeight(160)
+        self.plotContainerLayout = QVBoxLayout(self.plotContainer)
+        self.plotContainerLayout.setContentsMargins(0,0,0,0)
+        self.plotContainerLayout.setSpacing(0)
+        self.plotHolder = QVBoxLayout(); self.plotHolder.setSpacing(0)
+        self.plotHolder.addWidget(self.plotContainer)
+        plotCol.addLayout(self.plotHolder)
+
+        statusRow.addLayout(statusCol, 1)
+        statusRow.addLayout(plotCol, 2)
+        self.cardStatus.body.addLayout(statusRow)
 
         self.stack.addWidget(self.stagePage)
 
@@ -2223,7 +2258,14 @@ f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_ma
         out_dir = self._ensure_run_dir()
 
         if self.plot is None:
-            self.plot=LivePlot(self, batch=self._batch); self.plotHolder.addWidget(self.plot)
+            self.plot=LivePlot(self, batch=self._batch)
+            # Remove old widgets in plot container (if any) to ensure full height usage
+            while self.plotContainerLayout.count():
+                item = self.plotContainerLayout.takeAt(0)
+                w = item.widget()
+                if w:
+                    w.setParent(None)
+            self.plotContainerLayout.addWidget(self.plot)
         else:
             self.plot.set_batch(self._batch)
             self.plot.reset()
@@ -2808,11 +2850,52 @@ f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_ma
             except Exception as e:
                 print("[WARN] Could not apply exposure to open window:", e)
 
+
+# ================================================================
+# APP LAUNCHERS
+# ================================================================
+def _run_new_gui():
+    """
+    Start the new, design-overhauled GUI from gui.py.
+    Falls back to the legacy StageGUI when the import fails.
+    """
+    if new_gui is None:
+        raise RuntimeError(f"Neues GUI-Modul konnte nicht geladen werden: {_NEW_GUI_IMPORT_ERROR}")
+
+    app = QApplication(sys.argv)
+    if hasattr(new_gui, "GLOBAL_STYLESHEET"):
+        app.setStyleSheet(new_gui.GLOBAL_STYLESHEET)
+
+    # Apply the font configuration used by the new GUI if present
+    try:
+        ui_font = new_gui.FONTS.get("ui", "Segoe UI")
+    except Exception:
+        ui_font = "Segoe UI"
+    font = QFont(ui_font)
+    font.setPixelSize(14)
+    app.setFont(font)
+
+    window = new_gui.MainWindow()
+    window.show()
+    sys.exit(app.exec())
+
+
+def _run_legacy_gui():
+    """Keep the previous GUI available to avoid losing existing Funktionalität."""
+    app = QApplication(sys.argv)
+    apply_dark_theme(app)
+    gui = StageGUI()
+    gui.show()
+    sys.exit(app.exec())
+
+
 # ================================================================
 # MAIN
 # ================================================================
 if __name__=="__main__":
-    app=QApplication(sys.argv)
-    apply_dark_theme(app)
-    gui=StageGUI(); gui.show()
-    sys.exit(app.exec())
+    use_legacy = ("--legacy" in sys.argv) or (os.getenv("RESOLVE_USE_LEGACY_GUI") == "1")
+
+    if use_legacy or new_gui is None:
+        _run_legacy_gui()
+    else:
+        _run_new_gui()
