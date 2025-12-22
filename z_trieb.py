@@ -133,7 +133,7 @@ class ZTriebController(QObject):
         self._driver = None
         self._dummy = False  # Keinen Simulationsmodus mehr nutzen
 
-    def connect(self):
+    def connect_hardware(self):
         """(Re-)Establish the connection to the Z-Trieb driver."""
         self._connect()
 
@@ -319,7 +319,7 @@ class ZTriebWidget(QWidget):
         self.controller.logMessage.connect(self._append_log)
         self.controller.runCounterChanged.connect(self._update_counter)
         self.controller.hardwareAvailable.connect(self._on_hw_state)
-        self.controller.connect()
+        self.controller.connect_hardware()
 
         self.executor = ThreadPoolExecutor(max_workers=1)
         self._dauer_future = None

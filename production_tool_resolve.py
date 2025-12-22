@@ -55,7 +55,7 @@ from PySide6.QtCore    import QObject, QThread, Signal, Qt, QTimer, QSize, QRegu
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QLineEdit, QTextEdit,
     QProgressBar, QMessageBox, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QFrame, QSizePolicy, QSpacerItem, QComboBox, QSpinBox, QToolButton, QTableView,
+    QFrame, QSizePolicy, QSpacerItem, QComboBox, QToolButton, QTableView,
     QStackedWidget, QSlider, QDoubleSpinBox, QDialog, QListWidget,
     QScrollArea, QCheckBox, QFormLayout, QGroupBox, QHeaderView, QAbstractItemView, QDial
 )
@@ -873,10 +873,12 @@ def make_tile(text: str, icon_path: str, clicked_cb):
 
 class LiveCamEmbed(QWidget):
     """Einfacher Live-Kameraview für BGR/Mono Frames mit Frame-Provider."""
-    def __init__(self, frame_provider, *, interval_ms: int = 200, parent=None):
+    def __init__(self, frame_provider, *, interval_ms: int = 200, start_immediately: bool = True, parent=None):
         super().__init__(parent)
         self._frame_provider = frame_provider
         self._last_frame = None
+        self._interval_ms = interval_ms
+        self._autostart = bool(start_immediately)
         self.label = QLabel("Kein Bild")
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setMinimumHeight(320)
@@ -887,7 +889,25 @@ class LiveCamEmbed(QWidget):
         layout.addWidget(self.status)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(interval_ms)
+        if self._autostart and self.isVisible():
+            self.start()
+
+    def start(self):
+        if not self._timer.isActive():
+            self._timer.start(self._interval_ms)
+
+    def stop(self):
+        if self._timer.isActive():
+            self._timer.stop()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._autostart:
+            self.start()
+
+    def hideEvent(self, event):
+        self.stop()
+        super().hideEvent(event)
 
     def last_frame(self):
         return self._last_frame
@@ -922,506 +942,7 @@ class LiveCamEmbed(QWidget):
             return QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
         raise ValueError("Unsupported frame shape.")
 
-def get_stage_encoders():
-    st = {}
-    pmac.getStagePosInfo(st)
-    return st["xPos_encoderSteps"], st["yPos_encoderSteps"]
 
-def save_stage_test(savefile_name, pos_infodict, batch: str = "NoBatch"):
-    now = datetime.datetime.now()
-    dt_string = now.strftime("%Y-%m-%d_%H-%M-%S")
-    pth = pathlib.Path(savefile_name)
-    out_dir = pth.parent if str(pth.parent) not in ("", ".") else pathlib.Path(".")
-    base = pth.name
-    savename = out_dir / f"{dt_string}_{batch}_{base}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    with open(savename, "w+", newline="") as savefile:
-        writer = csv.writer(savefile)
-        writer.writerow(["batch","x_counter","y_counter","Time [min]",
-                         "x_position [m]","y_position [m]","pos_error_x [m]","pos_error_y [m]"])
-        for i in range(len(pos_infodict["x_counter"])):
-            writer.writerow([
-                batch,
-                pos_infodict["x_counter"][i], pos_infodict["y_counter"][i],
-                pos_infodict["Time [min]"][i],
-                pos_infodict["x_position [m]"][i], pos_infodict["y_position [m]"][i],
-                pos_infodict["pos_error_x [m]"][i], pos_infodict["pos_error_y [m]"][i]
-            ])
-    print(f"Saved {savename}")
-
-def moveXinsteps(motorsteps):
-    pmac.setParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/X/stepPosition", int(motorsteps))
-def moveYinsteps(motorsteps):
-    pmac.setParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/Y/stepPosition", int(motorsteps))
-def getXencoder():
-    pmac.getStagePosInfo(stageStatus); return stageStatus["xPos_encoderSteps"]
-def getYencoder():
-    pmac.getStagePosInfo(stageStatus); return stageStatus["yPos_encoderSteps"]
-def motorsteps2encodersteps(motorStep, stepsPerMeter, encoderStepsPerMeter):
-    return (motorStep / stepsPerMeter * encoderStepsPerMeter).astype(int)
-def meas_linear(StartMotorSteps, StopMotorSteps, Steps, stepsPerMeter, encoderStepsPerMeter):
-    motor_steps = np.linspace(StartMotorSteps, StopMotorSteps, Steps).astype(int)
-    calc_encoder = motorsteps2encodersteps(motor_steps, stepsPerMeter, encoderStepsPerMeter)
-    return motor_steps, calc_encoder
-
-# ================================================================
-# StageController
-# ================================================================
-class StageController:
-    def __init__(self, uri="tcp://127.0.0.1:5050"):
-        self.conn, self.status = pmac.connect(uri), {}
-        self.refresh()
-        root = "ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/"
-        g = lambda a,k: pmac.getParam(f"{root}{a}/{k}")
-        self.steps_per_m = {a: g(a,"stepsPerMeter") for a in "XY"}
-        self.enc_per_m   = {a: g(a,"encoderStepsPerMeter") for a in "XY"}
-        self.low_lim     = {a: g(a,"limitLowSteps") for a in "XY"}
-        self.high_lim    = {a: g(a,"limitHighSteps") for a in "XY"}
-        self.home_pos    = {a: g(a,"homeStepPosition") for a in "XY"}
-    def refresh(self): pmac.getStagePosInfo(self.status)
-    def move_abs(self, a, s): pmac.setParam(f"ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/{a}/stepPosition", int(s))
-    def enc(self, a): self.refresh(); return self.status[f"{a.lower()}Pos_encoderSteps"]
-
-# ================================================================
-# Workers
-# ================================================================
-class TestWorker(QObject):
-    new_phase = Signal(str, int)
-    step      = Signal(int)
-    done      = Signal(dict)
-    error     = Signal(str)
-    calib     = Signal(dict)
-
-    def __init__(self, sc, batch: str = "NoBatch"):
-        super().__init__()
-        self.sc = sc
-        self.batch = sanitize_batch(batch)
-        self._meas_max_um = None
-
-    def _calibrate_like_reference(self, out_dir: pathlib.Path):
-        limitLowStepsX  = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/limitLowSteps")
-        limitHighStepsX = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/limitHighSteps")
-        homeStepPositionX = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/homeStepPosition")
-        stepsPerMeterX  = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/stepsPerMeter")
-        encoderStepsPerMeterX = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/encoderStepsPerMeter")
-
-        limitLowStepsY  = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/limitLowSteps")
-        limitHighStepsY = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/limitHighSteps")
-        homeStepPositionY = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/homeStepPosition")
-        stepsPerMeterY  = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/stepsPerMeter")
-        encoderStepsPerMeterY = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/encoderStepsPerMeter")
-
-        motorStepsX, _ = meas_linear(limitLowStepsX+1000, limitHighStepsX-1000, 20, stepsPerMeterX, encoderStepsPerMeterX)
-        motorStepsY, _ = meas_linear(limitLowStepsY+5000, limitHighStepsY-5000, 20, stepsPerMeterY, encoderStepsPerMeterY)
-
-        self.new_phase.emit(f"Kalibrierung X · Charge: {self.batch}", len(motorStepsX))
-        Enc = np.zeros(len(motorStepsX), dtype=float)
-        for i, ms in enumerate(motorStepsX, 1):
-            moveXinsteps(ms); Enc[i-1] = getXencoder(); self.step.emit(i)
-
-        moveXinsteps(homeStepPositionX); moveYinsteps(homeStepPositionY)
-
-        x = Enc / encoderStepsPerMeterX; y = motorStepsX
-        coef = np.polyfit(x, y, 1); poly1d_fn = np.poly1d(coef)
-        newMotorStepsPerMeterX = int(coef[0])
-
-        fig = Figure(figsize=(7.2,5), dpi=110, facecolor=BG_ELEV)
-        ax  = fig.add_subplot(111); style_ax(ax)
-        ax.plot(x, y, "o", label=f"Messpunkte · {self.batch}")
-        ax.plot(x, poly1d_fn(x), "--", label="Fit")
-        ax.set_title(f"Measured Motorsteps in X-Axis · Charge: {self.batch}")
-        ax.set_xlabel("Encodersteps [m]"); ax.set_ylabel("Motorsteps [steps]"); ax.legend()
-        fig.savefig(out_dir / f"calib_x_{self.batch}.png")
-
-        self.new_phase.emit(f"Kalibrierung Y · Charge: {self.batch}", len(motorStepsY))
-        Enc = np.zeros(len(motorStepsY), dtype=float)
-        for i, ms in enumerate(motorStepsY, 1):
-            moveYinsteps(ms); Enc[i-1] = getYencoder(); self.step.emit(i)
-
-        moveXinsteps(homeStepPositionX); moveYinsteps(homeStepPositionY)
-
-        x = Enc / encoderStepsPerMeterY; y = motorStepsY
-        coef = np.polyfit(x, y, 1); poly1d_fn = np.poly1d(coef)
-        newMotorStepsPerMeterY = int(coef[0])
-
-        fig = Figure(figsize=(7.2,5), dpi=110, facecolor=BG_ELEV)
-        ax  = fig.add_subplot(111); style_ax(ax)
-        ax.plot(x, y, "o", label=f"Messpunkte · {self.batch}")
-        ax.plot(x, poly1d_fn(x), "--", label="Fit")
-        ax.set_title(f"Measured Motorsteps in Y-Axis · Charge: {self.batch}")
-        ax.set_xlabel("Encodersteps [m]"); ax.set_ylabel("Motorsteps [steps]"); ax.legend()
-        fig.savefig(out_dir / f"calib_y_{self.batch}.png")
-
-        try:
-            pmac.setParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/stepsPerMeter", int(newMotorStepsPerMeterX))
-            pmac.setParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/stepsPerMeter", int(newMotorStepsPerMeterY))
-            self.sc.steps_per_m['X'] = int(newMotorStepsPerMeterX); self.sc.steps_per_m['Y'] = int(newMotorStepsPerMeterY)
-            print(f"[APPLIED][{self.batch}] stepsPerMeter: X = {newMotorStepsPerMeterX}, Y = {newMotorStepsPerMeterY}")
-        except Exception as e:
-            print(f"[WARN][{self.batch}] Konnte stepsPerMeter nicht schreiben:", e)
-
-        self.calib.emit({
-            "batch": self.batch,
-            "X_stepsPerMeter": int(newMotorStepsPerMeterX),
-            "Y_stepsPerMeter": int(newMotorStepsPerMeterY)
-        })
-
-        return {
-            "newMotorStepsPerMeterX": int(newMotorStepsPerMeterX),
-            "newMotorStepsPerMeterY": int(newMotorStepsPerMeterY),
-            "motorStepsX": motorStepsX, "motorStepsY": motorStepsY
-        }
-
-    @staticmethod
-    def _zigzag(lo, hi, n, spm, epm):
-        mot = np.linspace(lo, hi, n).astype(int)
-        mot = np.r_[mot, mot[::-1]]
-        return mot, (mot / spm * epm).astype(int)
-
-    def run(self):
-        try:
-            S = self.sc
-            ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            out = (DATA_ROOT / self.batch / f"Run_{ts}")
-            out.mkdir(parents=True, exist_ok=True)
-            plot_data = []
-            calib_info = self._calibrate_like_reference(out_dir=out)
-
-            max_abs_um = 0.0
-
-            for ax in "XY":
-                spm, epm = S.steps_per_m[ax], S.enc_per_m[ax]
-                mot, calc = self._zigzag(S.low_lim[ax], S.high_lim[ax], 100, spm, epm)
-                self.new_phase.emit(f"Messung {ax} · Charge: {self.batch}", len(mot))
-                enc = np.zeros_like(mot)
-                for i, m in enumerate(mot, 1):
-                    S.move_abs(ax, int(m)); enc[i-1] = S.enc(ax); self.step.emit(i)
-                diff_um = np.abs((enc - calc) / epm * 1e6)
-                max_abs_um = max(max_abs_um, float(np.max(diff_um)))
-                plot_data.append((ax, mot, enc, calc, spm, epm))
-                S.move_abs(ax, S.home_pos[ax])
-
-            self._meas_max_um = max_abs_um
-            self.done.emit({"out": out, "plots": plot_data, "calib": calib_info,
-                            "batch": self.batch, "meas_max_um": max_abs_um})
-        except Exception as e:
-            self.error.emit(str(e))
-
-
-class Dauertest(QObject):
-    update   = Signal(dict)
-    finished = Signal(dict)
-    error    = Signal(str)
-
-    def __init__(
-        self,
-        sc,
-        *,
-        batch: str = "NoBatch",
-        out_dir: pathlib.Path | None = None,
-        center_x: int = 0,
-        center_y: int = 0,
-        small_step: int = 500,
-        small_radius: int = 2000,
-        small_phase_sec: float = 120.0,
-        large_phase_sec: float = 30.0,
-        dwell_small: float = 0.2,
-        dwell_large: float = 0.1,
-        limit_um: float = DUR_MAX_UM,
-        stop_at_ts: float | None = None,
-    ):
-        super().__init__()
-        self.sc = sc
-        self.batch = sanitize_batch(batch)
-        self.out_dir = out_dir
-        self.center_x = int(center_x)
-        self.center_y = int(center_y)
-        self.small_step = int(max(1, small_step))
-        self.small_radius = int(max(1, small_radius))
-        self.small_phase_sec = float(small_phase_sec)
-        self.large_phase_sec = float(large_phase_sec)
-        self.dwell_small = float(dwell_small)
-        self.dwell_large = float(dwell_large)
-        self.limit_um = float(limit_um)
-        self.max_abs_um = 0.0
-        self._running = True
-        self.start_ts = time.time()
-        self.stop_at_ts = float(stop_at_ts) if stop_at_ts else None
-
-        self.pos_infodict={"x_counter":[],"y_counter":[],"Time [min]":[],
-                           "x_position [m]":[],"y_position [m]":[],
-                           "pos_error_x [m]":[],"pos_error_y [m]":[]}
-        base_name = f"{self.batch}_combined_values.csv"
-        self.savefile = (self.out_dir / base_name) if self.out_dir else pathlib.Path(base_name)
-
-    def stop(self):
-        self._running = False
-
-    def _clamp(self, axis: str, val: int) -> int:
-        lo = self.sc.low_lim[axis]
-        hi = self.sc.high_lim[axis]
-        return int(min(max(val, lo), hi))
-
-    def _log_move(self, phase: str, idx: int, total: int, tx: int, ty: int, move_idx: int, dwell: float):
-        self.sc.move_abs('X', tx)
-        self.sc.move_abs('Y', ty)
-        time.sleep(dwell)
-
-        ex_enc = self.sc.enc('X')
-        ey_enc = self.sc.enc('Y')
-        spm_x = self.sc.steps_per_m['X']; spm_y = self.sc.steps_per_m['Y']
-        epm_x = self.sc.enc_per_m['X'];   epm_y = self.sc.enc_per_m['Y']
-        err_x = ex_enc/epm_x - tx/spm_x
-        err_y = ey_enc/epm_y - ty/spm_y
-        err_um = max(abs(err_x), abs(err_y)) * 1e6
-        self.max_abs_um = max(self.max_abs_um, float(err_um))
-        runtime = round((time.time()-self.start_ts)/60, 2)
-
-        self.pos_infodict["Time [min]"].append(runtime)
-        self.pos_infodict["x_counter"].append(move_idx)
-        self.pos_infodict["y_counter"].append(move_idx)
-        self.pos_infodict["x_position [m]"].append(round(ex_enc/epm_x,6))
-        self.pos_infodict["y_position [m]"].append(round(ey_enc/epm_y,6))
-        self.pos_infodict["pos_error_x [m]"].append(round(err_x,8))
-        self.pos_infodict["pos_error_y [m]"].append(round(err_y,8))
-
-        self.update.emit({
-            "phase": phase,
-            "idx": idx,
-            "total": total,
-            "target_x": tx,
-            "target_y": ty,
-            "err_um": err_um,
-            "max_abs_um": float(self.max_abs_um),
-            "limit_um": float(self.limit_um),
-            "t": runtime,
-            "ex": err_x,
-            "ey": err_y,
-            "batch": self.batch,
-        })
-
-    def run(self):
-        try:
-            move_idx = 0
-            phase = "small"
-            small_idx = 0
-            large_idx = 0
-            now = time.time()
-            target_stop = self.stop_at_ts or float("inf")
-
-            while self._running and now < target_stop:
-                phase_duration = self.small_phase_sec if phase == "small" else self.large_phase_sec
-                dwell = self.dwell_small if phase == "small" else self.dwell_large
-                phase_end = min(target_stop, now + phase_duration)
-                # rough estimate for progress in this phase
-                est_total = max(1, int(max(1.0, (phase_end - now) / max(0.01, dwell))))
-
-                while self._running and (time.time() < phase_end):
-                    if phase == "small":
-                        small_idx += 1
-                        dx_raw = int(np.random.randint(-self.small_radius, self.small_radius + 1))
-                        dy_raw = int(np.random.randint(-self.small_radius, self.small_radius + 1))
-                        dx = int(round(dx_raw / self.small_step)) * self.small_step
-                        dy = int(round(dy_raw / self.small_step)) * self.small_step
-                        tx = self._clamp('X', self.center_x + dx)
-                        ty = self._clamp('Y', self.center_y + dy)
-                        move_idx += 1
-                        self._log_move("small", small_idx, est_total, tx, ty, move_idx, dwell)
-                    else:
-                        large_idx += 1
-                        tx = int(np.random.randint(self.sc.low_lim['X'], self.sc.high_lim['X'] + 1))
-                        ty = int(np.random.randint(self.sc.low_lim['Y'], self.sc.high_lim['Y'] + 1))
-                        move_idx += 1
-                        self._log_move("large", large_idx, est_total, tx, ty, move_idx, dwell)
-                    if self.stop_at_ts and time.time() >= self.stop_at_ts:
-                        break
-                now = time.time()
-                phase = "large" if phase == "small" else "small"
-
-            # Zurück zur Mitte, wenn nicht abgebrochen
-            if self._running:
-                move_idx += 1
-                self._log_move("center", 1, 1, self.center_x, self.center_y, move_idx, self.dwell_small)
-
-            save_stage_test(str(self.savefile), self.pos_infodict, batch=self.batch)
-            self.finished.emit({
-                "batch": self.batch,
-                "total_moves": move_idx,
-                "dur_max_um": float(self.max_abs_um),
-                "limit_um": float(self.limit_um),
-                "out": str(self.savefile),
-            })
-        except Exception as exc:
-            self.error.emit(str(exc))
-
-
-# ========================== AUTOFOCUS ================================
-# ================================================================
-# IDS Live-View (mit Geraeteindex)
-class CameraController(QLabel):
-    """Qt live-view controller built on IdsCam."""
-
-    centerChanged = Signal(int, int)
-    frameReady = Signal(object, int, int)  # emits (bytes, width, height)
-
-    def __init__(self, parent=None, *, device_index: int = 0, accent_color: str = "#ff2740"):
-        super().__init__(parent)
-        self.setScaledContents(True)
-        self.accent_color = accent_color or "#ff2740"
-
-        self.device_index = int(device_index)
-        self.cam = IdsCam(index=device_index)
-        self._timer: Optional[QTimer] = QTimer(self)
-        self._timer.timeout.connect(self._on_tick)
-        self._timer.start(0)
-
-        self._last_centroid: Optional[tuple[int, int]] = None
-        self._img_w: Optional[int] = None
-        self._img_h: Optional[int] = None
-
-        self.pixel_size_um: Optional[float] = self.cam.pixel_size_um
-        self.sensor_width_px: Optional[int] = self.cam.width
-        self.sensor_height_px: Optional[int] = self.cam.height
-
-    @property
-    def is_dummy(self) -> bool:
-        return bool(getattr(self.cam, "_dummy", False))
-
-    def get_exposure_limits_us(self) -> tuple[float, float, float]:
-        """Expose camera exposure limits for the UI."""
-        return self.cam.get_exposure_limits_us()
-
-    def _on_tick(self) -> None:
-        frame = self.cam.aquise_frame()
-        if frame is None:
-            return
-        h, w = frame.shape
-        self._img_w, self._img_h = w, h
-        self.sensor_width_px, self.sensor_height_px = w, h
-        self.pixel_size_um = self.cam.pixel_size_um
-        self.frameReady.emit(frame.tobytes(), w, h)
-
-    def set_exposure_us(self, val_us: float) -> None:
-        self.cam.set_exposure_us(val_us)
-
-    def update_centroid(self, cx: int, cy: int) -> None:
-        self._last_centroid = (int(cx), int(cy))
-        self.centerChanged.emit(int(cx), int(cy))
-
-    def display_frame(self, qimg: QImage) -> None:
-        self.setPixmap(QPixmap.fromImage(qimg))
-
-    def close(self) -> None:
-        if self._timer:
-            self._timer.stop()
-        self.cam.shutdown()
-        super().close()
-
-# IDS Live-View (mit Geräteindex)
-# ================================================================
-class CameraWindow(QWidget):
-    def __init__(
-        self,
-        parent=None,
-        batch: str = "NoBatch",
-        device_index: int = 0,
-        label: str = "",
-        spot_detector=None,
-    ):
-        super().__init__(parent)
-        cam_name = (label or f"Cam {device_index}")
-        self.setWindowTitle(f"Kamera – {cam_name} (Mono8) · Charge: {batch}")
-        self.resize(1180,640)
-
-        # Horizontal layout: live image on the left, alignment panel on the right
-        h = QHBoxLayout(self)
-
-        # Live view (left) — expand
-        self.detector = spot_detector or LaserSpotDetector()
-
-        self.live = CameraController(
-            self,
-            device_index=device_index,
-            accent_color=ACCENT,
-        )
-        try:
-            self.live.frameReady.connect(self._on_frame_ready)
-        except Exception:
-            pass
-        h.addWidget(self.live, 1)
-
-        # Alignment panel (right) — compact fixed width
-        align_card = Card("Alignment")
-        align_card.setFixedWidth(320)
-
-        # Justage controls: single toggle button (Save ↔ Clear)
-        ref_btn_row = QHBoxLayout()
-        self.btn_toggle_justage = QPushButton("Save Justage")
-        self.btn_toggle_justage.setMinimumHeight(28)
-        self.btn_toggle_justage.setMinimumWidth(140)
-        ref_btn_row.addWidget(self.btn_toggle_justage)
-        align_card.body.addLayout(ref_btn_row)
-
-        # Reference coordinates display
-        self.lbl_ref = QLabel("Ref: —")
-        self.lbl_ref.setObjectName("Chip")
-        align_card.body.addWidget(self.lbl_ref)
-
-        # Numeric readouts (jetzt mit physikalischen Einheiten)
-        self.lbl_dx = QLabel("dx: —")
-        self.lbl_dy = QLabel("dy: —")
-        self.lbl_dist = QLabel("dist: —")
-        for lbl in (self.lbl_dx, self.lbl_dy, self.lbl_dist):
-            lbl.setObjectName("Chip")
-            align_card.body.addWidget(lbl)
-
-        align_card.body.addItem(QSpacerItem(0,8, QSizePolicy.Minimum, QSizePolicy.Fixed))
-
-        # Status indicator
-        self.lbl_align_status = QLabel("Status: —")
-        self.lbl_align_status.setAlignment(Qt.AlignCenter)
-        align_card.body.addWidget(self.lbl_align_status)
-
-        align_card.body.addStretch(1)
-
-        h.addWidget(align_card, 0)
-
-        # Internal state
-        self._last_centroid = None
-
-        # Wiring
-        try:
-            self.live.centerChanged.connect(self._on_live_center_changed)
-        except Exception:
-            pass
-        try:
-            self.btn_toggle_justage.clicked.connect(self._on_toggle_justage)
-        except Exception:
-            pass
-
-    def _on_live_center_changed(self, x: int, y: int):
-        try:
-            self._last_centroid = (x, y)
-            self._update_alignment(x, y)
-        except Exception:
-            pass
-
-    def _update_alignment(self, cx: int, cy: int):
-        # Determine camera center from LiveView if available
-        w = getattr(self.live, "_img_w", None)
-        h = getattr(self.live, "_img_h", None)
-        if not w or not h:
-            w = getattr(self.live, "sensor_width_px", None)
-            h = getattr(self.live, "sensor_height_px", None)
-        if not w or not h:
-            print("[WARN] Keine Auflösung aus Kamera verfügbar.")
-            return
-
-        # If a Justage reference is set, compute offsets relative to it; otherwise use camera center
-        ref = self.detector.get_reference_point()
-        if ref is not None:
-            rx, ry = ref
-            dx = int(cx - int(rx)); dy = int(cy - int(ry))
 def frame_to_qpixmap(frame, target_size=None) -> QPixmap:
     """Convert BGR/gray frame into a QPixmap, scaled to target_size when given."""
     if frame.ndim == 2:
@@ -1656,7 +1177,7 @@ class LivePlot(FigureCanvas):
 
     def _apply_titles(self):
         self.ax.set_title(f"{self.mode} – Positionsfehler · Charge: {self.batch}", fontweight="semibold")
-        self.ax.set_xlabel("Zeit [min]"); self.ax.set_ylabel("Fehler [µm]")
+        self.ax.set_xlabel("Zeit [min]"); self.ax.set_ylabel("Fehler [m]")
 
     def set_batch(self, batch: str):
         self.batch = resolve_stage.sanitize_batch(batch); self._apply_titles(); self.draw_idle()
@@ -1673,9 +1194,9 @@ class LivePlot(FigureCanvas):
         self.ax.relim(); self.ax.autoscale_view(); self.draw_idle()
 
     def add_data(self, data):
-        ex_um = float(data.get("ex", 0.0)) * 1e6
-        ey_um = float(data.get("ey", 0.0)) * 1e6
-        self.t.append(data["t"]); self.ex.append(ex_um); self.ey.append(ey_um)
+        ex_m = float(data.get("ex", 0.0))
+        ey_m = float(data.get("ey", 0.0))
+        self.t.append(data["t"]); self.ex.append(ex_m); self.ey.append(ey_m)
         self.line_ex.set_data(self.t,self.ex); self.line_ey.set_data(self.t,self.ey)
         self.ax.relim(); self.ax.autoscale_view(); self.draw_idle()
 
@@ -1886,7 +1407,7 @@ class StageGUI(QWidget):
         actionsCol = QVBoxLayout(); actionsCol.setSpacing(6)
         self.btnStart = UiFactory.button("Test starten (Ctrl+R)", variant="primary", min_height=28); self.btnStart.clicked.connect(self._start_test)
         self.btnDauer = UiFactory.button("Dauertest starten (Ctrl+D)", variant="primary", min_height=28); self.btnDauer.clicked.connect(self._toggle_dauertest)
-        self.btnOpenFolder = UiFactory.button("Ordner öffnen", variant="ghost", min_height=32); self.btnOpenFolder.setEnabled(False); self.btnOpenFolder.clicked.connect(self._open_folder)
+        self.btnOpenFolder = UiFactory.button("Ordner ?ffnen", variant="ghost", min_height=32); self.btnOpenFolder.setEnabled(False); self.btnOpenFolder.clicked.connect(self._open_folder)
         self.btnKleberoboter = UiFactory.button("Datenbank senden", variant="ghost", min_height=26); self.btnKleberoboter.clicked.connect(self._trigger_kleberoboter)
 
         # Dauertest-Button + Dauer-Dropdown nebeneinander
@@ -1916,25 +1437,6 @@ class StageGUI(QWidget):
 
         setupGrid.addLayout(actionsCol, 0, 1)
         setupGrid.setColumnStretch(0, 2); setupGrid.setColumnStretch(1, 1)
-
-        # --- Dauertest-Dauer (NEU) ---
-        durRow = QHBoxLayout()
-        lblDur = QLabel("Dauer")
-        self.comboDur = QComboBox()
-        self.comboDur.addItems(["15 h (Standard)","1 h","4 h","8 h","24 h","Benutzerdefiniert"])
-        self.comboDur.setCurrentIndex(0)
-
-        self.spinHours = QSpinBox(); self.spinHours.setRange(0, 240); self.spinHours.setValue(15)
-        self.spinMinutes = QSpinBox(); self.spinMinutes.setRange(0, 59); self.spinMinutes.setValue(0)
-        self.spinHours.setEnabled(False); self.spinMinutes.setEnabled(False)
-        self.comboDur.currentIndexChanged.connect(self._on_duration_mode_changed)
-        self.spinHours.valueChanged.connect(self._on_custom_duration_changed)
-        self.spinMinutes.valueChanged.connect(self._on_custom_duration_changed)
-
-        durRow.addWidget(lblDur); durRow.addWidget(self.comboDur, 1)
-        durRow.addWidget(QLabel("h")); durRow.addWidget(self.spinHours)
-        durRow.addWidget(QLabel("min")); durRow.addWidget(self.spinMinutes)
-        self.cardActions.body.addLayout(durRow)
 
         # Right: Status + Plot + QA
         self.cardStatus = Card("Status & Live-Plot")
@@ -2078,7 +1580,12 @@ class StageGUI(QWidget):
 
         # Gemeinsames Kamerafenster oben
         try:
-            self.autofocusCam = LiveCamEmbed(self._af_frame_provider, interval_ms=200, parent=self.autofocusPage)
+            self.autofocusCam = LiveCamEmbed(
+                self._af_frame_provider,
+                interval_ms=200,
+                start_immediately=False,
+                parent=self.autofocusPage,
+            )
             autoLayout.addWidget(self.autofocusCam)
         except Exception as exc:
             autoLayout.addWidget(QLabel(f"Kamera nicht verfügbar: {exc}"))
@@ -2268,6 +1775,11 @@ class StageGUI(QWidget):
 
     def _open_autofocus_workflow(self):
         self.stack.setCurrentWidget(self.autofocusPage)
+        try:
+            if getattr(self, "autofocusCam", None):
+                self.autofocusCam.start()
+        except Exception:
+            pass
         if self._autofocus_buttons:
             self._autofocus_buttons[0].setFocus()
         self._set_status("Autofocus – wähle eine Kamera.")
@@ -2545,19 +2057,11 @@ class StageGUI(QWidget):
             self.lblTimer.setText(self._fmt_hms(self._duration_sec))
 
     def _on_duration_mode_changed(self, idx: int):
-        presets = [15*3600, 1*3600, 4*3600, 8*3600, 24*3600]
-        custom = (idx == 5)
-        self.spinHours.setEnabled(custom)
-        self.spinMinutes.setEnabled(custom)
-        if not custom:
-            self._set_duration_sec(presets[idx])
-        else:
-            self._on_custom_duration_changed()
-
-    def _on_custom_duration_changed(self):
-        hours = self.spinHours.value()
-        minutes = self.spinMinutes.value()
-        self._set_duration_sec(hours*3600 + minutes*60)
+        try:
+            secs = int(self.comboDur.itemData(idx))
+        except Exception:
+            secs = 15*3600
+        self._set_duration_sec(secs)
 
     # ---------- Test ----------
     def _start_test(self):
@@ -2728,7 +2232,7 @@ f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_ma
         except Exception as exc:
             self._err(str(exc))
 
-    # ---------- Kombi-Test (Real-Use + große Bewegungen) ----------
+    # ---------- Dauertest (kleine + große Bewegungen) ----------
     def _toggle_dauertest(self):
         if self._dauer_running:
             self._stop_dauertest()
@@ -2737,9 +2241,9 @@ f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_ma
 
     def _set_dauer_button(self, running: bool):
         if running:
-            self.btnDauer.setText("■  Kombi-Test stoppen  (Ctrl+S)")
+            self.btnDauer.setText("■  Dauertest stoppen  (Ctrl+S)")
         else:
-            self.btnDauer.setText("⏱️  Kombi-Test starten  (Ctrl+D)")
+            self.btnDauer.setText("⏱️  Dauertest starten  (Ctrl+D)")
         self.btnDauer.setEnabled(True)
 
     def _start_dauertest(self):
@@ -2759,7 +2263,7 @@ f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_ma
         else:
             self.plot.set_batch(self._batch)
             self.plot.reset()
-        self.plot.set_mode("Kombi-Test")
+        self.plot.set_mode("Dauertest")
 
         self._dauer_running = True
         self._set_dauer_button(True)
@@ -2767,7 +2271,7 @@ f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_ma
         try:
             x_center, y_center, _ = resolve_stage.get_current_pos()
         except Exception as exc:
-            QMessageBox.warning(self, "Kombi-Test", f"Referenzposition konnte nicht gelesen werden:\n{exc}")
+            QMessageBox.warning(self, "Dauertest", f"Referenzposition konnte nicht gelesen werden:\n{exc}")
             self._dauer_running = False
             self._set_dauer_button(False)
             return
@@ -2779,11 +2283,11 @@ f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_ma
         small_step = max(500, int(avail_range * 0.01))
         small_radius = max(2000, int(avail_range * 0.05))
 
-        self.lblPhase.setText(f"Kombi-Test (120s klein / 30s groß)")
+        self.lblPhase.setText(f"Dauertest (120s klein / 30s groß)")
         self.pbar.setMaximum(self._duration_sec)
         self.pbar.setValue(0)
-        self.pbar.setFormat(f"Kombi-Test: 0 / {self._fmt_hms(self._duration_sec)}")
-        self._set_status(f"Kombi-Test läuft (Step {small_step}, Radius {small_radius})…")
+        self.pbar.setFormat(f"Dauertest: 0 / {self._fmt_hms(self._duration_sec)}")
+        self._set_status(f"Dauertest läuft (Step {small_step}, Radius {small_radius})…")
 
         self._dauer_start  = time.time()
         self._dauer_target = self._dauer_start + self._duration_sec
@@ -2823,31 +2327,31 @@ f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_ma
             try:
                 self.plot.add_data(data)
             except Exception as e:
-                print("[WARN] Kombi-Test Plot-Update fehlgeschlagen:", e)
+                print("[WARN] Dauertest Plot-Update fehlgeschlagen:", e)
         phase = data.get("phase", "—")
         idx = int(data.get("idx", 0))
         total = int(data.get("total", 1))
         max_um = float(data.get("max_abs_um", 0.0))
         limit  = float(data.get("limit_um", resolve_stage.DUR_MAX_UM))
         ok = (max_um <= limit)
-        self._set_chip(self.chipDurQA, f"Kombi-Test QA (Limit {limit:.1f} µm): Max = {max_um:.2f} µm → {'OK' if ok else 'WARN/FAIL'}", ok=ok)
+        self._set_chip(self.chipDurQA, f"Dauertest QA (Limit {limit:.1f} µm): Max = {max_um:.2f} µm → {'OK' if ok else 'WARN/FAIL'}", ok=ok)
         elapsed_sec = max(0, int(float(data.get("t", 0.0)) * 60))
         self.pbar.setMaximum(self._duration_sec)
         self.pbar.setValue(min(elapsed_sec, self._duration_sec))
         pct = int(round(100 * self.pbar.value() / max(1, self._duration_sec)))
-        self.pbar.setFormat(f"Kombi-Test: {self._fmt_hms(self.pbar.value())} / {self._fmt_hms(self._duration_sec)} ({pct}%)")
-        self.lblPhase.setText(f"Kombi-Test · {phase} · Fehler {float(data.get('err_um',0.0)):.2f} µm (Max {max_um:.2f} µm)")
+        self.pbar.setFormat(f"Dauertest: {self._fmt_hms(self.pbar.value())} / {self._fmt_hms(self._duration_sec)} ({pct}%)")
+        self.lblPhase.setText(f"Dauertest · {phase} · Fehler {float(data.get('err_um',0.0)):.2f} µm (Max {max_um:.2f} µm)")
 
     def _dauer_finished(self, d):
-        print(f"[INFO][{self._batch}] Kombi-Test abgeschlossen → {d.get('out')}")
-        self._set_status("Kombi-Test beendet.")
+        print(f"[INFO][{self._batch}] Dauertest abgeschlossen → {d.get('out')}")
+        self._set_status("Dauertest beendet.")
         self._dauer_running = False
         self._set_dauer_button(False)
 
         outdir = self._ensure_run_dir()
         try:
             if self.plot is not None:
-                out_png = outdir / f"kombitest_{self._batch}.png"
+                out_png = outdir / f"dauertest_{self._batch}.png"
                 self.plot.figure.savefig(out_png, dpi=110)
                 print(f"[INFO][{self._batch}] Live-Plot gespeichert → {out_png}")
         except Exception as e:
@@ -2856,14 +2360,14 @@ f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_ma
         self._dur_max_um = float(d.get("dur_max_um", 0.0))
         limit = float(d.get("limit_um", resolve_stage.DUR_MAX_UM))
         dur_ok = (self._dur_max_um <= limit)
-        self._set_chip(self.chipDurQA, f"Kombi-Test QA (Limit {limit:.1f} µm): Max = {self._dur_max_um:.2f} µm → {'OK' if dur_ok else 'FAIL'}",
+        self._set_chip(self.chipDurQA, f"Dauertest QA (Limit {limit:.1f} µm): Max = {self._dur_max_um:.2f} µm → {'OK' if dur_ok else 'FAIL'}",
                        ok=dur_ok)
 
         try:
             images = []
             for name in [f"calib_x_{self._batch}.png", f"calib_y_{self._batch}.png",
                          f"X_{self._batch}.png", f"Y_{self._batch}.png",
-                         f"kombitest_{self._batch}.png"]:
+                         f"dauertest_{self._batch}.png"]:
                 f = outdir / name
                 if f.exists(): images.append(str(f))
             report_path = outdir / f"report_{self._batch}.pdf"
@@ -2872,15 +2376,15 @@ f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_ma
         except Exception as e:
             print(f"[WARN][{self._batch}] Konnte Bericht nicht aktualisieren:", e)
 
-        QMessageBox.information(self, "Kombi-Test abgeschlossen",
-            f"Kombi-Test abgeschlossen.\nMax. Abweichung: {self._dur_max_um:.2f} µm\n"
+        QMessageBox.information(self, "Dauertest abgeschlossen",
+            f"Dauertest abgeschlossen.\nMax. Abweichung: {self._dur_max_um:.2f} µm\n"
             f"Grenze: {limit:.2f} µm → {'OK' if dur_ok else 'NICHT OK'}")
 
         self.btnNewStage.setVisible(True)
         try:
             resp = QMessageBox.question(
                 self, "Neue Stage testen?",
-                "Kombi-Test beendet. Möchtest du jetzt die Parameter für eine neue Stage zurücksetzen?",
+                "Dauertest beendet. Möchtest du jetzt die Parameter für eine neue Stage zurücksetzen?",
                 QMessageBox.Yes | QMessageBox.No
             )
             if resp == QMessageBox.Yes:
@@ -2891,17 +2395,17 @@ f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_ma
             print("[WARN] Frage nach Reset fehlgeschlagen:", e)
 
     def _dauer_error(self, msg: str):
-        QMessageBox.warning(self, "Kombi-Test", f"Fehler:\n{msg}")
+        QMessageBox.warning(self, "Dauertest", f"Fehler:\n{msg}")
         self._dauer_running = False
         self._set_dauer_button(False)
-        self._set_status("Kombi-Test fehlgeschlagen.")
+        self._set_status("Dauertest fehlgeschlagen.")
 
     def _stop_dauertest(self):
         if not self._dauer_running: return
         if hasattr(self,'dauer_worker'): self.dauer_worker.stop()
         if hasattr(self,'timer') and self.timer.isActive(): self.timer.stop()
         self.lblTimer.setText("00:00:00")
-        self._set_status("Kombi-Test manuell gestoppt.")
+        self._set_status("Dauertest manuell gestoppt.")
         self._dauer_running=False
         self._set_dauer_button(False)
 
