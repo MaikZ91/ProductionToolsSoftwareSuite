@@ -421,6 +421,91 @@ class DashboardView(QWidget):
         
         self.update_data()
 
+    def setup_entry_ui(self, layout):
+        entry_card = Card("Send New Test Record")
+        entry_card.setMinimumHeight(150)
+        entry_card.setMaximumHeight(220)
+        
+        entry_layout = QVBoxLayout()
+        entry_layout.setSpacing(8)
+        
+        # Common Fields (Horizontal)
+        common_row = QHBoxLayout()
+        common_row.setSpacing(16)
+        
+        self.le_barcode = QLineEdit()
+        self.le_barcode.setPlaceholderText("Scan Barcode...")
+        self.le_user = QLineEdit()
+        self.le_user.setPlaceholderText("User ID...")
+        self.le_user.setFixedWidth(150)
+        
+        common_row.addWidget(QLabel("BARCODE:"))
+        common_row.addWidget(self.le_barcode)
+        common_row.addWidget(QLabel("USER:"))
+        common_row.addWidget(self.le_user)
+        
+        entry_layout.addLayout(common_row)
+        
+        # Test Specific Stack
+        self.entry_stack = QStackedWidget()
+        
+        # Widget Kleberoboter
+        w_kleber = QWidget()
+        l_kleber = QHBoxLayout(w_kleber)
+        l_kleber.setContentsMargins(0,0,0,0)
+        self.cb_ok = QCheckBox("Test OK?")
+        self.cb_ok.setStyleSheet("font-weight: bold; color: " + COLORS['primary'] + ";")
+        l_kleber.addWidget(self.cb_ok)
+        l_kleber.addStretch()
+        
+        # Widget Gitterschieber
+        w_git = QWidget()
+        l_git = QHBoxLayout(w_git)
+        l_git.setContentsMargins(0,0,0,0)
+        self.le_particles = QLineEdit()
+        self.le_particles.setPlaceholderText("Particle Count")
+        self.le_angle = QLineEdit()
+        self.le_angle.setPlaceholderText("Angle (deg)")
+        l_git.addWidget(QLabel("PARTICLES:"))
+        l_git.addWidget(self.le_particles)
+        l_git.addWidget(QLabel("ANGLE:"))
+        l_git.addWidget(self.le_angle)
+        
+        # Widget Stage
+        w_stage = QWidget()
+        l_stage = QHBoxLayout(w_stage)
+        l_stage.setContentsMargins(0,0,0,0)
+        self.le_pos_name = QLineEdit()
+        self.le_pos_name.setPlaceholderText("Position (e.g. A1)")
+        self.le_fov = QLineEdit()
+        self.le_fov.setPlaceholderText("FOV")
+        l_stage.addWidget(QLabel("POS:"))
+        l_stage.addWidget(self.le_pos_name)
+        l_stage.addWidget(QLabel("FOV:"))
+        l_stage.addWidget(self.le_fov)
+        
+        self.entry_stack.addWidget(w_kleber)    # Index 0
+        self.entry_stack.addWidget(w_git)       # Index 1
+        self.entry_stack.addWidget(w_stage)     # Index 2
+        
+        self.entry_stack.setCurrentIndex(0)
+        entry_layout.addWidget(self.entry_stack)
+        
+        # Buttons Row
+        btn_row = QHBoxLayout()
+        self.btn_clear = ModernButton("Clear Fields", "ghost")
+        self.btn_clear.clicked.connect(self.clear_entry_fields)
+        self.btn_send = ModernButton("Send to Database", "primary")
+        self.btn_send.clicked.connect(self.send_current_entry)
+        
+        btn_row.addStretch()
+        btn_row.addWidget(self.btn_clear)
+        btn_row.addWidget(self.btn_send)
+        
+        entry_layout.addLayout(btn_row)
+        entry_card.add_layout(entry_layout)
+        layout.addWidget(entry_card)
+
     def trigger_refresh(self):
         """Manually restart the timer and fetch data."""
         if not self.timer.isActive():
