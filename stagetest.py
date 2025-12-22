@@ -55,7 +55,7 @@ from PySide6.QtCore    import QObject, QThread, Signal, Qt, QTimer, QSize, QRegu
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QLineEdit, QTextEdit,
     QProgressBar, QMessageBox, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QFrame, QSizePolicy, QSpacerItem, QComboBox, QToolButton,
+    QFrame, QSizePolicy, QSpacerItem, QComboBox, QSpinBox, QToolButton,
     QStackedWidget, QSlider, QDoubleSpinBox, QDialog, QListWidget,
     QScrollArea
 )
@@ -567,12 +567,10 @@ def make_tile(text: str, icon_path: str, clicked_cb):
 
 class LiveCamEmbed(QWidget):
     """Einfacher Live-Kameraview für BGR/Mono Frames mit Frame-Provider."""
-    def __init__(self, frame_provider, *, interval_ms: int = 200, start_immediately: bool = True, parent=None):
+    def __init__(self, frame_provider, *, interval_ms: int = 200, parent=None):
         super().__init__(parent)
         self._frame_provider = frame_provider
         self._last_frame = None
-        self._interval_ms = interval_ms
-        self._autostart = bool(start_immediately)
         self.label = QLabel("Kein Bild")
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setMinimumHeight(320)
@@ -583,25 +581,7 @@ class LiveCamEmbed(QWidget):
         layout.addWidget(self.status)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        if self._autostart and self.isVisible():
-            self.start()
-
-    def start(self):
-        if not self._timer.isActive():
-            self._timer.start(self._interval_ms)
-
-    def stop(self):
-        if self._timer.isActive():
-            self._timer.stop()
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        if self._autostart:
-            self.start()
-
-    def hideEvent(self, event):
-        self.stop()
-        super().hideEvent(event)
+        self._timer.start(interval_ms)
 
     def last_frame(self):
         return self._last_frame
@@ -834,88 +814,8 @@ class TestWorker(QObject):
         except Exception as e:
             self.error.emit(str(e))
 
-class DauertestWorker(QObject):
-    update   = Signal(dict)
-    finished = Signal(dict)
 
-    def __init__(self, sc, batch: str = "NoBatch",
-                 stop_at_ts: float | None = None,
-                 start_ts: float | None = None,
-                 out_dir: pathlib.Path | None = None,
-                 dur_limit_um: float = DUR_MAX_UM):
-        super().__init__()
-        self.sc = sc
-        self._running = True
-        self.batch = sanitize_batch(batch)
-        self.stop_at_ts = stop_at_ts
-        self.start_ts   = start_ts or time.time()
-        self.out_dir    = out_dir
-        self.dur_limit_um = float(dur_limit_um)
-        self.max_abs_um = 0.0
-
-    def stop(self): self._running=False
-
-    def run(self):
-        pos_infodict={"x_counter":[],"y_counter":[],"Time [min]":[],
-                      "x_position [m]":[],"y_position [m]":[],
-                      "pos_error_x [m]":[],"pos_error_y [m]":[]}
-        base_name = f"{self.batch}_dauertest_values.csv"
-        savefile = (self.out_dir / base_name) if self.out_dir else pathlib.Path(base_name)
-
-        start=self.start_ts
-        x_low=pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/limitLowSteps")
-        x_high=pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/limitHighSteps")
-        x_spm=pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/stepsPerMeter")
-        x_epm=pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/encoderStepsPerMeter")
-        y_low=pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/limitLowSteps")
-        y_high=pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/limitHighSteps")
-        y_spm=pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/stepsPerMeter")
-        y_epm=pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/encoderStepsPerMeter")
-        x_count=y_count=0
-        try:
-            while self._running and (self.stop_at_ts is None or time.time() < self.stop_at_ts):
-                cx,cy,_=get_current_pos()
-                if np.random.rand()>=0.5:
-                    ny=cy; nx=int(x_low+np.random.rand()*(x_high-x_low)); x_count+=1
-                else:
-                    nx=cx; ny=int(y_low+np.random.rand()*(y_high-y_low)); y_count+=1
-                self.sc.move_abs('X',nx); self.sc.move_abs('Y',ny)
-
-                runtime=round((time.time()-start)/60,2)
-                x_enc,y_enc=get_stage_encoders()
-                ex=(x_enc/x_epm) - (nx/x_spm)
-                ey=(y_enc/y_epm) - (ny/y_spm)
-
-                cur_max_um = max(abs(ex), abs(ey)) * 1e6
-                if cur_max_um > self.max_abs_um:
-                    self.max_abs_um = cur_max_um
-
-                self.update.emit({"t":runtime,"ex":ex,"ey":ey,
-                                  "batch":self.batch,
-                                  "limit_um": self.dur_limit_um,
-                                  "max_abs_um": self.max_abs_um})
-
-                pos_infodict["Time [min]"].append(runtime)
-                pos_infodict["x_counter"].append(x_count)
-                pos_infodict["y_counter"].append(y_count)
-                pos_infodict["x_position [m]"].append(round(x_enc/x_epm,6))
-                pos_infodict["y_position [m]"].append(round(y_enc/y_epm,6))
-                pos_infodict["pos_error_x [m]"].append(round(ex,8))
-                pos_infodict["pos_error_y [m]"].append(round(ey,8))
-
-                time.sleep(0.2)
-        finally:
-            save_stage_test(str(savefile), pos_infodict, batch=self.batch)
-            self.finished.emit({
-                "out": str(savefile),
-                "batch": self.batch,
-                "out_dir": str(self.out_dir) if self.out_dir else "",
-                "dur_max_um": float(self.max_abs_um),
-                "limit_um": float(self.dur_limit_um)
-            })
-
-
-class CombinedTestWorker(QObject):
+class Dauertest(QObject):
     update   = Signal(dict)
     finished = Signal(dict)
     error    = Signal(str)
@@ -974,13 +874,12 @@ class CombinedTestWorker(QObject):
         self.sc.move_abs('Y', ty)
         time.sleep(dwell)
 
-        # Nutze gleiche Fehlerberechnung wie im Referenz-Dauertest:
-        # (EncoderSteps / EncPerMeter) - (MotorSteps / StepsPerMeter)
-        x_enc, y_enc = get_stage_encoders()
+        ex_enc = self.sc.enc('X')
+        ey_enc = self.sc.enc('Y')
         spm_x = self.sc.steps_per_m['X']; spm_y = self.sc.steps_per_m['Y']
         epm_x = self.sc.enc_per_m['X'];   epm_y = self.sc.enc_per_m['Y']
-        err_x = (x_enc/epm_x) - (tx/spm_x)
-        err_y = (y_enc/epm_y) - (ty/spm_y)
+        err_x = ex_enc/epm_x - tx/spm_x
+        err_y = ey_enc/epm_y - ty/spm_y
         err_um = max(abs(err_x), abs(err_y)) * 1e6
         self.max_abs_um = max(self.max_abs_um, float(err_um))
         runtime = round((time.time()-self.start_ts)/60, 2)
@@ -988,8 +887,8 @@ class CombinedTestWorker(QObject):
         self.pos_infodict["Time [min]"].append(runtime)
         self.pos_infodict["x_counter"].append(move_idx)
         self.pos_infodict["y_counter"].append(move_idx)
-        self.pos_infodict["x_position [m]"].append(round(x_enc/epm_x,6))
-        self.pos_infodict["y_position [m]"].append(round(y_enc/epm_y,6))
+        self.pos_infodict["x_position [m]"].append(round(ex_enc/epm_x,6))
+        self.pos_infodict["y_position [m]"].append(round(ey_enc/epm_y,6))
         self.pos_infodict["pos_error_x [m]"].append(round(err_x,8))
         self.pos_infodict["pos_error_y [m]"].append(round(err_y,8))
 
@@ -1344,7 +1243,7 @@ class LivePlot(FigureCanvas):
 
     def _apply_titles(self):
         self.ax.set_title(f"{self.mode} – Positionsfehler · Charge: {self.batch}", fontweight="semibold")
-        self.ax.set_xlabel("Zeit [min]"); self.ax.set_ylabel("Fehler [m]")
+        self.ax.set_xlabel("Zeit [min]"); self.ax.set_ylabel("Fehler [µm]")
 
     def set_batch(self, batch: str):
         self.batch = sanitize_batch(batch); self._apply_titles(); self.draw_idle()
@@ -1361,9 +1260,9 @@ class LivePlot(FigureCanvas):
         self.ax.relim(); self.ax.autoscale_view(); self.draw_idle()
 
     def add_data(self, data):
-        ex_m = float(data.get("ex", 0.0))
-        ey_m = float(data.get("ey", 0.0))
-        self.t.append(data["t"]); self.ex.append(ex_m); self.ey.append(ey_m)
+        ex_um = float(data.get("ex", 0.0)) * 1e6
+        ey_um = float(data.get("ey", 0.0)) * 1e6
+        self.t.append(data["t"]); self.ex.append(ex_um); self.ey.append(ey_um)
         self.line_ex.set_data(self.t,self.ex); self.line_ey.set_data(self.t,self.ey)
         self.ax.relim(); self.ax.autoscale_view(); self.draw_idle()
 
@@ -1536,36 +1435,36 @@ class StageGUI(QWidget):
         grid.addWidget(self.cardActions, 1, 0)
 
         self.btnStart = QPushButton("▶  Test starten  (Ctrl+R)"); self.btnStart.clicked.connect(self._start_test)
-        self.btnDauer = QPushButton("⏱️  Dauertest starten  (Ctrl+D)"); self.btnDauer.clicked.connect(self._toggle_dauertest)
+        self.btnDauer = QPushButton("⏱️  Kombi-Test starten  (Ctrl+D)"); self.btnDauer.clicked.connect(self._toggle_dauertest)
         self.btnOpenFolder = QPushButton("📂 Ordner öffnen"); self.btnOpenFolder.setEnabled(False); self.btnOpenFolder.clicked.connect(self._open_folder)
         self.btnKleberoboter = QPushButton("Datenbank Senden"); self.btnKleberoboter.clicked.connect(self._trigger_kleberoboter)
 
         for b in (self.btnStart, self.btnDauer, self.btnOpenFolder, self.btnKleberoboter):
             b.setMinimumHeight(36)
 
-        # Dauertest-Button + Dauer-Dropdown nebeneinander
-        dauerRow = QHBoxLayout(); dauerRow.setSpacing(8)
-        dauerRow.addWidget(self.btnDauer, 1)
-        self.comboDur = QComboBox()
-        self._dur_presets = [
-            ("15 h (Standard)", 15*3600),
-            ("1 h", 1*3600),
-            ("4 h", 4*3600),
-            ("8 h", 8*3600),
-            ("24 h", 24*3600),
-            ("30 min", 30*60),
-            ("10 min", 10*60),
-        ]
-        for label, seconds in self._dur_presets:
-            self.comboDur.addItem(label, seconds)
-        self.comboDur.setFixedWidth(150)
-        self.comboDur.currentIndexChanged.connect(self._on_duration_mode_changed)
-        dauerRow.addWidget(self.comboDur, 0, Qt.AlignRight)
-
         self.cardActions.body.addWidget(self.btnStart)
-        self.cardActions.body.addLayout(dauerRow)
+        self.cardActions.body.addWidget(self.btnDauer)
         self.cardActions.body.addWidget(self.btnOpenFolder)
         self.cardActions.body.addWidget(self.btnKleberoboter)
+
+        # --- Dauertest-Dauer (NEU) ---
+        durRow = QHBoxLayout()
+        lblDur = QLabel("Dauer")
+        self.comboDur = QComboBox()
+        self.comboDur.addItems(["15 h (Standard)","1 h","4 h","8 h","24 h","Benutzerdefiniert"])
+        self.comboDur.setCurrentIndex(0)
+
+        self.spinHours = QSpinBox(); self.spinHours.setRange(0, 240); self.spinHours.setValue(15)
+        self.spinMinutes = QSpinBox(); self.spinMinutes.setRange(0, 59); self.spinMinutes.setValue(0)
+        self.spinHours.setEnabled(False); self.spinMinutes.setEnabled(False)
+        self.comboDur.currentIndexChanged.connect(self._on_duration_mode_changed)
+        self.spinHours.valueChanged.connect(self._on_custom_duration_changed)
+        self.spinMinutes.valueChanged.connect(self._on_custom_duration_changed)
+
+        durRow.addWidget(lblDur); durRow.addWidget(self.comboDur, 1)
+        durRow.addWidget(QLabel("h")); durRow.addWidget(self.spinHours)
+        durRow.addWidget(QLabel("min")); durRow.addWidget(self.spinMinutes)
+        self.cardActions.body.addLayout(durRow)
 
         # Right: Status + Plot + QA
         self.cardStatus = Card("Status / Fortschritt")
@@ -1586,7 +1485,7 @@ class StageGUI(QWidget):
         self.cardStatus.body.addItem(QSpacerItem(0,6, QSizePolicy.Minimum, QSizePolicy.Fixed))
         qaRow = QHBoxLayout()
         self.chipMeasQA = QLabel("Messung QA: —"); self.chipMeasQA.setObjectName("Chip")
-        self.chipDurQA  = QLabel(f"Dauertest QA (Limit {DUR_MAX_UM:.1f} µm): —"); self.chipDurQA.setObjectName("Chip")
+        self.chipDurQA  = QLabel(f"Kombi-Test QA (Limit {DUR_MAX_UM:.1f} µm): —"); self.chipDurQA.setObjectName("Chip")
         qaRow.addWidget(self.chipMeasQA); qaRow.addWidget(self.chipDurQA)
         self.cardStatus.body.addLayout(qaRow)
 
@@ -1617,12 +1516,7 @@ class StageGUI(QWidget):
         # Gemeinsames Kamerafenster + Aktionen
         self.gitterschieber_status = QLabel("")
         cam_provider = lambda: gs.capture_frame()
-        self.gitterschieberCam = LiveCamEmbed(
-            cam_provider,
-            interval_ms=200,
-            start_immediately=False,
-            parent=self.gitterschieberPage,
-        )
+        self.gitterschieberCam = LiveCamEmbed(cam_provider, interval_ms=200, parent=self.gitterschieberPage)
         gsCard.body.addWidget(self.gitterschieberCam)
 
         btn_bar = QHBoxLayout()
@@ -1656,12 +1550,7 @@ class StageGUI(QWidget):
 
         # Gemeinsames Kamerafenster oben
         try:
-            self.autofocusCam = LiveCamEmbed(
-                self._af_frame_provider,
-                interval_ms=200,
-                start_immediately=False,
-                parent=self.autofocusPage,
-            )
+            self.autofocusCam = LiveCamEmbed(self._af_frame_provider, interval_ms=200, parent=self.autofocusPage)
             autoLayout.addWidget(self.autofocusCam)
         except Exception as exc:
             autoLayout.addWidget(QLabel(f"Kamera nicht verfügbar: {exc}"))
@@ -1859,11 +1748,6 @@ class StageGUI(QWidget):
 
     def _open_autofocus_workflow(self):
         self.stack.setCurrentWidget(self.autofocusPage)
-        try:
-            if getattr(self, "autofocusCam", None):
-                self.autofocusCam.start()
-        except Exception:
-            pass
         if self._autofocus_buttons:
             self._autofocus_buttons[0].setFocus()
         self._set_status("Autofocus – wähle eine Kamera.")
@@ -1906,11 +1790,6 @@ class StageGUI(QWidget):
         """
         try:
             self.stack.setCurrentWidget(self.gitterschieberPage)
-            try:
-                if getattr(self, "gitterschieberCam", None):
-                    self.gitterschieberCam.start()
-            except Exception:
-                pass
             self._set_status("Gitterschieber geöffnet.")
         except Exception as exc:
             QMessageBox.warning(self, "Gitterschieber", f"Start fehlgeschlagen:\n{exc}")
@@ -2005,11 +1884,19 @@ class StageGUI(QWidget):
             self.lblTimer.setText(self._fmt_hms(self._duration_sec))
 
     def _on_duration_mode_changed(self, idx: int):
-        try:
-            secs = int(self.comboDur.itemData(idx))
-        except Exception:
-            secs = 15*3600
-        self._set_duration_sec(secs)
+        presets = [15*3600, 1*3600, 4*3600, 8*3600, 24*3600]
+        custom = (idx == 5)
+        self.spinHours.setEnabled(custom)
+        self.spinMinutes.setEnabled(custom)
+        if not custom:
+            self._set_duration_sec(presets[idx])
+        else:
+            self._on_custom_duration_changed()
+
+    def _on_custom_duration_changed(self):
+        hours = self.spinHours.value()
+        minutes = self.spinMinutes.value()
+        self._set_duration_sec(hours*3600 + minutes*60)
 
     # ---------- Test ----------
     def _start_test(self):
@@ -2176,7 +2063,7 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
         except Exception as exc:
             self._err(str(exc))
 
-    # ---------- Dauertest (kleine + große Bewegungen) ----------
+    # ---------- Kombi-Test (Real-Use + große Bewegungen) ----------
     def _toggle_dauertest(self):
         if self._dauer_running:
             self._stop_dauertest()
@@ -2185,9 +2072,9 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
 
     def _set_dauer_button(self, running: bool):
         if running:
-            self.btnDauer.setText("■  Dauertest stoppen  (Ctrl+S)")
+            self.btnDauer.setText("■  Kombi-Test stoppen  (Ctrl+S)")
         else:
-            self.btnDauer.setText("⏱️  Dauertest starten  (Ctrl+D)")
+            self.btnDauer.setText("⏱️  Kombi-Test starten  (Ctrl+D)")
         self.btnDauer.setEnabled(True)
 
     def _start_dauertest(self):
@@ -2200,7 +2087,7 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
         else:
             self.plot.set_batch(self._batch)
             self.plot.reset()
-        self.plot.set_mode("Dauertest")
+        self.plot.set_mode("Kombi-Test")
 
         self._dauer_running = True
         self._set_dauer_button(True)
@@ -2208,7 +2095,7 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
         try:
             x_center, y_center, _ = get_current_pos()
         except Exception as exc:
-            QMessageBox.warning(self, "Dauertest", f"Referenzposition konnte nicht gelesen werden:\n{exc}")
+            QMessageBox.warning(self, "Kombi-Test", f"Referenzposition konnte nicht gelesen werden:\n{exc}")
             self._dauer_running = False
             self._set_dauer_button(False)
             return
@@ -2220,11 +2107,11 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
         small_step = max(500, int(avail_range * 0.01))
         small_radius = max(2000, int(avail_range * 0.05))
 
-        self.lblPhase.setText(f"Dauertest (120s klein / 30s groß)")
+        self.lblPhase.setText(f"Kombi-Test (120s klein / 30s groß)")
         self.pbar.setMaximum(self._duration_sec)
         self.pbar.setValue(0)
-        self.pbar.setFormat(f"Dauertest: 0 / {self._fmt_hms(self._duration_sec)}")
-        self._set_status(f"Dauertest läuft (Step {small_step}, Radius {small_radius})…")
+        self.pbar.setFormat(f"Kombi-Test: 0 / {self._fmt_hms(self._duration_sec)}")
+        self._set_status(f"Kombi-Test läuft (Step {small_step}, Radius {small_radius})…")
 
         self._dauer_start  = time.time()
         self._dauer_target = self._dauer_start + self._duration_sec
@@ -2264,31 +2151,31 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             try:
                 self.plot.add_data(data)
             except Exception as e:
-                print("[WARN] Dauertest Plot-Update fehlgeschlagen:", e)
+                print("[WARN] Kombi-Test Plot-Update fehlgeschlagen:", e)
         phase = data.get("phase", "—")
         idx = int(data.get("idx", 0))
         total = int(data.get("total", 1))
         max_um = float(data.get("max_abs_um", 0.0))
         limit  = float(data.get("limit_um", DUR_MAX_UM))
         ok = (max_um <= limit)
-        self._set_chip(self.chipDurQA, f"Dauertest QA (Limit {limit:.1f} µm): Max = {max_um:.2f} µm → {'OK' if ok else 'WARN/FAIL'}", ok=ok)
+        self._set_chip(self.chipDurQA, f"Kombi-Test QA (Limit {limit:.1f} µm): Max = {max_um:.2f} µm → {'OK' if ok else 'WARN/FAIL'}", ok=ok)
         elapsed_sec = max(0, int(float(data.get("t", 0.0)) * 60))
         self.pbar.setMaximum(self._duration_sec)
         self.pbar.setValue(min(elapsed_sec, self._duration_sec))
         pct = int(round(100 * self.pbar.value() / max(1, self._duration_sec)))
-        self.pbar.setFormat(f"Dauertest: {self._fmt_hms(self.pbar.value())} / {self._fmt_hms(self._duration_sec)} ({pct}%)")
-        self.lblPhase.setText(f"Dauertest · {phase} · Fehler {float(data.get('err_um',0.0)):.2f} µm (Max {max_um:.2f} µm)")
+        self.pbar.setFormat(f"Kombi-Test: {self._fmt_hms(self.pbar.value())} / {self._fmt_hms(self._duration_sec)} ({pct}%)")
+        self.lblPhase.setText(f"Kombi-Test · {phase} · Fehler {float(data.get('err_um',0.0)):.2f} µm (Max {max_um:.2f} µm)")
 
     def _dauer_finished(self, d):
-        print(f"[INFO][{self._batch}] Dauertest abgeschlossen → {d.get('out')}")
-        self._set_status("Dauertest beendet.")
+        print(f"[INFO][{self._batch}] Kombi-Test abgeschlossen → {d.get('out')}")
+        self._set_status("Kombi-Test beendet.")
         self._dauer_running = False
         self._set_dauer_button(False)
 
         outdir = self._ensure_run_dir()
         try:
             if self.plot is not None:
-                out_png = outdir / f"dauertest_{self._batch}.png"
+                out_png = outdir / f"kombitest_{self._batch}.png"
                 self.plot.figure.savefig(out_png, dpi=110)
                 print(f"[INFO][{self._batch}] Live-Plot gespeichert → {out_png}")
         except Exception as e:
@@ -2297,14 +2184,14 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
         self._dur_max_um = float(d.get("dur_max_um", 0.0))
         limit = float(d.get("limit_um", DUR_MAX_UM))
         dur_ok = (self._dur_max_um <= limit)
-        self._set_chip(self.chipDurQA, f"Dauertest QA (Limit {limit:.1f} µm): Max = {self._dur_max_um:.2f} µm → {'OK' if dur_ok else 'FAIL'}",
+        self._set_chip(self.chipDurQA, f"Kombi-Test QA (Limit {limit:.1f} µm): Max = {self._dur_max_um:.2f} µm → {'OK' if dur_ok else 'FAIL'}",
                        ok=dur_ok)
 
         try:
             images = []
             for name in [f"calib_x_{self._batch}.png", f"calib_y_{self._batch}.png",
                          f"X_{self._batch}.png", f"Y_{self._batch}.png",
-                         f"dauertest_{self._batch}.png"]:
+                         f"kombitest_{self._batch}.png"]:
                 f = outdir / name
                 if f.exists(): images.append(str(f))
             report_path = outdir / f"report_{self._batch}.pdf"
@@ -2313,15 +2200,15 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
         except Exception as e:
             print(f"[WARN][{self._batch}] Konnte Bericht nicht aktualisieren:", e)
 
-        QMessageBox.information(self, "Dauertest abgeschlossen",
-            f"Dauertest abgeschlossen.\nMax. Abweichung: {self._dur_max_um:.2f} µm\n"
+        QMessageBox.information(self, "Kombi-Test abgeschlossen",
+            f"Kombi-Test abgeschlossen.\nMax. Abweichung: {self._dur_max_um:.2f} µm\n"
             f"Grenze: {limit:.2f} µm → {'OK' if dur_ok else 'NICHT OK'}")
 
         self.btnNewStage.setVisible(True)
         try:
             resp = QMessageBox.question(
                 self, "Neue Stage testen?",
-                "Dauertest beendet. Möchtest du jetzt die Parameter für eine neue Stage zurücksetzen?",
+                "Kombi-Test beendet. Möchtest du jetzt die Parameter für eine neue Stage zurücksetzen?",
                 QMessageBox.Yes | QMessageBox.No
             )
             if resp == QMessageBox.Yes:
@@ -2332,17 +2219,17 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             print("[WARN] Frage nach Reset fehlgeschlagen:", e)
 
     def _dauer_error(self, msg: str):
-        QMessageBox.warning(self, "Dauertest", f"Fehler:\n{msg}")
+        QMessageBox.warning(self, "Kombi-Test", f"Fehler:\n{msg}")
         self._dauer_running = False
         self._set_dauer_button(False)
-        self._set_status("Dauertest fehlgeschlagen.")
+        self._set_status("Kombi-Test fehlgeschlagen.")
 
     def _stop_dauertest(self):
         if not self._dauer_running: return
         if hasattr(self,'dauer_worker'): self.dauer_worker.stop()
         if hasattr(self,'timer') and self.timer.isActive(): self.timer.stop()
         self.lblTimer.setText("00:00:00")
-        self._set_status("Dauertest manuell gestoppt.")
+        self._set_status("Kombi-Test manuell gestoppt.")
         self._dauer_running=False
         self._set_dauer_button(False)
 
@@ -2367,7 +2254,7 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
         self.lblCalib.setText("—"); self._calib_vals = {"X": None, "Y": None}
         self._meas_max_um = None; self._dur_max_um = None
         self._set_chip(self.chipMeasQA, "Messung QA: —", ok=True)
-        self._set_chip(self.chipDurQA, f"Dauertest QA (Limit {DUR_MAX_UM:.1f} µm): —", ok=True)
+        self._set_chip(self.chipDurQA, f"Kombi-Test QA (Limit {DUR_MAX_UM:.1f} µm): —", ok=True)
 
         self.lblTimer.setText(self._fmt_hms(self._duration_sec))
         self._set_dauer_button(False)
