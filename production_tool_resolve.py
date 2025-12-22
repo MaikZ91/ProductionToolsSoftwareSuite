@@ -55,11 +55,7 @@ from PySide6.QtCore    import QObject, QThread, Signal, Qt, QTimer, QSize, QRegu
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QLineEdit, QTextEdit,
     QProgressBar, QMessageBox, QVBoxLayout, QHBoxLayout, QGridLayout,
-<<<<<<< HEAD:stagetest.py
-    QFrame, QSizePolicy, QSpacerItem, QComboBox, QSpinBox, QToolButton,
-=======
-    QFrame, QSizePolicy, QSpacerItem, QComboBox, QToolButton, QTableView,
->>>>>>> 659a8bcf2c57ee6666e6e99c3f41743bbb661c9c:production_tool_resolve.py
+    QFrame, QSizePolicy, QSpacerItem, QComboBox, QSpinBox, QToolButton, QTableView,
     QStackedWidget, QSlider, QDoubleSpinBox, QDialog, QListWidget,
     QScrollArea, QCheckBox, QFormLayout, QGroupBox, QHeaderView, QAbstractItemView, QDial
 )
@@ -926,8 +922,6 @@ class LiveCamEmbed(QWidget):
             return QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
         raise ValueError("Unsupported frame shape.")
 
-
-<<<<<<< HEAD:stagetest.py
 def get_stage_encoders():
     st = {}
     pmac.getStagePosInfo(st)
@@ -1428,7 +1422,6 @@ class CameraWindow(QWidget):
         if ref is not None:
             rx, ry = ref
             dx = int(cx - int(rx)); dy = int(cy - int(ry))
-=======
 def frame_to_qpixmap(frame, target_size=None) -> QPixmap:
     """Convert BGR/gray frame into a QPixmap, scaled to target_size when given."""
     if frame.ndim == 2:
@@ -1447,7 +1440,6 @@ def frame_to_qpixmap(frame, target_size=None) -> QPixmap:
     if target_size is not None:
         if isinstance(target_size, QSize):
             w, h = target_size.width(), target_size.height()
->>>>>>> 659a8bcf2c57ee6666e6e99c3f41743bbb661c9c:production_tool_resolve.py
         else:
             w, h = target_size
         if w and h:
@@ -1891,24 +1883,10 @@ class StageGUI(QWidget):
 
         setupGrid.addLayout(metaCol, 0, 0)
 
-<<<<<<< HEAD:stagetest.py
-        self.btnStart = QPushButton("▶  Test starten  (Ctrl+R)"); self.btnStart.clicked.connect(self._start_test)
-        self.btnDauer = QPushButton("⏱️  Kombi-Test starten  (Ctrl+D)"); self.btnDauer.clicked.connect(self._toggle_dauertest)
-        self.btnOpenFolder = QPushButton("📂 Ordner öffnen"); self.btnOpenFolder.setEnabled(False); self.btnOpenFolder.clicked.connect(self._open_folder)
-        self.btnKleberoboter = QPushButton("Datenbank Senden"); self.btnKleberoboter.clicked.connect(self._trigger_kleberoboter)
-
-        for b in (self.btnStart, self.btnDauer, self.btnOpenFolder, self.btnKleberoboter):
-            b.setMinimumHeight(36)
-
-        self.cardActions.body.addWidget(self.btnStart)
-        self.cardActions.body.addWidget(self.btnDauer)
-        self.cardActions.body.addWidget(self.btnOpenFolder)
-        self.cardActions.body.addWidget(self.btnKleberoboter)
-=======
         actionsCol = QVBoxLayout(); actionsCol.setSpacing(6)
         self.btnStart = UiFactory.button("Test starten (Ctrl+R)", variant="primary", min_height=28); self.btnStart.clicked.connect(self._start_test)
         self.btnDauer = UiFactory.button("Dauertest starten (Ctrl+D)", variant="primary", min_height=28); self.btnDauer.clicked.connect(self._toggle_dauertest)
-        self.btnOpenFolder = UiFactory.button("Ordner ?ffnen", variant="ghost", min_height=32); self.btnOpenFolder.setEnabled(False); self.btnOpenFolder.clicked.connect(self._open_folder)
+        self.btnOpenFolder = UiFactory.button("Ordner öffnen", variant="ghost", min_height=32); self.btnOpenFolder.setEnabled(False); self.btnOpenFolder.clicked.connect(self._open_folder)
         self.btnKleberoboter = UiFactory.button("Datenbank senden", variant="ghost", min_height=26); self.btnKleberoboter.clicked.connect(self._trigger_kleberoboter)
 
         # Dauertest-Button + Dauer-Dropdown nebeneinander
@@ -1938,7 +1916,6 @@ class StageGUI(QWidget):
 
         setupGrid.addLayout(actionsCol, 0, 1)
         setupGrid.setColumnStretch(0, 2); setupGrid.setColumnStretch(1, 1)
->>>>>>> 659a8bcf2c57ee6666e6e99c3f41743bbb661c9c:production_tool_resolve.py
 
         # --- Dauertest-Dauer (NEU) ---
         durRow = QHBoxLayout()
