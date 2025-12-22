@@ -21,19 +21,19 @@ Stage-Toolbox (Dark Minimal Theme) – Pro UI (Report & QA) + Workflow-Kacheln
 import os as _os
 _os.environ.pop("GIO_MODULE_DIR", None)
 
-import csv
 import datetime
+import io
 import json
 import os
 import pathlib
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import time
-import threading
-from typing import Optional
+from collections import deque
+
+import pandas as pd
 
 # Ensure relocated modules are importable (./Hardware, ./Algorithmen)
 _BASE_DIR = pathlib.Path(__file__).resolve().parent
@@ -51,346 +51,56 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib import image as mpimg
 
-from PySide6.QtCore    import QObject, QThread, Signal, Qt, QTimer, QSize, QRegularExpression, QEvent
+from PySide6.QtCore    import QObject, QThread, Signal, Qt, QTimer, QSize, QRegularExpression, QEvent, QSortFilterProxyModel, QAbstractTableModel
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QLineEdit, QTextEdit,
     QProgressBar, QMessageBox, QVBoxLayout, QHBoxLayout, QGridLayout,
+<<<<<<< HEAD:stagetest.py
     QFrame, QSizePolicy, QSpacerItem, QComboBox, QSpinBox, QToolButton,
+=======
+    QFrame, QSizePolicy, QSpacerItem, QComboBox, QToolButton, QTableView,
+>>>>>>> 659a8bcf2c57ee6666e6e99c3f41743bbb661c9c:production_tool_resolve.py
     QStackedWidget, QSlider, QDoubleSpinBox, QDialog, QListWidget,
-    QScrollArea
+    QScrollArea, QCheckBox, QFormLayout, QGroupBox, QHeaderView, QAbstractItemView, QDial
 )
 from PySide6.QtGui     import (
     QPixmap, QPalette, QColor, QFont, QShortcut, QKeySequence,
-    QRegularExpressionValidator, QIcon, QImage
+    QRegularExpressionValidator, QIcon, QImage, QPainter, QPen
 )
 
+import autofocus
+from autofocus import IdsCam, LaserSpotDetector, LiveLaserController
+from commonIE import dbConnector
+import commonIE
+from commonIE import miltenyiBarcode
+import datenbank as db
 import gitterschieber as gs
-from ids_camera import IdsCam
-from laser_spot_detection import LaserSpotDetector
 from z_trieb import ZTriebWidget
+import stage_control as resolve_stage
+
 
 # ========================== DATENBANK / INFRA ==========================
 BASE_DIR = _BASE_DIR
-
-def resolve_data_root() -> pathlib.Path:
-    """Find the Stage-Teststand root, honoring env override and existing directories."""
-    candidates: list[pathlib.Path] = []
-    env_root = os.environ.get("STAGE_TOOLBOX_DATA_ROOT")
-    if env_root:
-        candidates.append(pathlib.Path(env_root).expanduser())
-    home_candidate = pathlib.Path.home() / "Stage-Teststand"
-    if home_candidate not in candidates:
-        candidates.append(home_candidate)
-    base_candidate = BASE_DIR / "Stage-Teststand"
-    if base_candidate not in candidates:
-        candidates.append(base_candidate)
-    cwd_candidate = pathlib.Path.cwd() / "Stage-Teststand"
-    if cwd_candidate not in candidates:
-        candidates.append(cwd_candidate)
-
-    for path in candidates:
-        try:
-            if path.exists():
-                return path.resolve()
-        except OSError:
-            continue
-
-    fallback = candidates[0] if candidates else (BASE_DIR / "Stage-Teststand")
-    fallback.mkdir(parents=True, exist_ok=True)
-    return fallback.resolve()
-
-DATA_ROOT = resolve_data_root()
-
-def _resolve_dashboard_widget():
-    candidates = [
-        BASE_DIR / "dashboard",
-        BASE_DIR.parent / "dashboard",
-        BASE_DIR.parent / "Pr\u00fcfstände" / "Datenbank",
-        pathlib.Path.home() / "Pr\u00fcfstände" / "Datenbank",
-    ]
-    dashboard_cls = None
-    dashboard_error = None
-    for candidate in candidates:
-        try:
-            dash_py = candidate / "dashboard.py"
-        except Exception:
-            continue
-        if not dash_py.exists():
-            continue
-        path_str = str(candidate)
-        if path_str not in sys.path:
-            sys.path.append(path_str)
-        try:
-            from dashboard import Dashboard as _DashboardWidget
-        except Exception as exc:  # pragma: no cover - optional import
-            dashboard_error = exc
-            continue
-        else:
-            dashboard_cls = _DashboardWidget
-            break
-    return dashboard_cls, dashboard_error
-
-DASHBOARD_WIDGET_CLS, _DASHBOARD_IMPORT_ERROR = _resolve_dashboard_widget()
-
-KLEBEROBOTER_SERVER_IP = os.environ.get("KLEBEROBOTER_SERVER_IP", "10.3.141.1")
-try:
-    KLEBEROBOTER_PORT = int(os.environ.get("KLEBEROBOTER_PORT", "5000"))
-except (TypeError, ValueError):
-    KLEBEROBOTER_PORT = 5000
-try:
-    KLEBEROBOTER_BARCODE = int(os.environ.get("KLEBEROBOTER_BARCODE", "999911200301203102103142124"))
-except (TypeError, ValueError):
-    KLEBEROBOTER_BARCODE = 999911200301203102103142124
-RASPI_WIFI_SSID = os.environ.get("RASPI_WIFI_SSID", "raspi-webgui")
-
-def _current_wifi_ssid() -> str | None:
-    """Return the currently connected Wi-Fi SSID if available."""
-    nmcli_path = shutil.which("nmcli")
-    if nmcli_path:
-        try:
-            res = subprocess.run(
-                [nmcli_path, "-t", "-f", "ACTIVE,SSID", "dev", "wifi"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        except subprocess.CalledProcessError:
-            pass
-        else:
-            for line in res.stdout.splitlines():
-                if line.startswith("yes:"):
-                    return line.split(":", 1)[1] or None
-    iwgetid_path = shutil.which("iwgetid")
-    if iwgetid_path:
-        try:
-            res = subprocess.run(
-                [iwgetid_path, "-r"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        except subprocess.CalledProcessError:
-            pass
-        else:
-            ssid = res.stdout.strip()
-            return ssid or None
-    return None
-
-def ensure_raspi_wifi_connected(target_ssid: str, timeout: float = 15.0) -> None:
-    """
-    Ensure the PC is connected to the raspi-webgui WLAN, trying to auto-connect if necessary.
-    Raises RuntimeError if the connection could not be established.
-    """
-    if not target_ssid:
-        return
-    current = _current_wifi_ssid()
-    if current == target_ssid:
-        return
-    nmcli_path = shutil.which("nmcli")
-    if not nmcli_path:
-        raise RuntimeError(f"WLAN '{target_ssid}' nicht verbunden und 'nmcli' ist nicht verfügbar.")
-    try:
-        subprocess.run(
-            [nmcli_path, "dev", "wifi", "connect", target_ssid],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        err = exc.stderr.strip() or exc.stdout.strip() or str(exc)
-        raise RuntimeError(f"WLAN-Verbindung zu '{target_ssid}' fehlgeschlagen:\n{err}") from exc
-
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        time.sleep(1.0)
-        if _current_wifi_ssid() == target_ssid:
-            return
-    raise RuntimeError(f"Konnte keine Verbindung zu '{target_ssid}' herstellen.")
-
-def send_kleberoboter_payload(
-    server_ip: str | None = None,
-    port: int | None = None,
-    barcode: int | None = None,
-) -> tuple[dict, str | None]:
-    """
-    Send the Kleberoboter payload to the configured Raspberry Pi relay and return payload + ACK text.
-    """
-    ip = server_ip or KLEBEROBOTER_SERVER_IP
-    port = port or KLEBEROBOTER_PORT
-    barcode_value = barcode or KLEBEROBOTER_BARCODE
-    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-    payload = {
-        "device_id": "kleberoboter",
-        "barcodenummer": barcode_value,
-        "startTime": now_iso,
-        "endTime": now_iso,
-        "result": "ok",
-    }
-    message = (json.dumps(payload) + "\n").encode("utf-8")
-    ack: str | None = None
-    with socket.create_connection((ip, port), timeout=3) as conn:
-        conn.sendall(message)
-        conn.settimeout(1.0)
-        try:
-            data = conn.recv(256)
-            ack = data.decode().strip() if data else None
-            if ack == "":
-                ack = None
-        except socket.timeout:
-            ack = None
-    return payload, ack
+DASHBOARD_WIDGET_CLS, _DASHBOARD_IMPORT_ERROR = (None, None)
 
 matplotlib.use("qtagg")
 
-try:
-    import pmacspy as _pmac_module
-except Exception as exc:  # pragma: no cover - hardware import fails during simulation
-    _pmac_module = None
-    _PMAC_IMPORT_ERROR = exc
-else:
-    _PMAC_IMPORT_ERROR = None
-
-
-class _DummyPMACBackend:
-    """Minimal in-memory replacement so the GUI works without a PMAC."""
-
-    def __init__(self):
-        base_cfg = {
-            "limitLowSteps": -500_000,
-            "limitHighSteps": 500_000,
-            "homeStepPosition": 0,
-            "stepsPerMeter": 200_000,
-            "encoderStepsPerMeter": 205_000,
-        }
-        self._state = {"X": 0, "Y": 0, "Z": 0}
-        self._encoders = {"X": 0, "Y": 0, "Z": 0}
-        self._config = {axis: dict(base_cfg) for axis in self._state}
-
-    def _split(self, path: str, section: str) -> tuple[str | None, str | None]:
-        if section not in path:
-            return None, None
-        try:
-            after = path.split(f"{section}/", 1)[1]
-            axis, key = after.split("/", 1)
-            return axis.upper(), key
-        except Exception:
-            return None, None
-
-    def _update_encoder(self, axis: str):
-        steps_per_m = float(self._config[axis].get("stepsPerMeter") or 1.0)
-        enc_per_m = float(self._config[axis].get("encoderStepsPerMeter") or steps_per_m)
-        step_pos = float(self._state.get(axis, 0))
-        if steps_per_m == 0:
-            steps_per_m = 1.0
-        self._encoders[axis] = int(round(step_pos / steps_per_m * enc_per_m))
-
-    def connect(self, uri: str):
-        print(f"[SIM][PMAC] Verbinde zu {uri} (Dummy-Modus).")
-        return f"sim://{uri}"
-
-    def getParam(self, path: str):
-        axis, key = self._split(path, "MicroscopeState")
-        if axis and key == "stepPosition":
-            return int(self._state.get(axis, 0))
-        axis, key = self._split(path, "MicroscopeConfig")
-        if axis and key:
-            try:
-                return int(self._config[axis][key])
-            except KeyError:
-                return 0
-        return 0
-
-    def setParam(self, path: str, value):
-        axis, key = self._split(path, "MicroscopeState")
-        if axis and key == "stepPosition":
-            self._state[axis] = int(value)
-            self._update_encoder(axis)
-            return
-        axis, key = self._split(path, "MicroscopeConfig")
-        if axis and key and axis in self._config:
-            self._config[axis][key] = int(value)
-            if key in {"stepsPerMeter", "encoderStepsPerMeter"}:
-                self._update_encoder(axis)
-
-    def getStagePosInfo(self, status: dict):
-        status.update({
-            "xPos_encoderSteps": self._encoders["X"],
-            "yPos_encoderSteps": self._encoders["Y"],
-            "zPos_encoderSteps": self._encoders["Z"],
-        })
-        return status
-
-
-class _PmacBridge:
-    """Proxy that falls back to the dummy backend if hardware is absent."""
-
-    def __init__(self, real_module):
-        self._real = real_module
-        self._sim = _DummyPMACBackend()
-        self._use_sim = real_module is None
-        if self._use_sim:
-            print("[INFO] Keine PMAC-Hardware gefunden �?\" starte im Simulationsmodus.")
-
-    @property
-    def is_simulated(self) -> bool:
-        return self._use_sim or self._real is None
-
-    def _fallback(self, reason: Exception | str):
-        if not self._use_sim:
-            print(f"[WARN] PMAC-Fallback aktiviert ({reason}).")
-            self._use_sim = True
-        return self._sim
-
-    def connect(self, uri: str):
-        if self._use_sim or self._real is None:
-            return self._sim.connect(uri)
-        try:
-            return self._real.connect(uri)
-        except Exception as exc:
-            return self._fallback(exc).connect(uri)
-
-    def getParam(self, path: str):
-        if self._use_sim or self._real is None:
-            return self._sim.getParam(path)
-        try:
-            return self._real.getParam(path)
-        except Exception as exc:
-            return self._fallback(exc).getParam(path)
-
-    def setParam(self, path: str, value):
-        if self._use_sim or self._real is None:
-            return self._sim.setParam(path, value)
-        try:
-            return self._real.setParam(path, value)
-        except Exception as exc:
-            return self._fallback(exc).setParam(path, value)
-
-    def getStagePosInfo(self, status: dict):
-        if self._use_sim or self._real is None:
-            return self._sim.getStagePosInfo(status)
-        try:
-            return self._real.getStagePosInfo(status)
-        except Exception as exc:
-            return self._fallback(exc).getStagePosInfo(status)
-
-
-pmac = _PmacBridge(_pmac_module)
-
 # ========================== QA LIMITS (in µm) ==========================
 MEAS_MAX_UM = 10.0   # Max. |Delta| in Messung
-DUR_MAX_UM  = 8.0    # Max. |Fehler| erlaubt im Dauertest (Live + Abschluss)
 # =======================================================================
 
 # ================================================================
 # THEME
 # ================================================================
-ACCENT   = "#ff2740"
-BG       = "#0b0b0f"
-BG_ELEV  = "#121218"
-FG       = "#e8e8ea"
-FG_MUTED = "#9ea0a6"
-BORDER   = "#222230"
-HOVER    = "#1b1b26"
+ACCENT      = "#5ce2cf"   # Frisches Mint als neuer Akzent
+ACCENT_ALT  = "#f0b74a"   # Warme Zweitfarbe f�r Highlights
+BG          = "#080f1a"   # Dunkles Navy
+BG_ELEV     = "#111b2b"   # Erh�hte Paneele
+BG_ELEV_ALT = "#0c1424"
+FG          = "#e8edf5"
+FG_MUTED    = "#9fb2c8"
+BORDER      = "#1b2a3f"
+HOVER       = "#16243a"
 
 plt.rcParams.update({
     "figure.facecolor": BG_ELEV,
@@ -407,7 +117,7 @@ plt.rcParams.update({
     "grid.linewidth": 0.6,
     "axes.grid": True,
     "font.size": 10.5,
-    "font.sans-serif": ["Inter", "Segoe UI", "DejaVu Sans", "Arial"],
+    "font.sans-serif": ["Manrope", "Inter", "Segoe UI", "DejaVu Sans", "Arial"],
     "legend.facecolor": BG_ELEV,
     "legend.edgecolor": BORDER,
 })
@@ -416,33 +126,75 @@ QT_STYLESHEET = f"""
 * {{
   background: transparent;
   color: {FG};
-  font-family: Inter, "Segoe UI", Arial;
+  font-family: "Manrope", "Segoe UI", Arial;
 }}
 QWidget {{ background-color: {BG}; }}
-QLabel {{ color: {FG}; font-size: 13px; }}
+QLabel {{ color: {FG}; font-size: 13px; letter-spacing: 0.2px; }}
+
+QFrame#Hero {{
+  background-color: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 {BG_ELEV}, stop:1 {BG_ELEV_ALT});
+  border: 1px solid {BORDER};
+  border-radius: 16px;
+  padding: 4px;
+}}
+QLabel#HeroTitle {{
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+}}
+QLabel#HeroSubtitle {{
+  color: {FG_MUTED};
+  font-size: 12px;
+}}
 
 QLineEdit, QTextEdit {{
   background-color: {BG_ELEV};
   color: {FG};
-  padding: 10px 12px;
+  padding: 9px 12px;
   border: 1px solid {BORDER};
   border-radius: 10px;
   selection-background-color: {ACCENT};
 }}
-QLineEdit:focus, QTextEdit:focus {{ border-color: {ACCENT}; }}
+QLineEdit:focus, QTextEdit:focus {{ border-color: {ACCENT}; background-color: {BG_ELEV_ALT}; }}
 
 QPushButton {{
   background-color: {BG_ELEV};
   color: {FG};
-  padding: 10px 14px;
+  padding: 4px 10px;
   border: 1px solid {BORDER};
-  border-radius: 12px;
-  font-weight: 600;
-  min-height: 40px;
+  border-radius: 9px;
+  font-weight: 700;
+  min-height: 26px;
 }}
 QPushButton:hover {{ background-color: {HOVER}; border-color: {ACCENT}; }}
-QPushButton:pressed {{ background-color: {ACCENT}; color: #0b0b0f; border-color: {ACCENT}; }}
+QPushButton:pressed {{ background-color: {ACCENT}; color: #051017; border-color: {ACCENT}; }}
 QPushButton:disabled {{ background: #14141b; color: {FG_MUTED}; border-color: {BORDER}; }}
+QPushButton[variant="primary"] {{
+  background-color: {ACCENT};
+  color: #041014;
+  border-color: {ACCENT};
+}}
+QPushButton[variant="primary"]:hover {{ background-color: #6ef0d9; border-color: #6ef0d9; }}
+QPushButton[variant="primary"]:pressed {{ background-color: #46bfa9; }}
+QPushButton[variant="ghost"] {{
+  background-color: transparent;
+  color: {FG};
+  border-color: {BORDER};
+}}
+QPushButton[variant="ghost"]:hover {{ background-color: {HOVER}; border-color: {ACCENT}; }}
+QPushButton[variant="ghost"]:pressed {{ border-color: {ACCENT_ALT}; color: {ACCENT_ALT}; }}
+QLineEdit[variant="metric"] {{
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  padding: 7px 10px;
+}}
+QLabel[role="section"] {{
+  color: {FG};
+  font-weight: 800;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}}
 
 QProgressBar {{
   background: {BG_ELEV};
@@ -454,24 +206,67 @@ QProgressBar {{
 }}
 QProgressBar::chunk {{ background-color: {ACCENT}; border-radius: 8px; }}
 
-QFrame#Card {{
+QComboBox, QSpinBox, QDoubleSpinBox {{
   background-color: {BG_ELEV};
+  color: {FG};
+  padding: 8px 11px;
   border: 1px solid {BORDER};
-  border-radius: 16px;
+  border-radius: 10px;
+  min-height: 32px;
+}}
+QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{ border-color: {ACCENT}; }}
+QComboBox::drop-down {{ border: none; width: 22px; }}
+QSlider::groove:horizontal {{
+  border: 1px solid {BORDER};
+  height: 6px;
+  background: {BG_ELEV};
+  border-radius: 6px;
+}}
+QSlider::handle:horizontal {{
+  background: {ACCENT};
+  border: 1px solid {ACCENT};
+  width: 16px;
+  margin: -6px 0;
+  border-radius: 10px;
+}}
+
+QFrame#Card {{
+  background-color: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 {BG_ELEV}, stop:1 {BG_ELEV_ALT});
+  border: 1px solid {BORDER};
+  border-radius: 14px;
 }}
 QLabel#CardTitle {{
   color: {FG};
-  font-weight: 700;
+  font-weight: 800;
   font-size: 14px;
+  letter-spacing: 0.2px;
 }}
 
 QLabel#Chip {{
-  background-color: {HOVER};
+  background-color: rgba(92, 226, 207, 0.08);
   color: {FG};
-  padding: 6px 10px;
-  border-radius: 999px;
-  border: 1px solid {BORDER};
+  padding: 4px 8px;
+  border-radius: 10px;
+  border: 1px solid {ACCENT};
   font-size: 12px;
+}}
+
+QToolButton[variant="tile"] {{
+  background-color: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {BG_ELEV}, stop:1 {BG_ELEV_ALT});
+  color: {FG};
+  border: 1px solid {BORDER};
+  border-radius: 12px;
+  padding: 6px 6px 6px 6px;
+  font-weight: 800;
+}}
+QToolButton[variant="tile"]:hover {{
+  background-color: {HOVER};
+  border-color: {ACCENT};
+}}
+QToolButton[variant="tile"]:pressed {{
+  background-color: {ACCENT};
+  color: #041014;
+  border-color: {ACCENT};
 }}
 """
 
@@ -508,11 +303,459 @@ def style_ax(ax):
     ax.grid(True)
     ax.tick_params(colors=FG_MUTED, labelsize=10)
 
-def sanitize_batch(s: str) -> str:
-    s = (s or "").strip()
-    if not s: return "NoBatch"
-    s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
-    return s[:64] or "NoBatch"
+# ================================================================
+# Dashboard (embedded)
+# ================================================================
+LIMIT_ROWS = 50
+TESTTYPE_DB_MAP = {
+    "kleberoboter": "kleberoboter",
+    "gitterschieber_tool": "gitterschieber_tool",
+    "stage_test": "stage_test",
+}
+
+DASHBOARD_STYLESHEET = f"""
+QWidget {{
+    background-color: {BG};
+    color: {FG};
+    font-family: Inter, "Segoe UI", Arial;
+}}
+QGroupBox {{
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+    padding: 12px;
+    margin-top: 10px;
+    background-color: {BG_ELEV};
+    font-weight: 600;
+}}
+QLabel {{
+    color: {FG};
+}}
+QLineEdit, QComboBox {{
+    background-color: {BG_ELEV};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 6px 10px;
+    color: {FG};
+}}
+QPushButton {{
+    background-color: {BG_ELEV};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+    padding: 8px 16px;
+    color: {FG};
+    font-weight: 600;
+}}
+QPushButton:hover {{
+    background-color: {HOVER};
+    border-color: {ACCENT};
+}}
+QPushButton:pressed {{
+    background-color: {ACCENT};
+    color: #0b0b0f;
+}}
+QTableView {{
+    background-color: {BG_ELEV};
+    gridline-color: {BORDER};
+    selection-background-color: {ACCENT};
+    color: {FG};
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+}}
+QHeaderView::section {{
+    background-color: {BG};
+    color: {FG};
+    border: 1px solid {BORDER};
+    padding: 6px;
+}}
+QTableCornerButton::section {{
+    background-color: {BG};
+    border: 1px solid {BORDER};
+}}
+QScrollBar:vertical, QScrollBar:horizontal {{
+    background: {BG};
+    border: none;
+    width: 12px;
+    margin: 0px;
+}}
+QScrollBar::handle {{
+    background: {ACCENT};
+    border-radius: 6px;
+}}
+"""
+
+
+class PandasModel(QAbstractTableModel):
+    """Minimal wrapper to show a pandas.DataFrame in a QTableView."""
+
+    def __init__(self, df: pd.DataFrame):
+        super().__init__()
+        self._df = df.reset_index(drop=True)
+
+    def rowCount(self, parent=None):
+        return self._df.shape[0]
+
+    def columnCount(self, parent=None):
+        return self._df.shape[1]
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        if role == Qt.DisplayRole:
+            value = self._df.iat[index.row(), index.column()]
+            col_name = self._df.columns[index.column()]
+
+            if col_name.lower() == "ok":
+                if pd.isna(value):
+                    return ""
+                return "OK" if bool(value) else "FAIL"
+
+            if col_name.lower() in ("starttest", "endtest"):
+                if pd.isna(value):
+                    return ""
+                if isinstance(value, (datetime.datetime, datetime.date)):
+                    return value.strftime("%Y-%m-%d %H:%M:%S")
+                return str(value)
+
+            return str(value)
+        return None
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole:
+            if orientation == Qt.Horizontal:
+                return str(self._df.columns[section])
+            return str(section)
+        return None
+
+
+class Dashboard(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Produktions-Dashboard")
+        self._apply_theme()
+
+        self.data = pd.DataFrame()
+        self.proxy_model = QSortFilterProxyModel(self)
+        self.proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        self.proxy_model.setFilterKeyColumn(-1)
+        self.proxy_model.setDynamicSortFilter(True)
+
+        self._filter_connected = False
+        self.conn = None
+
+        self.initUI()
+        self.update_data()
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_data)
+        self.timer.start(5000)
+
+    def _apply_theme(self):
+        pal = self.palette()
+        pal.setColor(QPalette.Window, QColor(BG))
+        pal.setColor(QPalette.Base, QColor(BG))
+        pal.setColor(QPalette.AlternateBase, QColor(BG_ELEV))
+        pal.setColor(QPalette.WindowText, QColor(FG))
+        pal.setColor(QPalette.Text, QColor(FG))
+        pal.setColor(QPalette.Button, QColor(BG_ELEV))
+        pal.setColor(QPalette.ButtonText, QColor(FG))
+        self.setPalette(pal)
+        self.setStyleSheet(DASHBOARD_STYLESHEET)
+
+    def initUI(self):
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(18, 18, 18, 16)
+        main_layout.setSpacing(14)
+
+        title = QLabel("Live Produktions-Dashboard")
+        title.setFont(QFont("Inter", 20, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet(f"color: {FG};")
+
+        self.lbl_total = self.create_kpi("...", "Total Output")
+        self.lbl_ok = self.create_kpi("...", "OK-Anteil")
+        self.lbl_last = self.create_kpi("...", "Letzter Status")
+
+        kpi_layout = QGridLayout()
+        kpi_layout.addWidget(self.lbl_total, 0, 0)
+        kpi_layout.addWidget(self.lbl_ok, 0, 1)
+        kpi_layout.addWidget(self.lbl_last, 0, 2)
+
+        controls = QHBoxLayout()
+        self.combo_testtype = QComboBox()
+        self.combo_testtype.addItems(list(TESTTYPE_DB_MAP.keys()))
+        self.combo_testtype.currentIndexChanged.connect(self.on_testtype_changed)
+
+        self.filter_input = QLineEdit()
+        self.filter_input.setPlaceholderText("Filter...")
+
+        controls.addWidget(QLabel("Testtyp:"))
+        controls.addWidget(self.combo_testtype)
+        controls.addStretch()
+        controls.addWidget(QLabel("Filter:"))
+        controls.addWidget(self.filter_input)
+
+        self.table = QTableView()
+        self.table.setSortingEnabled(True)
+        self.table.setModel(self.proxy_model)
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Stretch)
+        header.setMinimumSectionSize(90)
+        self.table.verticalHeader().setDefaultSectionSize(26)
+        self.table.setFixedHeight(230)
+
+        entry_card = Card("Neuen Datensatz senden")
+        entry_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        entry_card.setMinimumHeight(210)
+        entry_card.setMaximumHeight(280)
+        entry_layout = entry_card.body
+
+        common_form = QFormLayout()
+        self.le_barcode = QLineEdit()
+        self.le_barcode.setPlaceholderText("Barcode scannen oder einfuegen...")
+        self.le_user = QLineEdit()
+        self.le_user.setPlaceholderText("User / Mitarbeiter-ID...")
+        common_form.addRow("Barcode:", self.le_barcode)
+        common_form.addRow("User:", self.le_user)
+
+        self.entry_stack = QStackedWidget()
+
+        w_kleber = QWidget()
+        f_kleber = QFormLayout()
+        self.cb_ok = QCheckBox("Test OK?")
+        f_kleber.addRow(self.cb_ok)
+        w_kleber.setLayout(f_kleber)
+
+        w_git = QWidget()
+        f_git = QFormLayout()
+        self.le_particle_count = QLineEdit()
+        self.le_particle_count.setPlaceholderText("Anzahl Partikel")
+        self.le_justage_angle = QLineEdit()
+        self.le_justage_angle.setPlaceholderText("Justage-Winkel (deg)")
+        f_git.addRow("Particle Count:", self.le_particle_count)
+        f_git.addRow("Justage Angle:", self.le_justage_angle)
+        w_git.setLayout(f_git)
+
+        w_stage = QWidget()
+        f_stage = QFormLayout()
+        self.le_field_of_view = QLineEdit()
+        self.le_field_of_view.setPlaceholderText("Field of View")
+        self.le_position = QLineEdit()
+        self.le_position.setPlaceholderText("Position")
+        self.le_x_cam1 = QLineEdit(); self.le_x_cam1.setPlaceholderText("X Cam1")
+        self.le_y_cam1 = QLineEdit(); self.le_y_cam1.setPlaceholderText("Y Cam1")
+        self.le_x_cam2 = QLineEdit(); self.le_x_cam2.setPlaceholderText("X Cam2")
+        self.le_y_cam2 = QLineEdit(); self.le_y_cam2.setPlaceholderText("Y Cam2")
+        f_stage.addRow("Field of View:", self.le_field_of_view)
+        f_stage.addRow("Position:", self.le_position)
+        f_stage.addRow("Cam1 X:", self.le_x_cam1)
+        f_stage.addRow("Cam1 Y:", self.le_y_cam1)
+        f_stage.addRow("Cam2 X:", self.le_x_cam2)
+        f_stage.addRow("Cam2 Y:", self.le_y_cam2)
+        w_stage.setLayout(f_stage)
+
+        self.entry_stack.addWidget(w_kleber)
+        self.entry_stack.addWidget(w_git)
+        self.entry_stack.addWidget(w_stage)
+
+        btn_row = QHBoxLayout()
+        self.btn_send = UiFactory.button("Senden", variant="primary")
+        self.btn_clear = UiFactory.button("Felder leeren", variant="ghost")
+        btn_row.addStretch()
+        btn_row.addWidget(self.btn_clear)
+        btn_row.addWidget(self.btn_send)
+
+        entry_layout.addLayout(common_form)
+        entry_layout.addWidget(self.entry_stack)
+        entry_layout.addLayout(btn_row)
+
+        self.btn_send.clicked.connect(self.send_current_entry)
+        self.btn_clear.clicked.connect(self.clear_entry_fields)
+
+        main_layout.addWidget(title)
+        main_layout.addLayout(kpi_layout)
+        main_layout.addLayout(controls)
+        main_layout.addWidget(self.table, 1)
+        main_layout.addSpacing(10)
+        main_layout.addWidget(entry_card, 0)
+        main_layout.addStretch(1)
+        self.setLayout(main_layout)
+
+        if not self._filter_connected:
+            self.filter_input.textChanged.connect(self.proxy_model.setFilterFixedString)
+            self._filter_connected = True
+
+        self.on_testtype_changed(0)
+
+    def create_kpi(self, value_text, label_text):
+        container = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(14, 14, 14, 14)
+        value = QLabel(value_text)
+        value.setFont(QFont("Inter", 32, QFont.Bold))
+        value.setStyleSheet(f"color: {ACCENT};")
+        value.setAlignment(Qt.AlignCenter)
+        label = QLabel(label_text)
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet(f"color: {FG_MUTED}; font-size: 14px;")
+        layout.addWidget(value)
+        layout.addWidget(label)
+        container.setLayout(layout)
+        container.setStyleSheet(
+            f"background-color: {BG_ELEV}; border: 1px solid {BORDER}; border-radius: 16px;"
+        )
+        container.value_label = value
+        return container
+
+    def on_testtype_changed(self, idx):
+        self.entry_stack.setCurrentIndex(idx)
+        self.update_data()
+
+    def clear_entry_fields(self):
+        self.le_barcode.clear()
+        self.le_user.clear()
+        self.cb_ok.setChecked(False)
+        self.le_particle_count.clear()
+        self.le_justage_angle.clear()
+        self.le_field_of_view.clear()
+        self.le_position.clear()
+        self.le_x_cam1.clear()
+        self.le_y_cam1.clear()
+        self.le_x_cam2.clear()
+        self.le_y_cam2.clear()
+
+    def _open_conn(self):
+        if self.conn is None:
+            self.conn = commonIE.dbConnector.connection()
+        try:
+            self.conn.connect()
+        except Exception as e:
+            QMessageBox.critical(self, "DB Fehler", f"Verbindung fehlgeschlagen:\n{e}")
+            return False
+        return True
+
+    def _close_conn(self):
+        if self.conn:
+            try:
+                self.conn.disconnect()
+            except Exception:
+                pass
+
+    def fetch_data_from_db(self, testtype: str, limit: int = LIMIT_ROWS) -> pd.DataFrame:
+        try:
+            return db.fetch_test_data(testtype, limit=limit)
+        except Exception as e:
+            QMessageBox.warning(self, "DB Fehler", f"Datenabruf fehlgeschlagen:\n{e}")
+            return pd.DataFrame()
+
+    def update_data(self):
+        key = self.combo_testtype.currentText()
+        testtype = TESTTYPE_DB_MAP.get(key, key)
+
+        df = self.fetch_data_from_db(testtype, LIMIT_ROWS)
+        if "StartTest" in df.columns:
+            df = df.sort_values("StartTest", ascending=False).reset_index(drop=True)
+
+        self.data = df
+
+        total = len(df)
+        if "ok" in df.columns and total > 0:
+            ok_bool = df["ok"].fillna(False).astype(bool)
+            ok_count = ok_bool.sum()
+            ok_ratio = int((ok_count / total) * 100)
+            last_result = "OK" if bool(ok_bool.iloc[0]) else "FAIL"
+        else:
+            ok_ratio = 0
+            last_result = "N/A"
+
+        self.lbl_total.value_label.setText(str(total))
+        self.lbl_ok.value_label.setText(f"{ok_ratio}%")
+        self.lbl_last.value_label.setText(last_result)
+
+        model = PandasModel(df)
+        self.proxy_model.setSourceModel(model)
+
+    def send_current_entry(self):
+        key = self.combo_testtype.currentText()
+        testtype = TESTTYPE_DB_MAP.get(key, key)
+
+        barcode_str = self.le_barcode.text().strip() or "0"
+        user_str = self.le_user.text().strip() or "unknown"
+
+        startTime = datetime.datetime.now()
+        endTime = datetime.datetime.now()
+
+        payload = {}
+        if testtype == "kleberoboter":
+            payload["ok"] = self.cb_ok.isChecked()
+
+        elif testtype == "gitterschieber_tool":
+            payload["particle_count"] = self._safe_int(self.le_particle_count.text())
+            payload["justage_angle"] = self._safe_float(self.le_justage_angle.text())
+
+        elif testtype == "stage_test":
+            payload["field_of_view"] = self._safe_float(self.le_field_of_view.text())
+            payload["position"] = self.le_position.text().strip()
+            payload["x_coordinate_cam1"] = self._safe_float(self.le_x_cam1.text())
+            payload["y_coordinate_cam1"] = self._safe_float(self.le_y_cam1.text())
+            payload["x_coordinate_cam2"] = self._safe_float(self.le_x_cam2.text())
+            payload["y_coordinate_cam2"] = self._safe_float(self.le_y_cam2.text())
+
+        else:
+            QMessageBox.warning(self, "Unbekannter Testtyp", f"{testtype}")
+            return
+
+        try:
+            barcode_obj = miltenyiBarcode.mBarcode(barcode_str)
+        except Exception as e:
+            QMessageBox.warning(self, "Barcode Fehler", f"Konnte Barcode nicht erzeugen:\n{e}")
+            return
+
+        if not self._open_conn():
+            return
+        try:
+            resp = self.conn.sendData(
+                startTime,
+                endTime,
+                0,
+                testtype,
+                payload,
+                barcode_obj,
+                user_str
+            )
+            print("sendData response:", resp)
+        except Exception as e:
+            QMessageBox.critical(self, "Sendefehler", f"Senden fehlgeschlagen:\n{e}")
+        finally:
+            self._close_conn()
+
+        self.update_data()
+        self.clear_entry_fields()
+
+    def _safe_int(self, txt):
+        try:
+            return int(float(str(txt).replace(",", ".")))
+        except Exception:
+            return 0
+
+    def _safe_float(self, txt):
+        try:
+            return float(str(txt).replace(",", "."))
+        except Exception:
+            return 0.0
+
+    def closeEvent(self, event):
+        self.timer.stop()
+        self._close_conn()
+        super().closeEvent(event)
+
+
+# register dashboard widget for StageGUI integration
+DASHBOARD_WIDGET_CLS = Dashboard
+_DASHBOARD_IMPORT_ERROR = None
 
 # ================================================================
 # Reusable Card
@@ -521,46 +764,113 @@ class Card(QFrame):
     def __init__(self, title: str = "", right_widget: QWidget | None = None, parent=None):
         super().__init__(parent)
         self.setObjectName("Card")
-        lay = QVBoxLayout(self); lay.setContentsMargins(18,16,18,16); lay.setSpacing(12)
-        header = QHBoxLayout(); header.setSpacing(8)
+        lay = QVBoxLayout(self); lay.setContentsMargins(8,6,8,6); lay.setSpacing(5)
+        header = QHBoxLayout(); header.setSpacing(6)
         self.title = QLabel(title); self.title.setObjectName("CardTitle")
         header.addWidget(self.title)
         header.addStretch(1)
         if right_widget: header.addWidget(right_widget, 0, Qt.AlignRight)
         lay.addLayout(header)
-        self.body = QVBoxLayout(); self.body.setSpacing(10)
+        self.body = QVBoxLayout(); self.body.setSpacing(5)
         lay.addLayout(self.body)
+
+# ================================================================
+# UI Factory (wiederverwendbare Komponenten)
+# ================================================================
+class UiFactory:
+    LABEL_WIDTH = 112
+    FIELD_HEIGHT = 28
+
+    @staticmethod
+    def button(text: str, *, variant: str = "default", min_height: int | None = None, tooltip: str | None = None) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setProperty("variant", variant)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setAutoDefault(False)
+        btn.setMinimumHeight(min_height or UiFactory.FIELD_HEIGHT)
+        if tooltip:
+            btn.setToolTip(tooltip)
+        return btn
+
+    @staticmethod
+    def line_edit(placeholder: str = "", *, read_only: bool = False, width: int | None = None) -> QLineEdit:
+        le = QLineEdit()
+        le.setPlaceholderText(placeholder)
+        le.setReadOnly(read_only)
+        le.setMinimumHeight(UiFactory.FIELD_HEIGHT)
+        if read_only:
+            le.setProperty("variant", "metric")
+        if width:
+            le.setFixedWidth(width)
+        return le
+
+    @staticmethod
+    def chip(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setObjectName("Chip")
+        return lbl
+
+    @staticmethod
+    def section_label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setProperty("role", "section")
+        return lbl
+
+    @staticmethod
+    def form_row(label_text: str, widget: QWidget) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        lbl = UiFactory.section_label(label_text)
+        lbl.setFixedWidth(UiFactory.LABEL_WIDTH)
+        row.addWidget(lbl)
+        row.addWidget(widget, 1)
+        return row
+
+    @staticmethod
+    def metric_field(label_text: str, placeholder: str = "") -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        lbl = UiFactory.section_label(label_text)
+        lbl.setFixedWidth(UiFactory.LABEL_WIDTH)
+        field = UiFactory.line_edit(placeholder, read_only=True)
+        row.addWidget(lbl)
+        row.addWidget(field, 1)
+        row.field = field  # type: ignore[attr-defined]
+        return row
 
 # ================================================================
 # Workflow-Kacheln (Icons sicher laden)
 # ================================================================
 def _safe_icon(path: str) -> QIcon:
     try:
+        if not path:
+            return QIcon()
         if os.path.exists(path):
             return QIcon(path)
     except Exception:
         pass
     return QIcon()
 
+def _first_existing(paths) -> str:
+    """Return first existing path from iterable, else empty string."""
+    for cand in paths:
+        try:
+            if cand and os.path.exists(cand):
+                return str(pathlib.Path(cand).resolve())
+        except Exception:
+            continue
+    return ""
+
 def make_tile(text: str, icon_path: str, clicked_cb):
     btn = QToolButton()
     btn.setIcon(_safe_icon(icon_path))
-    btn.setIconSize(QSize(72, 72))
+    btn.setIconSize(QSize(42, 42))
     btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
     btn.setText(text)
-    btn.setMinimumSize(130, 100)
-    btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+    btn.setMinimumSize(90, 72)
+    btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
     btn.setAutoRaise(False)
-    btn.setStyleSheet("""
-        QToolButton {
-            background-color: %s;
-            border: 1px solid %s;
-            border-radius: 14px;
-            padding: 10px;
-            font-weight: 600;
-        }
-        QToolButton:hover { background-color: %s; border-color: %s; }
-    """ % (BG_ELEV, BORDER, HOVER, ACCENT))
+    btn.setProperty("variant", "tile")
     btn.clicked.connect(clicked_cb)
     return btn
 
@@ -597,9 +907,7 @@ class LiveCamEmbed(QWidget):
             return
         self._last_frame = frame
         try:
-            qimg = self._to_qimage(frame)
-            pm = QPixmap.fromImage(qimg)
-            pm = pm.scaled(self.label.width(), self.label.height(), Qt.KeepAspectRatio)
+            pm = frame_to_qpixmap(frame, (self.label.width(), self.label.height()))
             self.label.setPixmap(pm)
             self.status.setText("Livebild aktualisiert.")
         except Exception as exc:
@@ -618,17 +926,8 @@ class LiveCamEmbed(QWidget):
             return QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
         raise ValueError("Unsupported frame shape.")
 
-# ========================== STAGE ====================================
-# ================================================================
-# Stage Utilities
-# ================================================================
-stageStatus = {}
-def get_current_pos():
-    x = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/X/stepPosition")
-    y = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/Y/stepPosition")
-    z = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/Z/stepPosition")
-    return x, y, z
 
+<<<<<<< HEAD:stagetest.py
 def get_stage_encoders():
     st = {}
     pmac.getStagePosInfo(st)
@@ -1129,110 +1428,232 @@ class CameraWindow(QWidget):
         if ref is not None:
             rx, ry = ref
             dx = int(cx - int(rx)); dy = int(cy - int(ry))
+=======
+def frame_to_qpixmap(frame, target_size=None) -> QPixmap:
+    """Convert BGR/gray frame into a QPixmap, scaled to target_size when given."""
+    if frame.ndim == 2:
+        arr = frame
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr.astype(np.float32) / float(arr.max() or 1) * 255.0, 0, 255).astype(np.uint8)
+        h, w = arr.shape
+        qimg = QImage(arr.data, w, h, w, QImage.Format_Grayscale8)
+    elif frame.ndim == 3 and frame.shape[2] == 3:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+    else:
+        raise ValueError("Unsupported frame shape.")
+    pm = QPixmap.fromImage(qimg)
+    if target_size is not None:
+        if isinstance(target_size, QSize):
+            w, h = target_size.width(), target_size.height()
+>>>>>>> 659a8bcf2c57ee6666e6e99c3f41743bbb661c9c:production_tool_resolve.py
         else:
-            cam_cx = int(w // 2); cam_cy = int(h // 2)
-            dx = int(cx - cam_cx); dy = int(cy - cam_cy)
-        dist = float(np.hypot(dx, dy))
+            w, h = target_size
+        if w and h:
+            pm = pm.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    return pm
 
-        # Physikalische Einheiten (Pixelgröße aus LiveView)
-        px_um = getattr(self.live, "pixel_size_um", None)
-        if px_um is None:
-            print("[WARN] Keine Pixelgröße aus Kamera verfügbar.")
+
+class GitterschieberLiveChart(QWidget):
+    """Live-Chart fǬr Partikelcount und mittlere Gr��e (angelehnt an alte GUI)."""
+    add_data = Signal(int, object)
+
+    def __init__(self, parent=None, max_points: int = 300):
+        super().__init__(parent)
+        fig = Figure(figsize=(4, 2.2), tight_layout=True)
+        self.canvas = FigureCanvas(fig)
+        self.ax = fig.add_subplot(111)
+        self.ax.set_facecolor(BG)
+        for spine in self.ax.spines.values():
+            spine.set_color(BORDER); spine.set_linewidth(0.8)
+        self.ax.tick_params(colors=FG_MUTED)
+        self.ax.grid(True, alpha=0.25, color=BORDER)
+        self.ax.set_xlabel("Frame", color=FG_MUTED)
+        self.ax.set_ylabel("Anzahl", color=FG)
+
+        self.ax2 = self.ax.twinx()
+        self.ax2.set_ylabel("Durchmesser [px]", color="#ffd166")
+        self.ax2.tick_params(colors=FG_MUTED)
+
+        self.x = deque(maxlen=max_points)
+        self.counts = deque(maxlen=max_points)
+        self.mean_sizes = deque(maxlen=max_points)
+        self.counter = 0
+
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(6)
+        title = QLabel("Live: Partikel & �~-Gr��Ye", self)
+        title.setStyleSheet("font-weight:600;")
+        lay.addWidget(title)
+        lay.addWidget(self.canvas)
+
+        self.line_count, = self.ax.plot([], [], linewidth=2.0, label="Count", color="#5cc8ff")
+        self.line_mean, = self.ax2.plot([], [], linewidth=1.8, linestyle="--", label="�~-Durchmesser", color="#ffd166")
+
+        lines = [self.line_count, self.line_mean]
+        labels = [l.get_label() for l in lines]
+        leg = self.ax.legend(lines, labels, loc="upper left", frameon=True)
+        leg.get_frame().set_alpha(0.2)
+        leg.get_frame().set_facecolor(BG_ELEV)
+        leg.get_frame().set_edgecolor(BORDER)
+        for text in leg.get_texts():
+            text.set_color(FG)
+
+        self.add_data.connect(self._on_add)
+
+    def reset(self):
+        self.counter = 0
+        self.x.clear(); self.counts.clear(); self.mean_sizes.clear()
+        self.line_count.set_data([], []); self.line_mean.set_data([], [])
+        self.canvas.draw_idle()
+
+    def _on_add(self, count: int, mean_d):
+        self.counter += 1
+        self.x.append(self.counter)
+        self.counts.append(count)
+        self.mean_sizes.append(np.nan if mean_d is None else float(mean_d))
+
+        self.line_count.set_data(self.x, self.counts)
+        self.line_mean.set_data(self.x, self.mean_sizes)
+
+        xmax = self.counter + 2
+        xmin = max(0, xmax - len(self.x) - 2)
+        self.ax.set_xlim(xmin, xmax)
+
+        ymax_left = max(5, (max(self.counts) if len(self.counts) else 5) * 1.25)
+        self.ax.set_ylim(0, ymax_left)
+
+        valid_sizes = [v for v in list(self.mean_sizes) if np.isfinite(v)]
+        if valid_sizes:
+            max_right = max(valid_sizes); min_right = min(valid_sizes)
+            pad = max(1.0, 0.1 * (max_right - min_right if max_right > min_right else 1.0))
+            self.ax2.set_ylim(max(0, min_right - pad), max_right + pad)
+        else:
+            self.ax2.set_ylim(0, 10)
+
+        self.canvas.draw_idle()
+
+
+class CameraWindow(QWidget):
+    """Einfaches Kamerafenster mit Laser-Overlay (GUI jetzt im production_tool)."""
+
+    closed = Signal()
+
+    def __init__(
+        self,
+        parent,
+        batch: str,
+        device_index: int,
+        label: str,
+        spot_detector: LaserSpotDetector,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(f"{label} – Charge {batch}")
+        self.setMinimumSize(640, 520)
+        self.is_closed = False
+        self.detector = spot_detector
+        self._last_center: tuple[int, int] | None = None
+
+        self.live = LiveLaserController(device_index, detector=spot_detector, parent=self)
+        self.live.frameReady.connect(self._update_image)
+        self.live.centerChanged.connect(self._on_center_changed)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        self.imgLabel = QLabel("Kein Frame")
+        self.imgLabel.setAlignment(Qt.AlignCenter)
+        self.imgLabel.setMinimumHeight(360)
+        layout.addWidget(self.imgLabel)
+
+        self.lblCenter = QLabel("Center: –")
+        self.lblRef = QLabel("Referenz: –")
+        info_row = QHBoxLayout()
+        info_row.addWidget(self.lblCenter)
+        info_row.addWidget(self.lblRef)
+        info_row.addStretch(1)
+        layout.addLayout(info_row)
+
+        btn_row = QHBoxLayout()
+        self.btnSetRef = QPushButton("Center als Referenz")
+        self.btnClearRef = QPushButton("Referenz löschen")
+        self.btnShowRef = QPushButton("Ref anzeigen")
+        btn_row.addWidget(self.btnSetRef)
+        btn_row.addWidget(self.btnClearRef)
+        btn_row.addWidget(self.btnShowRef)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
+        self.btnSetRef.clicked.connect(self._apply_ref_from_center)
+        self.btnClearRef.clicked.connect(self._clear_ref)
+        self.btnShowRef.clicked.connect(self._show_ref_status)
+
+    def _apply_ref_from_center(self):
+        if self._last_center is None:
             return
-        px_um = float(px_um)
-        dx_um = dx * px_um
-        dy_um = dy * px_um
-        dist_um = dist * px_um
-        dist_mm = dist_um / 1000.0
+        self.live.set_reference_point(*self._last_center)
+        self.lblRef.setText(f"Referenz: {self._last_center[0]}, {self._last_center[1]}")
 
-        self.lbl_dx.setText(f"dx: {dx:+d} px  ({dx_um:+.1f} µm)")
-        self.lbl_dy.setText(f"dy: {dy:+d} px  ({dy_um:+.1f} µm)")
-        self.lbl_dist.setText(f"dist: {dist:.2f} px  ({dist_um:.1f} µm · {dist_mm:.3f} mm)")
+    def _clear_ref(self):
+        self.live.clear_reference_point()
+        self.lblRef.setText("Referenz: –")
 
-        # Fixed tolerance (no UI): use 5 px as pass threshold
-        tol_px = 5.0
-        tol_um = tol_px * px_um
-        ok = (dist <= tol_px)
-        color = "#2ecc71" if ok else "#ff2740"
-        text = "OK" if ok else "ALIGN"
-        self.lbl_align_status.setText(
-            f'<span style="color:{color}; font-weight:600">{text} '
-            f'(≤ {tol_px:.1f} px ≈ {tol_um:.1f} µm)</span>'
-        )
+    def _show_ref_status(self):
+        ref = self.live.get_reference_point()
+        if ref is None:
+            self.lblRef.setText("Referenz: –")
+        else:
+            self.lblRef.setText(f"Referenz: {ref[0]}, {ref[1]}")
 
-    def _on_save_justage(self):
-        """Save the current centroid as the Justage reference point."""
+    def _update_image(self, qimg: QImage):
         try:
-            if self._last_centroid is None:
-                QMessageBox.warning(self, "Justage", "Kein Laser-Mittelpunkt erkannt. Bitte erstmal Justage-Laser einschalten und erkennen lassen.")
-                return
-            cx, cy = self._last_centroid
-            self.detector.set_reference_point(cx, cy)
-            self.lbl_ref.setText(f"Ref: {cx}, {cy}")
-            # Re-evaluate alignment relative to reference
-            self._update_alignment(cx, cy)
-        except Exception as e:
-            print("[WARN] Could not save justage:", e)
+            pm = QPixmap.fromImage(qimg)
+            pm = pm.scaled(self.imgLabel.width(), self.imgLabel.height(), Qt.KeepAspectRatio)
+            self.imgLabel.setPixmap(pm)
+        except Exception as exc:
+            self.imgLabel.setText(f"Anzeige-Fehler: {exc}")
 
-    def _on_clear_justage(self):
+    def _on_center_changed(self, x: int, y: int):
+        self._last_center = (x, y)
+        self.lblCenter.setText(f"Center: {x}, {y}")
+
+    def showEvent(self, event):
         try:
-            self.detector.clear_reference_point()
-            self.lbl_ref.setText("Ref: —")
-            # Recompute alignment relative to center if we have a centroid
-            if self._last_centroid is not None:
-                self._update_alignment(*self._last_centroid)
-        except Exception as e:
-            print("[WARN] Could not clear justage:", e)
-
-    def _on_toggle_justage(self):
-        """Toggle Save / Clear Justage depending on whether a reference exists."""
-        try:
-            ref = self.detector.get_reference_point()
-            if ref is None:
-                # No reference -> save current centroid
-                self._on_save_justage()
-                try: self.btn_toggle_justage.setText("Clear Justage")
-                except: pass
-            else:
-                # Reference exists -> clear it
-                self._on_clear_justage()
-                try: self.btn_toggle_justage.setText("Save Justage")
-                except: pass
-        except Exception as e:
-            print("[WARN] Toggle justage failed:", e)
-
-    def closeEvent(self,e):
-        try: self.live.close()
-        except: pass
-        super().closeEvent(e)
-
-    def _on_frame_ready(self, frame_bytes: bytes, w: int, h: int):
-        try:
-            ref_point = self.detector.get_reference_point()
-            qimg, (cx, cy) = self.detector.process_frame(
-                frame_bytes,
-                w,
-                h,
-                ACCENT,
-                ref_point,
-                getattr(self.live, "is_dummy", False),
-            )
-            self.live.display_frame(qimg)
-            self.live.update_centroid(cx, cy)
+            self.live.start()
         except Exception:
             pass
+        super().showEvent(event)
 
+    def hideEvent(self, event):
+        try:
+            self.live.stop()
+        except Exception:
+            pass
+        super().hideEvent(event)
+
+    def closeEvent(self, event):
+        self.is_closed = True
+        try:
+            self.live.shutdown()
+        except Exception:
+            pass
+        try:
+            self.closed.emit()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
 # ================================================================
 # Plot Widget
 # ================================================================
 class LivePlot(FigureCanvas):
     def __init__(self, parent=None, batch: str = "NoBatch"):
-        fig = Figure(figsize=(7.2, 4.2), dpi=110, facecolor=BG_ELEV)
+        fig = Figure(figsize=(4.6, 2.4), dpi=110, facecolor=BG_ELEV)
         super().__init__(fig)
         self.setParent(parent)
         self.ax = fig.add_subplot(111)
-        self.batch = sanitize_batch(batch)
+        self.batch = resolve_stage.sanitize_batch(batch)
         self.mode = "Dauertest"
         self._apply_titles()
         style_ax(self.ax)
@@ -1246,7 +1667,7 @@ class LivePlot(FigureCanvas):
         self.ax.set_xlabel("Zeit [min]"); self.ax.set_ylabel("Fehler [µm]")
 
     def set_batch(self, batch: str):
-        self.batch = sanitize_batch(batch); self._apply_titles(); self.draw_idle()
+        self.batch = resolve_stage.sanitize_batch(batch); self._apply_titles(); self.draw_idle()
 
     def set_mode(self, mode: str):
         self.mode = mode
@@ -1273,7 +1694,7 @@ class LivePlot(FigureCanvas):
 class StageGUI(QWidget):
     def __init__(self):
         super().__init__()
-        self.sc=StageController()
+        self.sc=resolve_stage.StageController()
         self.plot=None
         self._cam_windows=[]
         self._gitterschieber_windows=[]
@@ -1290,14 +1711,16 @@ class StageGUI(QWidget):
         self._warned_camera_sim = False
         self.statusBar: QLabel | None = None
         self._pending_status: str | None = None
-        self._af_cam = None
+        self._gitterschieber_total_count = 0
+        self._gs_particle_img = pathlib.Path(__file__).with_name('particle_dialog_image.jpg')
+        self._gs_angle_img = pathlib.Path(__file__).with_name('angle_dialog_image.jpg')
 
         # Neu: Zielkamera für Exposure-UI (wird nur für Fallback genutzt)
         self._expo_target_idx = 0
 
         self._build_ui(); self._wire_shortcuts()
         sim_msgs = []
-        if getattr(pmac, "is_simulated", False):
+        if getattr(resolve_stage.pmac, "is_simulated", False):
             sim_msgs.append("Stage-Steuerung im Simulationsmodus (keine PMAC-Verbindung).")
         if sim_msgs:
             self._set_status(" ".join(sim_msgs))
@@ -1306,12 +1729,11 @@ class StageGUI(QWidget):
     def _build_ui(self):
         self.setWindowTitle("Stage-Toolbox")
         self._apply_initial_size()
-        root = QVBoxLayout(self); root.setContentsMargins(18,18,18,12); root.setSpacing(14)
+        root = QVBoxLayout(self); root.setContentsMargins(8,8,8,6); root.setSpacing(6)
 
         def add_back_btn(container_layout):
             """Helper: adds a 'Zurück zum Workflow' button to the given layout."""
-            btn = QPushButton("Zurück zum Workflow")
-            btn.setMinimumHeight(32)
+            btn = UiFactory.button("Zurück zum Workflow", variant="ghost", min_height=36)
             btn.clicked.connect(self._show_stage_workflow)
             row = QHBoxLayout()
             row.addWidget(btn)
@@ -1319,17 +1741,13 @@ class StageGUI(QWidget):
             container_layout.addLayout(row)
 
         # Header
-        header = QHBoxLayout(); header.setSpacing(10)
-        title = QLabel("Stage-Toolbox"); f = QFont("Inter", 18, QFont.Bold); title.setFont(f)
+        header = QHBoxLayout(); header.setSpacing(4)
+        title = QLabel("Stage-Toolbox"); f = QFont("Manrope", 16, QFont.Bold); title.setFont(f)
         header.addWidget(title); header.addStretch(1)
-        self.chipBatch = QLabel("Charge: NoBatch"); self.chipBatch.setObjectName("Chip")
-        header.addWidget(self.chipBatch)
         # Seriennummer-Suche (sucht im Stage-Teststand-Datenordner nach Dateien/Ordnern)
-        self.edSearchSN = QLineEdit(); self.edSearchSN.setPlaceholderText("Seriennummer suchen…")
-        self.edSearchSN.setFixedWidth(220)
+        self.edSearchSN = UiFactory.line_edit("Seriennummer suchen…", width=240)
         header.addWidget(self.edSearchSN)
-        self.btnFindSN = QPushButton("Find SN")
-        self.btnFindSN.setMinimumHeight(28)
+        self.btnFindSN = UiFactory.button("Find SN", variant="ghost", min_height=26)
         self.btnFindSN.clicked.connect(lambda: self._on_search_sn())
         self.edSearchSN.returnPressed.connect(lambda: self.btnFindSN.click())
         # Live search: update as the user types (debounced)
@@ -1338,13 +1756,11 @@ class StageGUI(QWidget):
         self.edSearchSN.installEventFilter(self)
         header.addWidget(self.btnFindSN)
 
-        self.btnLiveViewTab = QPushButton("LIVE VIEW")
-        self.btnLiveViewTab.setMinimumHeight(32)
+        self.btnLiveViewTab = UiFactory.button("LIVE VIEW", variant="ghost", min_height=26)
         self.btnLiveViewTab.clicked.connect(self._open_live_view)
         header.addWidget(self.btnLiveViewTab)
 
-        self.btnWorkflowHome = QPushButton("Workflow")
-        self.btnWorkflowHome.setMinimumHeight(32)
+        self.btnWorkflowHome = UiFactory.button("Workflow", variant="ghost", min_height=26)
         self.btnWorkflowHome.clicked.connect(self._show_stage_workflow)
         header.addWidget(self.btnWorkflowHome)
 
@@ -1366,10 +1782,51 @@ class StageGUI(QWidget):
         self._sn_popup.itemDoubleClicked.connect(lambda it: self._open_selected_sn(it))
         root.addLayout(header)
 
-        assets_dir = pathlib.Path(__file__).resolve().parent / "assets"
-        stage_img = str((assets_dir / "stage_tile.png").resolve())
-        af_img    = str((assets_dir / "autofocus_tile.png").resolve())
-        laser_img = str((assets_dir / "laserscan_tile.png").resolve())
+        # Summary Bar (globale Info)
+        self.chipBatch = UiFactory.chip("Charge: NoBatch")
+        self.lblTimer = UiFactory.chip("15:00:00")
+        self.chipMeasQA = UiFactory.chip("Messung QA: ?")
+        self.chipDurQA  = UiFactory.chip(f"Dauertest QA (Limit {resolve_stage.DUR_MAX_UM:.1f} ?m): ?")
+
+        hero = QFrame()
+        hero.setObjectName("Hero")
+        heroLayout = QHBoxLayout(hero)
+        heroLayout.setContentsMargins(8, 4, 8, 4)
+        heroLayout.setSpacing(4)
+
+        heroText = QVBoxLayout(); heroText.setSpacing(2)
+        heroTitle = QLabel("Resolve Production Suite")
+        heroTitle.setObjectName("HeroTitle")
+        heroSubtitle = QLabel("Gefuehrte Workflows fuer Stage, Autofocus, Laserscan & QA.")
+        heroSubtitle.setObjectName("HeroSubtitle")
+        heroText.addWidget(heroTitle)
+        heroText.addWidget(heroSubtitle)
+
+        chipRow = QHBoxLayout(); chipRow.setSpacing(4)
+        chipRow.addWidget(self.chipBatch)
+        chipRow.addWidget(self.lblTimer)
+        chipRow.addWidget(self.chipMeasQA)
+        chipRow.addWidget(self.chipDurQA)
+        chipRow.addStretch(1)
+        heroText.addLayout(chipRow)
+
+        buttonsRow = QHBoxLayout(); buttonsRow.setSpacing(6)
+        btnHeroWorkflow = UiFactory.button("Workflow oeffnen", variant="primary", min_height=28)
+        btnHeroWorkflow.clicked.connect(self._show_stage_workflow)
+        btnHeroLive = UiFactory.button("Live View starten", variant="ghost", min_height=26)
+        btnHeroLive.clicked.connect(self._open_live_view)
+        buttonsRow.addWidget(btnHeroWorkflow)
+        buttonsRow.addWidget(btnHeroLive)
+        buttonsRow.addStretch(1)
+        heroText.addLayout(buttonsRow)
+
+        heroLayout.addLayout(heroText, 1)
+        root.addWidget(hero)
+
+        images_dir = _BASE_DIR / "images"
+        stage_img = _first_existing([images_dir / "stage.png", _BASE_DIR / "assets" / "stage_tile.png"])
+        af_img    = _first_existing([images_dir / "autofocus.png", _BASE_DIR / "assets" / "autofocus_tile.png"])
+        laser_img = _first_existing([images_dir / "laserscan.png", _BASE_DIR / "assets" / "laserscan_tile.png"])
 
         # --- WORKFLOW (Kacheln) ---
         # Seitenumschaltung (in ScrollArea, damit Vollbild sauber aussieht)
@@ -1378,17 +1835,18 @@ class StageGUI(QWidget):
         self.contentScroll.setWidgetResizable(True)
         self.contentScroll.setFrameShape(QFrame.NoFrame)
         self.contentScroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.contentScroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.contentScroll.setWidget(self.stack)
         root.addWidget(self.contentScroll, 1)
 
         # ===================== Stage Seite =====================
         self.stagePage = QWidget()
         stageLayout = QVBoxLayout(self.stagePage)
-        stageLayout.setContentsMargins(0,0,0,0); stageLayout.setSpacing(14)
+        stageLayout.setContentsMargins(0,0,0,0); stageLayout.setSpacing(8)
 
         self.workflowCard = Card("Workflow")
         stageLayout.addWidget(self.workflowCard)
-        tiles = QHBoxLayout(); tiles.setSpacing(12)
+        tiles = QHBoxLayout(); tiles.setSpacing(8); tiles.setContentsMargins(0, 0, 0, 0)
         self.btnStageTile = make_tile("Stage", stage_img, self._show_stage_workflow)
         self.btnAutofocusTile = make_tile("Autofocus", af_img, self._open_autofocus_workflow)
         self.btnLaserTile = make_tile("Laserscan Modul", laser_img, self._open_laserscan_workflow)
@@ -1403,37 +1861,37 @@ class StageGUI(QWidget):
         self.workflowCard.body.addLayout(tiles)
 
         # Hauptgrid
-        grid = QGridLayout(); grid.setHorizontalSpacing(14); grid.setVerticalSpacing(14)
+        grid = QGridLayout(); grid.setHorizontalSpacing(10); grid.setVerticalSpacing(0)
+        grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
         stageLayout.addLayout(grid, 1)
 
-        # Left: Controls + Meta
-        self.cardBatch = Card("Meta")
-        grid.addWidget(self.cardBatch, 0, 0)
+        # Left: Setup (Meta + Aktionen)
+        self.cardSetup = Card("Setup")
+        grid.addWidget(self.cardSetup, 0, 0)
 
+        setupGrid = QGridLayout(); setupGrid.setSpacing(8); setupGrid.setContentsMargins(0,0,0,0)
+        self.cardSetup.body.addLayout(setupGrid)
+
+        metaCol = QVBoxLayout(); metaCol.setSpacing(8)
         # Operator
-        opLay = QHBoxLayout()
-        self.edOperator = QLineEdit(); self.edOperator.setPlaceholderText("Bediener: z. B. M. Zschach")
-        opLay.addWidget(QLabel("Operator")); opLay.addWidget(self.edOperator)
-        self.cardBatch.body.addLayout(opLay)
+        self.edOperator = UiFactory.line_edit("Bediener: z. B. M. Zschach")
+        metaCol.addLayout(UiFactory.form_row("Operator", self.edOperator))
 
         # Batch
-        self.edBatch = QLineEdit(); self.edBatch.setPlaceholderText("Chargennummer, z. B. B2025-10-30-01")
+        self.edBatch = UiFactory.line_edit("Chargennummer, z. B. B2025-10-30-01")
         regex = QRegularExpression(r"^[A-Za-z0-9._-]{0,64}$")
         self.edBatch.setValidator(QRegularExpressionValidator(regex))
-        hb = QHBoxLayout()
-        hb.addWidget(QLabel("Charge")); hb.addWidget(self.edBatch)
-        self.cardBatch.body.addLayout(hb)
+        metaCol.addLayout(UiFactory.form_row("Charge", self.edBatch))
 
         # Bemerkungen
-        self.txtNotes = QTextEdit(); self.txtNotes.setPlaceholderText("Bemerkungen zum Lauf…")
-        self.txtNotes.setFixedHeight(100)
-        self.cardBatch.body.addWidget(QLabel("Bemerkungen"))
-        self.cardBatch.body.addWidget(self.txtNotes)
+        self.txtNotes = QTextEdit(); self.txtNotes.setPlaceholderText("Bemerkungen zum Lauf.")
+        self.txtNotes.setFixedHeight(50)
+        metaCol.addWidget(UiFactory.section_label("Bemerkungen"))
+        metaCol.addWidget(self.txtNotes)
 
-        # Actions
-        self.cardActions = Card("Aktionen")
-        grid.addWidget(self.cardActions, 1, 0)
+        setupGrid.addLayout(metaCol, 0, 0)
 
+<<<<<<< HEAD:stagetest.py
         self.btnStart = QPushButton("▶  Test starten  (Ctrl+R)"); self.btnStart.clicked.connect(self._start_test)
         self.btnDauer = QPushButton("⏱️  Kombi-Test starten  (Ctrl+D)"); self.btnDauer.clicked.connect(self._toggle_dauertest)
         self.btnOpenFolder = QPushButton("📂 Ordner öffnen"); self.btnOpenFolder.setEnabled(False); self.btnOpenFolder.clicked.connect(self._open_folder)
@@ -1446,6 +1904,41 @@ class StageGUI(QWidget):
         self.cardActions.body.addWidget(self.btnDauer)
         self.cardActions.body.addWidget(self.btnOpenFolder)
         self.cardActions.body.addWidget(self.btnKleberoboter)
+=======
+        actionsCol = QVBoxLayout(); actionsCol.setSpacing(6)
+        self.btnStart = UiFactory.button("Test starten (Ctrl+R)", variant="primary", min_height=28); self.btnStart.clicked.connect(self._start_test)
+        self.btnDauer = UiFactory.button("Dauertest starten (Ctrl+D)", variant="primary", min_height=28); self.btnDauer.clicked.connect(self._toggle_dauertest)
+        self.btnOpenFolder = UiFactory.button("Ordner ?ffnen", variant="ghost", min_height=32); self.btnOpenFolder.setEnabled(False); self.btnOpenFolder.clicked.connect(self._open_folder)
+        self.btnKleberoboter = UiFactory.button("Datenbank senden", variant="ghost", min_height=26); self.btnKleberoboter.clicked.connect(self._trigger_kleberoboter)
+
+        # Dauertest-Button + Dauer-Dropdown nebeneinander
+        dauerRow = QHBoxLayout(); dauerRow.setSpacing(6)
+        dauerRow.addWidget(self.btnDauer, 1)
+        self.comboDur = QComboBox()
+        self._dur_presets = [
+            ("15 h (Standard)", 15*3600),
+            ("1 h", 1*3600),
+            ("4 h", 4*3600),
+            ("8 h", 8*3600),
+            ("24 h", 24*3600),
+            ("30 min", 30*60),
+            ("10 min", 10*60),
+        ]
+        for label, seconds in self._dur_presets:
+            self.comboDur.addItem(label, seconds)
+        self.comboDur.setFixedWidth(140)
+        self.comboDur.currentIndexChanged.connect(self._on_duration_mode_changed)
+        dauerRow.addWidget(self.comboDur, 0, Qt.AlignRight)
+
+        actionsCol.addWidget(self.btnStart)
+        actionsCol.addLayout(dauerRow)
+        actionsCol.addWidget(self.btnOpenFolder)
+        actionsCol.addWidget(self.btnKleberoboter)
+        actionsCol.addStretch(1)
+
+        setupGrid.addLayout(actionsCol, 0, 1)
+        setupGrid.setColumnStretch(0, 2); setupGrid.setColumnStretch(1, 1)
+>>>>>>> 659a8bcf2c57ee6666e6e99c3f41743bbb661c9c:production_tool_resolve.py
 
         # --- Dauertest-Dauer (NEU) ---
         durRow = QHBoxLayout()
@@ -1467,10 +1960,14 @@ class StageGUI(QWidget):
         self.cardActions.body.addLayout(durRow)
 
         # Right: Status + Plot + QA
-        self.cardStatus = Card("Status / Fortschritt")
+        self.cardStatus = Card("Status & Live-Plot")
         grid.addWidget(self.cardStatus, 0, 1)
-        self.lblPhase = QLabel("—")
+        statusRow = QHBoxLayout(); statusRow.setSpacing(8)
+
+        statusCol = QVBoxLayout(); statusCol.setSpacing(4)
+        self.lblPhase = QLabel("-")
         self.pbar = QProgressBar(); self._reset_progress()
+<<<<<<< HEAD:stagetest.py
         self.cardStatus.body.addWidget(self.lblPhase)
         self.cardStatus.body.addWidget(self.pbar)
 
@@ -1492,16 +1989,32 @@ class StageGUI(QWidget):
         # Neue Stage testen
         self.cardStatus.body.addItem(QSpacerItem(0,8, QSizePolicy.Minimum, QSizePolicy.Fixed))
         self.btnNewStage = QPushButton("✨ Neue Stage testen")
+=======
+        statusCol.addWidget(self.lblPhase)
+        statusCol.addWidget(self.pbar)
+        statusCol.addWidget(UiFactory.section_label("Kalibrierung"))
+        self.lblCalib = QLabel("-")
+        statusCol.addWidget(self.lblCalib)
+        self.btnNewStage = UiFactory.button("Neue Stage testen", variant="primary", min_height=32)
+>>>>>>> 659a8bcf2c57ee6666e6e99c3f41743bbb661c9c:production_tool_resolve.py
         self.btnNewStage.setVisible(False)
         self.btnNewStage.clicked.connect(self._new_stage)
-        self.cardStatus.body.addWidget(self.btnNewStage)
+        statusCol.addWidget(self.btnNewStage)
+        statusCol.addStretch(1)
 
-        # Live-Plot Card
-        self.cardPlot = Card("Live-Plot")
-        grid.addWidget(self.cardPlot, 1, 1)
-        self.lblTimer = QLabel("15:00:00"); self.lblTimer.setObjectName("Chip")
-        self.cardPlot.layout().itemAt(0).layout().addWidget(self.lblTimer, 0, Qt.AlignRight)
-        self.plotHolder = QVBoxLayout(); self.cardPlot.body.addLayout(self.plotHolder)
+        plotCol = QVBoxLayout(); plotCol.setSpacing(4)
+        self.plotContainer = QWidget()
+        self.plotContainer.setMinimumHeight(160)
+        self.plotContainerLayout = QVBoxLayout(self.plotContainer)
+        self.plotContainerLayout.setContentsMargins(0,0,0,0)
+        self.plotContainerLayout.setSpacing(0)
+        self.plotHolder = QVBoxLayout(); self.plotHolder.setSpacing(0)
+        self.plotHolder.addWidget(self.plotContainer)
+        plotCol.addLayout(self.plotHolder)
+
+        statusRow.addLayout(statusCol, 1)
+        statusRow.addLayout(plotCol, 2)
+        self.cardStatus.body.addLayout(statusRow)
 
         self.stack.addWidget(self.stagePage)
 
@@ -1513,21 +2026,88 @@ class StageGUI(QWidget):
         gsCard = Card("Gitterschieber")
         gsLayout.addWidget(gsCard, 1)
 
-        # Gemeinsames Kamerafenster + Aktionen
-        self.gitterschieber_status = QLabel("")
+        gsGrid = QGridLayout(); gsGrid.setSpacing(12); gsGrid.setContentsMargins(0, 0, 0, 0)
+        gsCard.body.addLayout(gsGrid)
+
+        # Linke Spalte: Kamera + Status + Chart
+        leftCol = QVBoxLayout(); leftCol.setSpacing(10)
         cam_provider = lambda: gs.capture_frame()
+<<<<<<< HEAD:stagetest.py
         self.gitterschieberCam = LiveCamEmbed(cam_provider, interval_ms=200, parent=self.gitterschieberPage)
         gsCard.body.addWidget(self.gitterschieberCam)
+=======
+        self.gitterschieberCam = LiveCamEmbed(
+            cam_provider,
+            interval_ms=150,
+            start_immediately=False,
+            parent=self.gitterschieberPage,
+        )
+        leftCol.addWidget(self.gitterschieberCam)
+>>>>>>> 659a8bcf2c57ee6666e6e99c3f41743bbb661c9c:production_tool_resolve.py
 
-        btn_bar = QHBoxLayout()
-        btn_particle = QPushButton("Partikelanalyse")
-        btn_angle = QPushButton("Winkel-Detektion")
-        btn_particle.clicked.connect(self._on_gitterschieber_particles)
-        btn_angle.clicked.connect(self._on_gitterschieber_angle)
-        btn_bar.addWidget(btn_particle)
-        btn_bar.addWidget(btn_angle)
-        gsCard.body.addLayout(btn_bar)
-        gsCard.body.addWidget(self.gitterschieber_status)
+        angleRow = QHBoxLayout(); angleRow.setSpacing(8)
+        angleRow.addWidget(UiFactory.section_label("Angle:"))
+        self.gitterschieberAngleLabel = UiFactory.chip("0.0°")
+        self.gitterschieberAngleLabel.setFont(QFont("Inter", 14, QFont.Bold))
+        angleRow.addWidget(self.gitterschieberAngleLabel)
+        angleRow.addStretch(1)
+        leftCol.addLayout(angleRow)
+
+        frameRow = UiFactory.metric_field("Frame", "Frame Count")
+        self.gitterschieberFrameCount = frameRow.field
+        totalRow = UiFactory.metric_field("Total", "Total Count")
+        self.gitterschieberTotalCount = totalRow.field
+        leftCol.addLayout(frameRow)
+        leftCol.addLayout(totalRow)
+
+        self.gitterschieberChart = GitterschieberLiveChart(self.gitterschieberPage)
+        leftCol.addWidget(self.gitterschieberChart)
+        gsGrid.addLayout(leftCol, 0, 0, 2, 1)
+
+        # Rechte Spalte: Aktionen + Empfindlichkeit
+        rightCol = QVBoxLayout(); rightCol.setSpacing(12)
+        dialWrap = QVBoxLayout()
+        dialLabel = QLabel("Angle Dial"); dialLabel.setStyleSheet("font-weight:600;")
+        self.gitterschieberDial = QDial()
+        self.gitterschieberDial.setNotchesVisible(True)
+        self.gitterschieberDial.setRange(-180, 180)
+        self.gitterschieberDial.setValue(0)
+        self.gitterschieberDial.setToolTip("Winkelanzeige (read-only)")
+        self.gitterschieberDial.setEnabled(False)
+        dialWrap.addWidget(dialLabel)
+        dialWrap.addWidget(self.gitterschieberDial)
+        rightCol.addLayout(dialWrap)
+        self.btnGitterschieberParticle = UiFactory.button("Partikel Detektion", variant="primary", min_height=44)
+        self.btnGitterschieberAngle = UiFactory.button("Winkel Justage", variant="primary", min_height=44)
+        self.btnGitterschieberAutofocus = UiFactory.button("Autofokus", variant="ghost", min_height=40)
+        self.btnGitterschieberParticle.clicked.connect(self._on_gitterschieber_particles)
+        self.btnGitterschieberAngle.clicked.connect(self._on_gitterschieber_angle)
+        self.btnGitterschieberAutofocus.clicked.connect(self._on_gitterschieber_autofocus)
+
+        rightCol.addWidget(self.btnGitterschieberParticle)
+        rightCol.addWidget(self.btnGitterschieberAngle)
+        rightCol.addWidget(self.btnGitterschieberAutofocus)
+
+        sensWrap = QVBoxLayout()
+        lblSens = QLabel("Empfindlichkeit")
+        self.gitterschieberSensLabel = QLabel("balanced_high")
+        self.gitterschieberSensSlider = QSlider(Qt.Horizontal)
+        self.gitterschieberSensSlider.setRange(0, 100)
+        self.gitterschieberSensSlider.setValue(int(gs.DETECTION_SENSITIVITY * 100))
+        self.gitterschieberSensSlider.valueChanged.connect(self._on_gitterschieber_sensitivity_changed)
+        self._update_gitterschieber_sens_label(self.gitterschieberSensSlider.value())
+        sensRow = QHBoxLayout()
+        sensRow.addWidget(self.gitterschieberSensSlider, 1)
+        sensRow.addWidget(self.gitterschieberSensLabel)
+        sensWrap.addWidget(lblSens)
+        sensWrap.addLayout(sensRow)
+        rightCol.addLayout(sensWrap)
+
+        rightCol.addStretch(1)
+        self.gitterschieber_status = QLabel("")
+        rightCol.addWidget(self.gitterschieber_status)
+        gsGrid.addLayout(rightCol, 0, 1)
+        gsGrid.setColumnStretch(0, 3); gsGrid.setColumnStretch(1, 1)
 
         gsLayout.addStretch(1)
         self.stack.addWidget(self.gitterschieberPage)
@@ -1569,8 +2149,7 @@ class StageGUI(QWidget):
             ("MacSEQ", 3, "MacSEQ"),
         ]
         for idx, (text, device_idx, label) in enumerate(cams):
-            btn = QPushButton(text)
-            btn.setMinimumHeight(90)
+            btn = UiFactory.button(text, variant="primary", min_height=90)
             btn.clicked.connect(lambda _, i=device_idx, lbl=label: self._open_cam_idx(i, lbl))
             camGrid.addWidget(btn, idx // 2, idx % 2)
             self._autofocus_buttons.append(btn)
@@ -1669,16 +2248,9 @@ class StageGUI(QWidget):
         if DASHBOARD_WIDGET_CLS is not None:
             try:
                 self._dashboard_widget = DASHBOARD_WIDGET_CLS()
-                self._dashboard_widget.setMinimumHeight(400)
+                self._dashboard_widget.setMinimumHeight(650)
                 self._dashboard_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-                scroll = QScrollArea()
-                scroll.setWidgetResizable(True)
-                scroll.setFrameShape(QFrame.NoFrame)
-                scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-                scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-                scroll.setWidget(self._dashboard_widget)
-                self._dashboard_scroll = scroll
-                liveCard.body.addWidget(scroll, 1)
+                liveCard.body.addWidget(self._dashboard_widget, 1)
             except Exception as exc:
                 msg = QLabel(
                     f"Dashboard konnte nicht geladen werden:\n{exc}"
@@ -1765,20 +2337,13 @@ class StageGUI(QWidget):
         if self._dashboard_widget is None and DASHBOARD_WIDGET_CLS is not None:
             try:
                 self._dashboard_widget = DASHBOARD_WIDGET_CLS()
-                self._dashboard_widget.setMinimumHeight(400)
+                self._dashboard_widget.setMinimumHeight(650)
                 self._dashboard_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
                 layout = self.liveViewPage.layout()
                 if layout and layout.count() > 0:
                     card = layout.itemAt(0).widget()
                     if isinstance(card, Card):
-                        scroll = QScrollArea()
-                        scroll.setWidgetResizable(True)
-                        scroll.setFrameShape(QFrame.NoFrame)
-                        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-                        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-                        scroll.setWidget(self._dashboard_widget)
-                        self._dashboard_scroll = scroll
-                        card.body.addWidget(scroll, 1)
+                        card.body.addWidget(self._dashboard_widget, 1)
             except Exception as exc:
                 self._set_status(f"Dashboard-Start fehlgeschlagen: {exc}")
                 return
@@ -1790,42 +2355,193 @@ class StageGUI(QWidget):
         """
         try:
             self.stack.setCurrentWidget(self.gitterschieberPage)
+<<<<<<< HEAD:stagetest.py
+=======
+            self._gitterschieber_total_count = 0
+            try:
+                self.gitterschieberFrameCount.clear()
+                self.gitterschieberTotalCount.setText("0")
+                self.gitterschieberAngleLabel.setText("0.0°")
+                try:
+                    self.gitterschieberDial.setValue(0)
+                except Exception:
+                    pass
+                self.gitterschieberChart.reset()
+            except Exception:
+                pass
+            try:
+                if getattr(self, "gitterschieberCam", None):
+                    self.gitterschieberCam.start()
+            except Exception:
+                pass
+            try:
+                self._update_gitterschieber_sens_label(self.gitterschieberSensSlider.value())
+            except Exception:
+                pass
+            try:
+                self.btnGitterschieberParticle.setFocus()
+            except Exception:
+                pass
+>>>>>>> 659a8bcf2c57ee6666e6e99c3f41743bbb661c9c:production_tool_resolve.py
             self._set_status("Gitterschieber geöffnet.")
         except Exception as exc:
             QMessageBox.warning(self, "Gitterschieber", f"Start fehlgeschlagen:\n{exc}")
 
     def _on_gitterschieber_particles(self):
         try:
+            if not self._show_gitterschieber_dialog(
+                "Partikel-Detektion",
+                "Bitte die Vergrößerung am Mikroskop auf die höchste Stufe stellen\n"
+                "und mit dem Handrad auf das Live-Bild fokussieren.\n\n"
+                "Sobald das Bild passt, \"Analyse starten\" wählen.",
+                "Analyse starten",
+                self._gs_particle_img,
+            ):
+                return
             frame = self.gitterschieberCam.last_frame() or gs.capture_frame()
             if frame is None:
-                self.gitterschieber_status.setText("Kein Bild verfügbar.")
+                self._set_gitterschieber_status("Kein Bild verfügbar.")
                 return
-            gs.process_image(frame.copy())
-            self.gitterschieber_status.setText("Partikelanalyse durchgeführt.")
+            result = gs.process_image(frame.copy(), sensitivity=gs.DETECTION_SENSITIVITY)
+            df = result.get("dataframe")
+            count = int(result.get("count", len(df) if df is not None else 0))
+            self._update_gitterschieber_metrics(count, df)
+            overlay = result.get("overlay")
+            if overlay is not None:
+                self._show_gitterschieber_overlay(overlay)
+            self._set_gitterschieber_status(f"Partikelanalyse: {count} gefunden.")
         except Exception as exc:
-            self.gitterschieber_status.setText(f"Fehler: {exc}")
+            self._set_gitterschieber_status(f"Fehler: {exc}")
 
     def _on_gitterschieber_angle(self):
         try:
+            if not self._show_gitterschieber_dialog(
+                "Winkel-Analyse",
+                "Bitte die Vergrößerung wie im Referenzbild einstellen,\n"
+                "dann mit dem Handrad auf das Live-Bild fokussieren.\n\n"
+                "Wenn das Bild passt, \"Analyse starten\" drücken.",
+                "Analyse starten",
+                self._gs_angle_img,
+            ):
+                return
             frame = self.gitterschieberCam.last_frame() or gs.capture_frame()
             if frame is None:
-                self.gitterschieber_status.setText("Kein Bild verfügbar.")
+                self._set_gitterschieber_status("Kein Bild verfügbar.")
                 return
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             angle = gs.SingleImageGratingAngle(gray)
-            self.gitterschieber_status.setText(f"Winkel: {angle:.3f}°")
+            self.gitterschieberAngleLabel.setText(f"{angle:.2f}°")
+            try:
+                self.gitterschieberDial.setValue(int(round(angle)))
+            except Exception:
+                pass
+            self._set_gitterschieber_status(f"Winkel: {angle:.2f}°")
         except Exception as exc:
-            self.gitterschieber_status.setText(f"Fehler: {exc}")
+            self._set_gitterschieber_status(f"Fehler: {exc}")
+
+    def _on_gitterschieber_autofocus(self):
+        self._set_gitterschieber_status("Autofokus aktuell nicht integriert.")
+
+    def _on_gitterschieber_sensitivity_changed(self, val: int):
+        gs.DETECTION_SENSITIVITY = float(val) / 100.0
+        self._update_gitterschieber_sens_label(val)
+        frame = self.gitterschieberCam.last_frame()
+        if frame is None:
+            return
+        try:
+            result = gs.process_image(frame.copy(), sensitivity=gs.DETECTION_SENSITIVITY)
+            df = result.get("dataframe")
+            count = int(result.get("count", len(df) if df is not None else 0))
+            self._update_gitterschieber_metrics(count, df, accumulate=False)
+            overlay = result.get("overlay")
+            if overlay is not None:
+                self._show_gitterschieber_overlay(overlay)
+        except Exception:
+            pass
+
+    def _update_gitterschieber_metrics(self, count: int, df: pd.DataFrame | None, *, accumulate: bool = True):
+        try:
+            self.gitterschieberFrameCount.setText(str(count))
+            if accumulate:
+                self._gitterschieber_total_count += count
+            self.gitterschieberTotalCount.setText(str(self._gitterschieber_total_count))
+        except Exception:
+            pass
+        mean_d = None
+        try:
+            if df is not None and not df.empty:
+                mean_d = float(df["equiv_diam_px"].mean())
+        except Exception:
+            mean_d = None
+        try:
+            self.gitterschieberChart.add_data.emit(count, mean_d)
+        except Exception:
+            pass
+
+    def _show_gitterschieber_overlay(self, frame):
+        try:
+            if getattr(self, "gitterschieberCam", None):
+                self.gitterschieberCam.stop()
+            pm = frame_to_qpixmap(frame, (self.gitterschieberCam.label.width(), self.gitterschieberCam.label.height()))
+            self.gitterschieberCam.label.setPixmap(pm)
+            QTimer.singleShot(1200, lambda: self.gitterschieberCam.start())
+        except Exception as exc:
+            self._set_gitterschieber_status(f"Overlay-Fehler: {exc}")
+
+    def _update_gitterschieber_sens_label(self, slider_val: int):
+        try:
+            self.gitterschieberSensLabel.setText(self._gitterschieber_sens_text(slider_val / 100.0))
+        except Exception:
+            pass
+
+    def _gitterschieber_sens_text(self, val: float) -> str:
+        if val < 0.33:
+            return "balanced_low"
+        if val < 0.66:
+            return "balanced_mid"
+        return "balanced_high"
+
+    def _set_gitterschieber_status(self, text: str):
+        if hasattr(self, "gitterschieber_status") and self.gitterschieber_status is not None:
+            self.gitterschieber_status.setText(text)
+
+    def _show_gitterschieber_dialog(self, title: str, text: str, accept_label: str = "OK", pixmap_path: pathlib.Path | None = None) -> bool:
+        """Zeigt einen dunklen Hinweisdialog mit optionalem Bild an."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle(title)
+        box.setText(text)
+        if pixmap_path:
+            try:
+                p = pathlib.Path(pixmap_path)
+                if p.exists():
+                    pm = QPixmap(str(p))
+                    if not pm.isNull():
+                        box.setIconPixmap(pm.scaledToWidth(280, Qt.SmoothTransformation))
+            except Exception:
+                pass
+        box.setStyleSheet("""
+            QMessageBox { background-color:#0f1115; color:#eaeaea; }
+            QMessageBox QLabel { color:#eaeaea; font-size:11pt; }
+            QMessageBox QPushButton {
+                background:#1b2030; color:#f0f0f0; border:1px solid #222638;
+                border-radius:8px; padding:6px 14px; font-weight:600;
+            }
+            QMessageBox QPushButton:hover { background:#242b3f; }
+            QMessageBox QPushButton:pressed { background:#29314a; }
+        """)
+        start_btn = box.addButton(accept_label, QMessageBox.AcceptRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(start_btn)
+        box.exec()
+        return box.clickedButton() is start_btn
 
     def _af_frame_provider(self):
-        """Frame-Provider für Autofocus-Kamerakarte."""
+        """Frame-Provider fuer Autofocus-Kamerakarte."""
         try:
-            if self._af_cam is None:
-                self._af_cam = IdsCam(index=0, set_min_exposure=False)
-            frame = self._af_cam.aquise_frame()
-            return frame
+            return autofocus.acquire_frame(device_index=0)
         except Exception as exc:
-            print("[WARN] Autofocus-Kamera nicht verfügbar:", exc)
+            print("[WARN] Autofocus-Kamera nicht verfuegbar:", exc)
             return None
 
     # ---------- Helpers ----------
@@ -1840,7 +2556,7 @@ class StageGUI(QWidget):
         val = self.edBatch.text()
         if self.edBatch.validator() and not self.edBatch.hasAcceptableInput():
             QMessageBox.warning(self, "Charge", "Ungültige Chargennummer. Erlaubt: A-Z, a-z, 0-9, . _ - (max. 64).")
-        self._batch = sanitize_batch(val) or "NoBatch"
+        self._batch = resolve_stage.sanitize_batch(val) or "NoBatch"
         self._refresh_titles()
         if self.plot is not None: self.plot.set_batch(self._batch)
 
@@ -1864,7 +2580,7 @@ class StageGUI(QWidget):
     def _ensure_run_dir(self):
         if self._run_outdir is None:
             ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            self._run_outdir = DATA_ROOT / self._batch / f"Run_{ts}"
+            self._run_outdir = resolve_stage.DATA_ROOT / self._batch / f"Run_{ts}"
             self._run_outdir.mkdir(parents=True, exist_ok=True)
             self._last_outdir = self._run_outdir
             self.btnOpenFolder.setEnabled(True)
@@ -1904,7 +2620,7 @@ class StageGUI(QWidget):
         out_dir = self._ensure_run_dir()
         self.btnStart.setEnabled(False); self._set_status("Test läuft…")
         self.thr=QThread()
-        self.wrk=TestWorker(self.sc, batch=self._batch); self.wrk.moveToThread(self.thr)
+        self.wrk=resolve_stage.TestWorker(self.sc, batch=self._batch); self.wrk.moveToThread(self.thr)
         self.thr.started.connect(self.wrk.run)
         self.wrk.new_phase.connect(self._phase); self.wrk.step.connect(self._step)
         self.wrk.calib.connect(self._show_calib)
@@ -2001,7 +2717,7 @@ class StageGUI(QWidget):
             xspm = self._calib_vals.get("X","—")
             yspm = self._calib_vals.get("Y","—")
             meas_text = "OK" if (self._meas_max_um is not None and self._meas_max_um <= MEAS_MAX_UM) else "NICHT OK" if self._meas_max_um is not None else "—"
-            dur_text  = "OK" if (self._dur_max_um is not None and self._dur_max_um <= DUR_MAX_UM) else "NICHT OK" if self._dur_max_um is not None else "—"
+            dur_text  = "OK" if (self._dur_max_um is not None and self._dur_max_um <= resolve_stage.DUR_MAX_UM) else "NICHT OK" if self._dur_max_um is not None else "—"
 
             text = (
 f"Stage Test Report\n\n"
@@ -2013,7 +2729,7 @@ f"  X: {xspm}\n  Y: {yspm}\n\n"
 f"Bemerkungen:\n{notes}\n\n"
 f"QA-Grenzen:\n"
 f"  Messung: ≤ {MEAS_MAX_UM:.1f} µm  |  Ergebnis: {self._meas_max_um:.2f} µm  → {meas_text}\n"
-f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._dur_max_um is not None else float('nan'):.2f} µm  → {dur_text}\n"
+f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._dur_max_um is not None else float('nan'):.2f} µm  → {dur_text}\n"
             )
             ax.text(0.02, 0.98, text, va="top", ha="left", fontsize=12, color=FG)
             pdf.savefig(fig)
@@ -2021,7 +2737,7 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
 
     def _set_chip(self, lbl: QLabel, text: str, ok: bool):
         lbl.setText(text)
-        color = "#2ecc71" if ok else "#ff2740"
+        color = "#3cb179" if ok else "#d95c5c"
         lbl.setText(f'<span style="color:{color}">{text}</span>')
 
     def _err(self,msg):
@@ -2050,6 +2766,10 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
                 print(f"[WARN] Could not set exposure on open: {e}")
             win.show()
             self._cam_windows.append(win)
+            try:
+                win.closed.connect(lambda _, w=win: self._remove_cam_window(w))
+            except Exception:
+                pass
             try:
                 win.live.centerChanged.connect(self._on_live_center_changed)
             except Exception:
@@ -2083,7 +2803,14 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
         out_dir = self._ensure_run_dir()
 
         if self.plot is None:
-            self.plot=LivePlot(self, batch=self._batch); self.plotHolder.addWidget(self.plot)
+            self.plot=LivePlot(self, batch=self._batch)
+            # Remove old widgets in plot container (if any) to ensure full height usage
+            while self.plotContainerLayout.count():
+                item = self.plotContainerLayout.takeAt(0)
+                w = item.widget()
+                if w:
+                    w.setParent(None)
+            self.plotContainerLayout.addWidget(self.plot)
         else:
             self.plot.set_batch(self._batch)
             self.plot.reset()
@@ -2093,7 +2820,7 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
         self._set_dauer_button(True)
 
         try:
-            x_center, y_center, _ = get_current_pos()
+            x_center, y_center, _ = resolve_stage.get_current_pos()
         except Exception as exc:
             QMessageBox.warning(self, "Kombi-Test", f"Referenzposition konnte nicht gelesen werden:\n{exc}")
             self._dauer_running = False
@@ -2120,7 +2847,7 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
         self.timer=QTimer(self); self.timer.timeout.connect(self._update_timer); self.timer.start(1000)
 
         self.dauer_thread=QThread()
-        self.dauer_worker=CombinedTestWorker(
+        self.dauer_worker=resolve_stage.CombinedTestWorker(
             self.sc,
             batch=self._batch,
             out_dir=out_dir,
@@ -2130,7 +2857,7 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             small_radius=small_radius,
             dwell_small=0.2,
             dwell_large=0.1,
-            limit_um=DUR_MAX_UM,
+            limit_um=resolve_stage.DUR_MAX_UM,
             stop_at_ts=self._dauer_target,
             small_phase_sec=120.0,
             large_phase_sec=30.0,
@@ -2156,7 +2883,7 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
         idx = int(data.get("idx", 0))
         total = int(data.get("total", 1))
         max_um = float(data.get("max_abs_um", 0.0))
-        limit  = float(data.get("limit_um", DUR_MAX_UM))
+        limit  = float(data.get("limit_um", resolve_stage.DUR_MAX_UM))
         ok = (max_um <= limit)
         self._set_chip(self.chipDurQA, f"Kombi-Test QA (Limit {limit:.1f} µm): Max = {max_um:.2f} µm → {'OK' if ok else 'WARN/FAIL'}", ok=ok)
         elapsed_sec = max(0, int(float(data.get("t", 0.0)) * 60))
@@ -2182,7 +2909,7 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             print(f"[WARN][{self._batch}] Konnte Live-Plot nicht speichern:", e)
 
         self._dur_max_um = float(d.get("dur_max_um", 0.0))
-        limit = float(d.get("limit_um", DUR_MAX_UM))
+        limit = float(d.get("limit_um", resolve_stage.DUR_MAX_UM))
         dur_ok = (self._dur_max_um <= limit)
         self._set_chip(self.chipDurQA, f"Kombi-Test QA (Limit {limit:.1f} µm): Max = {self._dur_max_um:.2f} µm → {'OK' if dur_ok else 'FAIL'}",
                        ok=dur_ok)
@@ -2254,7 +2981,11 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
         self.lblCalib.setText("—"); self._calib_vals = {"X": None, "Y": None}
         self._meas_max_um = None; self._dur_max_um = None
         self._set_chip(self.chipMeasQA, "Messung QA: —", ok=True)
+<<<<<<< HEAD:stagetest.py
         self._set_chip(self.chipDurQA, f"Kombi-Test QA (Limit {DUR_MAX_UM:.1f} µm): —", ok=True)
+=======
+        self._set_chip(self.chipDurQA, f"Dauertest QA (Limit {resolve_stage.DUR_MAX_UM:.1f} µm): —", ok=True)
+>>>>>>> 659a8bcf2c57ee6666e6e99c3f41743bbb661c9c:production_tool_resolve.py
 
         self.lblTimer.setText(self._fmt_hms(self._duration_sec))
         self._set_dauer_button(False)
@@ -2288,25 +3019,17 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
         except Exception as e:
             QMessageBox.warning(self, "Ordner öffnen", f"Konnte Ordner nicht öffnen:\n{e}")
 
-    def _ensure_raspi_wifi(self):
-        """Make sure we're connected to the Raspi WLAN before sending data."""
-        ensure_raspi_wifi_connected(RASPI_WIFI_SSID)
-
     def _trigger_kleberoboter(self):
         """Send the Kleberoboter payload via the Zwischen-Raspi socket."""
         self.btnKleberoboter.setEnabled(False)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            try:
-                self._set_status("Verbinde mit Datenbank (raspi-webgui)…")
-                self._ensure_raspi_wifi()
-            except RuntimeError as err:
-                self._set_status("Datenbankverbindung fehlgeschlagen.")
-                QMessageBox.warning(self, "Kleberoboter", f"WLAN-Check fehlgeschlagen:\n{err}")
-                return
-
-            self._set_status("Datenbank verbunden – sende Payload…")
-            payload, ack = send_kleberoboter_payload()
+            self._set_status("Sende Payload an Gateway…")
+            payload, ack = db.send_dummy_payload_gateway(
+                device_id="kleberoboter",
+                server_ip=db.GATEWAY_SERVER_IP,
+                port=db.GATEWAY_PORT,
+            )
         except Exception as e:
             self._set_status("Senden an Datenbank fehlgeschlagen.")
             QMessageBox.warning(self, "Kleberoboter", f"Senden fehlgeschlagen:\n{e}")
@@ -2314,8 +3037,8 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             info = "Kleberoboter-Payload gesendet."
             if ack:
                 info += f"\nACK: {ack}"
-            info += f"\nServer: {KLEBEROBOTER_SERVER_IP}:{KLEBEROBOTER_PORT}"
-            info += f"\nBarcode: {payload['barcodenummer']}"
+            info += f"\nServer: {db.GATEWAY_SERVER_IP}:{db.GATEWAY_PORT}"
+            info += f"\nBarcode: {payload.get('barcodenummer')}"
             QMessageBox.information(self, "Kleberoboter", info)
             self._set_status("Datenbankübertragung abgeschlossen.")
         finally:
@@ -2350,7 +3073,7 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
                 QMessageBox.information(self, "Find SN", "Bitte Seriennummer eingeben.")
                 return
 
-            root = DATA_ROOT
+            root = resolve_stage.DATA_ROOT
             if not root.exists():
                 QMessageBox.warning(self, "Find SN", f"Stage-Teststand-Ordner nicht gefunden:\n{root}")
                 return
@@ -2478,7 +3201,7 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             if not sn:
                 if getattr(self, '_sn_popup', None): self._sn_popup.hide()
                 return
-            root = DATA_ROOT
+            root = resolve_stage.DATA_ROOT
             results = []
             if root.exists():
                 for dirpath, dirnames, filenames in os.walk(root):
@@ -2628,32 +3351,29 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             self._init_exposure_ui_from_limits(cur, mn, mx)
             return
         try:
-            cam = IdsCam(index=device_index, set_min_exposure=False)
-        except Exception as exc:
-            print(f"[WARN] Exposure-Init (device {device_index}): {exc}")
-            self._init_default_exposure_ui()
-            return
-        try:
-            cur, mn, mx = cam.get_exposure_limits_us()
+            cur, mn, mx = autofocus.get_exposure_limits(device_index)
             self._init_exposure_ui_from_limits(cur, mn, mx)
         except Exception as exc:
             print(f"[WARN] Exposure-Init (device {device_index}): {exc}")
             self._init_default_exposure_ui()
-        finally:
-            try:
-                cam.shutdown()
-            except Exception:
-                pass
 
     def _get_live_controller_if_open(self, device_index: int):
         for win in list(getattr(self, "_cam_windows", [])):
             try:
+                if getattr(win, "is_closed", False):
+                    continue
                 live = getattr(win, "live", None)
                 if live and getattr(live, "device_index", None) == device_index:
                     return live
             except Exception:
                 continue
         return None
+
+    def _remove_cam_window(self, win):
+        try:
+            self._cam_windows = [w for w in self._cam_windows if w is not win]
+        except Exception:
+            pass
 
     def _apply_exposure_to_device(self, device_index: int, exposure_us: int):
         """Set exposure on a device even when no live window is open."""
@@ -2662,26 +3382,18 @@ f"  Dauertest: ≤ {DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_max_um if self._
             live.set_exposure_us(int(exposure_us))
             return
         try:
-            cam = IdsCam(index=device_index, set_min_exposure=False)
-        except Exception as exc:
-            self._set_status(f"Exposure (Demo) gespeichert: {exposure_us/1000.0:.3f} ms")
-            print(f"[WARN] Exposure-Kamera nicht verfuegbar: {exc}")
-            return
-        try:
-            cam.set_exposure_us(int(exposure_us))
+            autofocus.set_exposure(device_index, exposure_us)
             self._set_status(f"Exposure gesetzt: {exposure_us/1000.0:.3f} ms")
         except Exception as exc:
+            self._set_status(f"Exposure (Demo) gespeichert: {exposure_us/1000.0:.3f} ms")
             print(f"[WARN] Exposure setzen fehlgeschlagen: {exc}")
-        finally:
-            try:
-                cam.shutdown()
-            except Exception:
-                pass
 
     def _apply_exposure_to_open_windows(self, exposure_us: int):
         """Wendet die Exposure-Einstellung auf alle aktuell offenen Kamerafenster an."""
         for win in list(getattr(self, "_cam_windows", [])):
             try:
+                if getattr(win, "is_closed", False):
+                    continue
                 if hasattr(win, "live"):
                     win.live.set_exposure_us(int(exposure_us))
             except Exception as e:

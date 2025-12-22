@@ -1,627 +1,169 @@
-import random
+"""
+Headless Gitterschieber Toolkit (v2)
+------------------------------------
+Refactored to remove all GUI code. Provides:
+ - capture_frame(): grab a frame from the DinoLite camera (or returns None on failure)
+ - process_image(frame): particle detection on a given frame (returns overlay + dataframe)
+ - SingleImageGratingAngle: angle helper from AngleAnalysisFunctions
+"""
+from __future__ import annotations
+
+import atexit
+import os
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
+
 import cv2
 import numpy as np
 import matplotlib
+
+matplotlib.use("Agg")  # Offscreen saves only
 import matplotlib.pyplot as plt
-import serial
-import threading
-import time
-from PIL import Image, ImageEnhance, ImageFilter
 import pandas as pd
-import seaborn as sns
-import os
-import sys
-import pathlib
-BASE_DIR = pathlib.Path(__file__).resolve().parent
-for _sub in ("Hardware", "Algorithmen"):
-    _cand = BASE_DIR / _sub
-    if _cand.exists():
-        sys.path.insert(0, str(_cand))
-
-from DinoLiteController import DinoLiteController, DummyDinoLite
-from EightMotorcontroller import MotorController
 import tifffile as tif
-from AngleAnalysisFunctions import (
-    AnalysePiezoAngleFFT,
-    AnalysePiezoAngleGratingEdge,
-    SingleImageGratingAngle,
-)
+import seaborn as sns
+from PIL import Image
 
-#unterdrücke Plots
-matplotlib.use('Agg')
+from pipython import GCSDevice, pitools
 
-####    CONSTANTS       ####    
-STAGE_WAIT_TIME = 1e-4      # wait time of 1 s per 10000 stage steps, in order to assure that we have arrived at position
-volt_addr = 0xD0 # address for voltage channel on DAC
-volt_pltf = 0xC0 # platform for voltage channel on DAC
+import ie_Framework.Hardware.Motor.EightMotorcontroller as stage
+from ie_Framework.Hardware.Camera.DinoLiteController import DinoLiteController, DummyDinoLite
+from ie_Framework.Algorithm import AngleAnalysisFunctions as AAF
+from ie_Framework.Algorithm.particle_detection import blend_overlay_and_annotate, particle_detection
 
-startpos_x = 2000
-startpos_y = 0
-startpos_z = 3000 
+# Von aussen direkt nutzbar
+SingleImageGratingAngle = AAF.SingleImageGratingAngle
+
+# ---------------------------------------------------------------------------
+# Konstanten
+# ---------------------------------------------------------------------------
+STAGE_WAIT_TIME = 1e-4
+startpos_x = 8000
+startpos_y = 97000
+startpos_z = 3000
 working_distance_dif = 32000
-particle_count=0
-particle_diameters = []
 
-THEORIE_WINKEL_DEG=8.95 #Winkel der ersten Ordnung Nr. 1 zur x Achse in° (SIM 31 grating)
-GRATING_ERROR_TOLERANCE_MRAD = 2 # tolerance of 2 mrad for grating to piezo shift angle
+THEORIE_WINKEL_DEG = 8.95
+GRATING_ERROR_TOLERANCE_MRAD = 2
 
-SIM7_centerpos = [118395, 154950] # x,y
-#SIM31_centerpos = [118395, 263010] # x,y
-SIM31_centerpos = [81525, 151110] # x,y
+SIM7_centerpos = [118395, 154950]
+SIM31_centerpos = [81525, 151110]
 SIM31_SEcornerpos = [85620, 298950]
-currentPosXYZ = [0, 0, 0]   # to check what current positions are
+currentPosXYZ = [0, 0, 0]
 
-maxVolt = 4.022 * 1e3 # maximum voltage output * 1000
+maxVolt = 4.022 * 1e3
 x_addr = 18
 y_addr = 19
 z_addr = 20
-voltage_step = 0.166 * 1e3  # 0.333 V ca. 10 um stepsize
-OP_amp_factor = 2       # amplification of voltage
+voltage_step = 0.166 * 1e3
+OP_amp_factor = 2
 
-piezoshift_angle_to_cam = 100 # piezo angle to camera in degrees
-grating_angle_to_cam = 100 # angle of sim 31 grating to camera
-grating_angle_error = 100 # error of sim grating angle to piezo shift angle in degrees
-angle_processing_active = False
-gui = None
+piezoshift_angle_to_cam = 100
+grating_angle_to_cam = 100
+grating_angle_error = 100
 
-# EightMotorcontroller normal importieren (Wrapper-Modul EightMotorcontroller)
-class _NullStage:
-    """Fallback-Stage, damit GUI auch ohne Hardware startet."""
-    def __init__(self): self.connected = False
-    def move_to_pos(self, *a, **k): print("[WARN] Stage nicht verbunden, move_to_pos ignoriert.")
-    def set_analog_output(self, *a, **k): print("[WARN] Stage nicht verbunden, set_analog_output ignoriert.")
-    def current_pos(self, *a, **k): print("[WARN] Stage nicht verbunden, current_pos=0."); return 0
+# Empfindlichkeit fuer Partikeldetektion (0..1)
+DETECTION_SENSITIVITY = 0.66
 
+
+def wait_time(old_pos: float, new_pos: float) -> float:
+    """Berechnet die noetige Wartezeit in Sekunden basierend auf dem Weg der Stage."""
+    stage_displacement = abs(new_pos - old_pos)
+    return stage_displacement * STAGE_WAIT_TIME
+
+# ---------------------------------------------------------------------------
+# Hardware-Layer: seriell (Stage) + Kamera
+# ---------------------------------------------------------------------------
+_motor_lock = threading.Lock()
 try:
-    stage = MotorController(port_number=5, baud_rate=9600, verbose=True)
-    stage.connected = True
-    stage_status_text = "Stage verbunden (COM5)"
-except Exception as exc:
-    stage = _NullStage()
-    stage_status_text = f"Stage nicht verbunden: {exc}"
-
-
-
-####    FUNCTIONS   ####
-
-def SelectImgDir():
-    global filedir
-    if 'filedir' not in globals():
-        return
-    if 'QFileDialog' in globals() and QFileDialog is not None:
-        pathselect = QFileDialog.getExistingDirectory(None, "Select image directory", str(filedir))
-        if pathselect:
-            print(pathselect)
-            filedir = pathselect
-    else:
-        print("QFileDialog nicht verfuegbar; nutze aktuelles Verzeichnis.")
-
-def wait_time(oldPos, newPos):
-    """Return waittime based on how far stage has to move"""
-    stageDisplacement = abs(newPos - oldPos)
-    sleepTime = stageDisplacement*STAGE_WAIT_TIME
-    print("Will sleep for {} seconds.".format(round(sleepTime, 3)))
-    return sleepTime
-
-
-
-
-def update_position(val):
-    global pos
-    pos = int(val)
-    stage.move_to_pos(y_addr, pos, True)
-    position_label.config(text=f"Position: {pos}")
-
-def start_live_feed():
-    live_feed_thread = threading.Thread(target=dino_lite.show_live_feed)
-    live_feed_thread.start()
-
-def update_frame():
-    # Placeholder: UI-Anzeige wird in stagetest.py gehandhabt
-    return
-
-def process_image(stitched_image):
-    focus_frame = stitched_image
-    #focus_frame = autofocus()
-    cv2.imwrite('focused_image.tif', focus_frame)
-    fourier_img = fourier(focus_frame)
-    Image.fromarray(fourier_img).save('fourier_square.tif')
-    thresh_image, detected_particles = count_particles(fourier_img,focus_frame)
-    cv2.imwrite('tresh.tif', thresh_image)
-    Image.fromarray(cv2.cvtColor(detected_particles, cv2.COLOR_BGR2RGB)).save('detected.tif')
-    
-    return focus_frame  
-
-def count_particles(fourier_frame, focus_frame):
-    global particle_count, particle_diameters
-
-    thresh_image = (fourier_frame > 90).astype(np.uint8) * 255
-    contours, _ = cv2.findContours(thresh_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    particle_count = 0
-  
-    for contour in contours:
-        particle_count += 1
-        (x, y), radius = cv2.minEnclosingCircle(contour)
-        diameter_um = 2 * radius * 2.6
-        particle_diameters.append(diameter_um)
-        cv2.circle(focus_frame, (int(x), int(y)), int(radius), (0, 255, 0), 2)
-        if diameter_um >= 5:
-            cv2.circle(focus_frame, (int(x), int(y)), int(radius), (0, 0, 255), 2)
-  
-    #print(particle_diameters)
-    
-    create_particle_plot(particle_diameters,focus_frame)
-    
-    return thresh_image, focus_frame
-
-fig = None
-axes = None
-
-def init_plot():
-    global fig, axes
-    plt.ion()
-    fig, axes = plt.subplots(1, 3, figsize=(14, 7))
-    #plt.show()
-
-def create_particle_plot(particle_diameters, focus_frame):
-    global fig, axes
-
-    threshold_um = 5
-    small_particles = [d for d in particle_diameters if d < threshold_um]
-    large_particles = [d for d in particle_diameters if d >= threshold_um]
-    total_particles = len(particle_diameters)
-    small_count = len(small_particles)
-    large_count = len(large_particles)
-
-    axes[0].clear()
-    sns.histplot(particle_diameters, bins=20, kde=False, color="blue", ax=axes[0])
-    axes[0].axvline(x=threshold_um, color='red', linestyle='--', label=f'Grenzwert: {threshold_um} µm')
-    axes[0].set_title(f'Histogramm der Partikeldurchmesser\n'
-                      f'Insgesamt: {total_particles}, < {threshold_um} µm: {small_count}, ≥ {threshold_um} µm: {large_count}')
-    axes[0].set_xlabel('Durchmesser (µm)')
-    axes[0].set_ylabel('Anzahl der Partikel')
-    axes[0].legend()
-    axes[1].clear()
-    sns.boxplot(particle_diameters, color="lightblue", ax=axes[1])
-    axes[1].axvline(x=threshold_um, color='red', linestyle='--', label=f'Grenzwert: {threshold_um} µm')
-    axes[1].set_title(f'Boxplot der Partikeldurchmesser\n'
-                      f'Insgesamt: {total_particles}, < {threshold_um} µm: {small_count}, ≥ {threshold_um} µm: {large_count}')
-    axes[1].set_xlabel('Durchmesser (µm)')
-    
-    axes[2].clear()
-    axes[2].imshow(cv2.cvtColor(focus_frame, cv2.COLOR_BGR2RGB))
-    axes[2].axis('off')
-    axes[2].set_title('Detected Particles')
-
-   
-    plt.tight_layout()
-
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    outfile = os.path.join(filedir, f"particle_plot_{ts}.png")
-    fig.savefig(outfile, dpi=300)
-
-    #plt.draw()
-    #plt.pause(0.1)
-
-
-    
-
-def fourier(frame):
-    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    f = np.fft.fft2(frame_gray)
-    fshift = np.fft.fftshift(f)
-    rows, cols = frame_gray.shape
-    crow, ccol = rows // 2, cols // 2
-    mask_size = 10
-    mask = np.ones((rows, cols), np.uint8)
-    mask[crow-mask_size:crow+mask_size, ccol-mask_size:ccol+mask_size] = 0
-    fshift_filtered = fshift * mask
-    f_ishift = np.fft.ifftshift(fshift_filtered)
-    img_back = np.fft.ifft2(f_ishift)
-    img_back = np.abs(img_back)
-    img_back_normalized = np.uint8(255 * img_back / np.max(img_back))
-
-    return img_back_normalized
-
-def autofocus():
-    global z_slices 
-    z_slices = []
-    
-    beste_fokus_bewertung = -1
-    
-    focus_range = 2000
-    focus_position = stage.current_pos(20)
-    startpos = int(stage.current_pos(20) - focus_range / 2)
-    endpos = int(stage.current_pos(20) + focus_range / 2)
-    focus_frame = None
-
-    stage.move_to_pos(z_addr, int(startpos), False)
-    time.sleep(0.5)
-
-    for pos in range(startpos, endpos+40, 100):
-        
-        frame = dino_lite.capture_image()
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        z_slices.append(frame)
-
-        fokus_bewertung = cv2.Laplacian(frame, cv2.CV_64F).var()
-        
-        if fokus_bewertung > beste_fokus_bewertung:
-            beste_fokus_bewertung = fokus_bewertung
-            focus_position = stage.current_pos(20)
-            focus_frame = frame
-            #print("Found new focus at {} steps.".format(focus_position))
-
-        stage.move_to_pos(z_addr, pos, False)
-    
-
-    
-    stage.move_to_pos(z_addr, focus_position, False)
-    time.sleep(1)
-    focus_frame = dino_lite.capture_image()
-    
-
-    return focus_frame
-
-def autofocusblocked():
-    print("Autofocus is currently blocked. Z motor cannot be used!")
-
-
-
-points = []
-
-def click_event(event, x, y, flags, params):
-    if event == cv2.EVENT_LBUTTONDOWN:
-        points.append((x, y))
-        cv2.circle(img, (x, y), 5, (0, 255, 0), -1)
-        cv2.imshow("Bild", img)
-        
-        if len(points) == 2:
-            dist = ((points[0][0] - points[1][0]) ** 2 + (points[0][1] - points[1][1]) ** 2) ** 0.5
-            print(f"Abstand zwischen den Punkten in Pixeln: {dist} Pixel")
-
-def measure_distance():
-    global img
-    img = cv2.imread("detected.tif")
-    cv2.imshow("Bild", img) 
-    cv2.setMouseCallback("Bild", click_event)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-    
-
-def stitch():
-    imagesy = []
-    imagesx = []
-
-    # start_y, end_y = 215000, 110000
-    start_y, end_y = startpos_y, 224620
-
-    # for posx in range(0, 120000, 13500):
-    for posx in range(startpos_x, startpos_x + 120000, 13500):
-        stage.move_to_pos(x_addr, posx, False)
-        time.sleep(1)
-
-        for posy in range(start_y, end_y, -9000 if start_y > end_y else 9000):
-            stage.move_to_pos(y_addr, posy, True)
-            frame = autofocus()
-            # frame = dino_lite.capture_image()
-            time.sleep(1)
-
-            if start_y < end_y:
-                frame = cv2.rotate(frame, cv2.ROTATE_180)
-            imagesy.append(frame)
-            process_image(frame)
-
-        y_image = cv2.vconcat(imagesy)
-        y_image = cv2.rotate(y_image, cv2.ROTATE_180)
-        imagesx.append(y_image)
-        imagesy.clear()
-        start_y, end_y = end_y, start_y
-
-    stitched_image = cv2.hconcat(imagesx)
-    process_image(stitched_image)
-    combined_image_rgb = cv2.cvtColor(stitched_image, cv2.COLOR_BGR2RGB)
-    Image.fromarray(combined_image_rgb).save("Combined_Image.tif", format='TIFF', compression='none')
-    create_particle_plot(particle_diameters, stitched_image)
-        
-
-def startpos():
-    stage.move_to_pos(x_addr, startpos_x, False) # x
-    time.sleep(2)
-    stage.move_to_pos(y_addr, startpos_y, True) # y
-    time.sleep(2)
-    stage.move_to_pos(z_addr, startpos_z, False) # z DONT USE!
-    #time.sleep(5)
-    #move_to_pos(18, 40000)
-    #move_to_pos(19, 175000)
-    #move_to_pos(20, 60000) 
-    
-def angle():
-    # currently unused
-    stage.move_to_pos(19, 210000, True)
-    time.sleep(6)
-    image_start = dino_lite.capture_image()
-    least_squares_sums = []
-    positions = list(range(0, 5000, 100))
-    for posy in positions:
-        image_pos = dino_lite.capture_image()
-        cv2.imwrite(f'C:/Users/Lvbttest/Desktop/Angle/angle_{posy}.tif', image_pos)
-        
-        difference = image_start.astype(np.float32) - image_pos.astype(np.float32)
-        squared_difference = np.square(difference)
-        least_squares_sum = np.sum(squared_difference)
-        print(f"Position {posy}, Least Squares Sum: {least_squares_sum}")
-        least_squares_sums.append(least_squares_sum)
-        stage.set_analog_output(0xD7,0xC0, posy)
-        time.sleep(1)
-    
-    min_index = np.argmin(least_squares_sums)
-    min_value = least_squares_sums[min_index]
-
-    df = pd.DataFrame({'Position': positions,'LeastSqaure': least_squares_sums})
-    df.to_excel('Rohdaten.xlsx')
-    plt.plot(positions, least_squares_sums, marker='o', linewidth=0.1)
-    
-    plt.title('Least Squares Summen für verschiedene Positionen')
-    plt.xlabel('Position')
-    plt.ylabel('Least Squares Summe')
-    plt.grid(True)
-    plt.scatter(positions[min_index], min_value, color='red', zorder=5)
-    plt.annotate(f'Min: {min_value:.2f}', (positions[min_index], min_value), textcoords="offset points", xytext=(0,10), ha='center', color='red')
-    plt.show()
-
-def GratingShiftwSave():
-    #testing function
-    print("Starting an angle measurement!")
-    dirname = "/piezo_angle_meas"
-    # move to center of SIM31 grating
-    stage.move_to_pos(x_addr, SIM31_SEcornerpos[0], False)
-    stage.move_to_pos(y_addr, SIM31_SEcornerpos[1], True)    
-    time.sleep(3)
-    voltage_range = np.arange(0, maxVolt*OP_amp_factor, step=voltage_step*OP_amp_factor, dtype=int)
-    os.mkdir(filedir + dirname)
-    for i in range(len(voltage_range)):
-        print("New voltage: {} V".format(voltage_range[i]))
-        stage.set_analog_output(volt_addr, volt_pltf, int(voltage_range[i]/OP_amp_factor))
-        time.sleep(0.5)
-        new_image = dino_lite.capture_image()
-        cv2.imwrite(filedir + dirname + f"\\Voltage_{voltage_range[i]}mV.tif", new_image)
-
-    print("Finished acquiring voltage steps!")
-    stage.set_analog_output(volt_addr, volt_pltf, 0)
-
-
-def acquire_single_frame():
-    """Acquire single frame for grating angle measurement"""
-    new_image = dino_lite.capture_image()
-    res_frame = np.zeros((new_image.shape[0], new_image.shape[1]), dtype="uint16")
-    for z in range(3):
-            res_frame += new_image[:,:,z]
-    return res_frame
-    
-def acquire_shiftstack(voltage_range):
-    """ Acquisition function for piezo grating shift angle measurements"""
-    new_image = dino_lite.capture_image()    
-    print("Captured test image, shape is:", new_image.shape)
-    pxly, pxlx, pxlz  = new_image.shape
-    shiftstack = np.zeros((len(voltage_range), pxly, pxlx), dtype="uint16")
-    print("Shape of stack is:", shiftstack.shape)
-    
-    for i in range(len(voltage_range)):
-        print("New voltage: {} V".format(voltage_range[i]))
-        stage.set_analog_output(volt_addr, volt_pltf, int(voltage_range[i]/OP_amp_factor))
-        time.sleep(0.5)
-        new_image = dino_lite.capture_image()
-        # sum each channel to crate BW image.
-        for z in range(3):
-            shiftstack[i] += new_image[:,:,z]
-        
-    print("Finished acquiring voltage steps!")
-    stage.set_analog_output(volt_addr, volt_pltf, 0)
-    return shiftstack
-
-
-
-def MeasureShiftFFT():
-    print("Starting piezo angle measurement based on grating displacement and FFT")
-    print("Starting an angle measurement!")
-    # move to center of SIM31 grating
-    stage.move_to_pos(z_addr, startpos_z + working_distance_dif, False) 
-    
-    stage.move_to_pos(x_addr, SIM31_centerpos[0], False)
-    
-    stage.move_to_pos(y_addr, SIM31_centerpos[1], True)
-        
-    autofocus() 
-    time.sleep(2.5) # so everything can settle
-    
-    voltage_range = np.arange(0, maxVolt*OP_amp_factor, step=voltage_step*OP_amp_factor, dtype=int)
-    # acquire test frame for shape
-    shiftstack = acquire_shiftstack(voltage_range)
-    
-    # debugging tool
-    #save_shiftstack(shiftstack, dirname="/FFTshift")
-
-    print("Got stack! Proceeding with analysis. Using FFT")
-    shiftstack = np.fliplr(shiftstack)
-    #save_shiftstack(shiftstack, dirname="/finalY8-20250225")
-    piezo_angle, grating_angle = AnalysePiezoAngleFFT(shiftstack)
-    print("Piezo angle is: {} degrees.".format(piezo_angle))
-    update_grating_angle_error(grating_angle, piezo_angle)
-    print("Finished Shift measurement and analysis using FFT.")
-
-    
-
-def save_shiftstack(shiftstack, dirname="/Testmeasurement"):
-    
-    shiftstack_rot90CCW = np.rot90(shiftstack, k=1, axes=(1,2))
-    os.mkdir(filedir+dirname)
-    tif.imwrite(filedir+dirname+"/BWstack_rotated.tif", shiftstack_rot90CCW.astype('uint16'), photometric='minisblack')
-    print("Saved stack!")
-    print(filedir+dirname+"/BWstack_rotated.tif")
-
-
-def MeasureShiftGratingEdge():
-    print("Starting piezo angle measurement based on grating edge displacement")
-    print("Starting an angle measurement!")
-    # move to SE corner of SIM31 grating
-    stage.move_to_pos(x_addr, SIM31_SEcornerpos[0], False)
-    time.sleep(2.5)
-    stage.move_to_pos(y_addr, SIM31_SEcornerpos[1], True)    
-    time.sleep(5)
-
-    voltage_range = np.arange(0, maxVolt*OP_amp_factor, step=voltage_step*OP_amp_factor*2, dtype=int)
-    # acquire stack of shifted images
-    shiftstack = acquire_shiftstack(voltage_range) 
-    print("Got stack! Proceeding with analysis. Using error function of grating edge drop")
-
-    shiftDy = -150     # parameter for shifting image ROI during analysis
-    shiftDx = -200
-    
-    #for debugging
-    #save_shiftstack(shiftstack, dirname="/GratingEdge")
-    
-    
-    piezo_angle, grating_angle = AnalysePiezoAngleGratingEdge(shiftstack, shiftDy, shiftDx)
-    
-    print("Piezo angle is: {} degrees.".format(piezo_angle))
-    update_grating_angle_error(grating_angle, piezo_angle)
-
-def MeasureSingleImageGratingAngle():
-    global piezoshift_angle_to_cam,grating_angle
-    
-    print("Measuring grating angle from single SIM 31 grating image.")
-    # move to center of SIM31 grating
-    stage.move_to_pos(y_addr, SIM31_centerpos[1], True)    
-    time.sleep(1)
-    stage.move_to_pos(x_addr, SIM31_centerpos[0], False)
-    time.sleep(1)
-
-    single_frame = acquire_single_frame()
-    grating_angle  = SingleImageGratingAngle(single_frame)
-    print("Grating angle is {} degrees.".format(grating_angle))
-    update_grating_angle_error(grating_angle, piezoshift_angle_to_cam)
-
-
-def liveAngle():
-    global piezoshift_angle_to_cam,grating_angle
-
-    single_frame = acquire_single_frame()
-    single_frame = np.fliplr(single_frame)
-    grating_angle  = SingleImageGratingAngle(single_frame)
-    angle = update_grating_angle_error(grating_angle, piezoshift_angle_to_cam)
-    if gui is not None:
-        gui.label.setText(f"{angle}")
-        gui.angle_dial.setValue(int(angle))
-    return angle
-
-def angle_processing():
-    global angle_processing_active
-    
-    MeasureShiftFFT()
-    if gui is not None:
-        gui.pushButton.setStyleSheet("background-color: red; color: white;")
-        gui.pushButton.setText("Winkel Justage stoppen")
-    while angle_processing_active:
-         liveAngle()
-         fft_thread.msleep(100)
-
-def start_angle_processing_thread():
-    global fft_thread, angle_processing_active
-    if gui is None or QThread is None:
-        print("GUI/Qt nicht aktiv; angle_processing_thread wird nicht gestartet.")
-        return
-    fft_thread = QThread()
-    fft_thread.run = angle_processing
-    fft_thread.start()
-    angle_processing_active = True
-    gui.pushButton.setText("Kalibrierung läuft...")
-    gui.pushButton.setStyleSheet("background-color: green; color: white;")
-
-def stop_angle_processing_thread():
-    global angle_processing_active
-    if gui is None:
-        angle_processing_active = False
-        return
-    angle_processing_active = False
+    stage = stage.MotorController(port_number=5, baud_rate=9600, verbose=False)
+except Exception:
+    stage = None
+
+
+_camera_lock = threading.Lock()
+if DinoLiteController is None:
+    _dino_lite: Optional[Any] = DummyDinoLite()
+else:
     try:
-        fft_thread.quit()
-        fft_thread.wait()
+        _dino_lite = DinoLiteController()
     except Exception:
-        pass
-    gui.pushButton.setText("Winkel Justage starten")
-    gui.pushButton.setStyleSheet("")
-
-def toggle_angle_processing():
-    if gui is None:
-        print("GUI nicht aktiv; toggle_angle_processing ignoriert.")
-        return
-    if angle_processing_active:
-        stop_angle_processing_thread()
-    else:
-        start_angle_processing_thread()
-
-def update_grating_angle_error(grating_angle, shift_angle):
-    """FUnction to update piezo and grating angles and their errors"""
-    global grating_angle_error
-    global piezoshift_angle_to_cam
-    global grating_angle_to_cam
-
-    piezoshift_angle_to_cam = shift_angle
-    grating_angle_to_cam = grating_angle
-
-    grating_angle_error = -1*(grating_angle_to_cam - THEORIE_WINKEL_DEG- piezoshift_angle_to_cam) # calculate error in degrees
-    grating_angle_error_mrad = grating_angle_error *np.pi / 0.18
-    print(f"New grating angle error is {round(grating_angle_error, 3)} degrees, or {round(grating_angle_error_mrad, 2)} mrad.")
-    if (abs(grating_angle_error_mrad) < GRATING_ERROR_TOLERANCE_MRAD):
-        print("Grating angle error is within tolerance of {} mrad!".format(GRATING_ERROR_TOLERANCE_MRAD))
-    else:
-        print("Tolerance not yet reached. Please adjust grating.")
-        if grating_angle_error > 0:
-            print("Adjust grating angle by turning grating in clockwise direction.")
-        else:
-            print("Adjust grating by turning grating in a counter-clockwise direction.")
-    
-    return grating_angle_error
+        _dino_lite = DummyDinoLite()
+_dpc_device: Optional[GCSDevice] = None
+_dpc_axis: Optional[Any] = None
 
 
-init_plot()
-#plt.show()
-#measure_distance()
-
-try:
-    dino_lite = DinoLiteController()
-except Exception as exc:
-    print(f"[WARN] DinoLite-Kamera nicht verfuegbar: {exc}")
-    dino_lite = DummyDinoLite(exc)
-
-pos = 0
-#startpos()
-filedir = os.getcwd()
-
-# PySide6 GUI für Livebild + Buttons
-def capture_frame():
-    """Return aktuelles Kamerabild (BGR) oder None bei Fehlern; für Embedding in stagetest."""
-    try:
-        return dino_lite.capture_image()
-    except Exception as exc:
-        print(f"[WARN] capture_frame fehlgeschlagen: {exc}")
+def capture_frame() -> Optional[np.ndarray]:
+    """Liefert ein aktuelles BGR-Frame oder None bei Fehlern."""
+    cam = _dino_lite
+    if cam is None:
         return None
+    with _camera_lock:
+        try:
+            return cam.capture_image()
+        except Exception:
+            return None
 
 
-def analyse_current_frame_particles():
-    """Helper für stagetest: Partikelanalyse auf aktuellem Frame."""
+# ---------------------------------------------------------------------------
+# Partikeldetektion
+# ---------------------------------------------------------------------------
+
+
+def _save_particle_plot(df: pd.DataFrame, out_dir: Path):
+    if df is None or df.empty:
+        return
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    diam = df["equiv_diam_px"]
+    sns.histplot(diam, bins=20, kde=False, color="blue", ax=axes[0])
+    axes[0].set_title("Histogramm Partikel (px)")
+    axes[0].set_xlabel("Durchmesser [px]")
+    axes[0].set_ylabel("Anzahl")
+
+    sns.boxplot(x=diam, color="lightblue", ax=axes[1])
+    axes[1].set_title("Boxplot Partikel (px)")
+    axes[1].set_xlabel("Durchmesser [px]")
+
+    fig.tight_layout()
+    fig.savefig(out_dir / "particle_plot.png", dpi=220)
+    plt.close(fig)
+
+
+def process_image(frame: np.ndarray, *, save_dir: str | Path | None = None, sensitivity: float | None = None) -> Dict[str, Any]:
+    """Partikelanalyse auf einem Frame. Gibt Overlay, Maske, DataFrame und Count zurueck."""
+    sensitivity_val = DETECTION_SENSITIVITY if sensitivity is None else sensitivity
+    overlay, mask, df, intermediates = particle_detection(
+        frame,
+        sensitivity=sensitivity_val,
+        save_dir=None,
+        return_intermediates=True,
+        return_overlay_on=frame,
+    )
+
+    if save_dir is not None:
+        out = Path(save_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(out / "detected.tif"), overlay)
+        cv2.imwrite(str(out / "mask.tif"), mask)
+        df.to_csv(str(out / "particles.csv"), index=False)
+        for key, arr in intermediates.items():
+            cv2.imwrite(str(out / f"{key}.tif"), arr)
+        _save_particle_plot(df, out)
+
+    return {"count": int(len(df)), "overlay": overlay, "mask": mask, "dataframe": df}
+
+
+def analyse_current_frame_particles(save_dir: str | Path | None = None) -> Optional[Dict[str, Any]]:
     frame = capture_frame()
     if frame is None:
         return None
-    process_image(frame.copy())
-    return frame
+    return process_image(frame.copy(), save_dir=save_dir)
 
 
-def analyse_current_frame_angle():
-    """Helper für stagetest: Winkelbestimmung auf aktuellem Frame (grau)."""
+def analyse_current_frame_angle() -> Tuple[Optional[np.ndarray], Optional[float]]:
     frame = capture_frame()
     if frame is None:
         return None, None
@@ -630,6 +172,254 @@ def analyse_current_frame_angle():
     return frame, angle
 
 
-# Keine GUI-Starts in diesem Modul; UI wird in stagetest.py eingebunden.
+def autofocus(
+    *,
+    focus_range: int = 2000,
+    step: int = 100,
+    settle_s: float = 0.5,
+) -> Optional[np.ndarray]:
+    """Autofokus entlang der Z-Achse."""
+    try:
+        current_z = int(stage.current_pos(z_addr))
+    except Exception:
+        current_z = 0
+    start = int(current_z - focus_range / 2)
+    end = int(current_z + focus_range / 2)
 
+    best_score = -1.0
+    best_pos = current_z
+    best_frame: Optional[np.ndarray] = None
+
+    for pos in range(start, end + step, step):
+        stage.move_to_pos(z_addr, pos)
+        if settle_s > 0:
+            time.sleep(settle_s)
+        frame = capture_frame()
+        if frame is None:
+            continue
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        score = cv2.Laplacian(gray, cv2.CV_64F).var()
+        if score > best_score:
+            best_score = score
+            best_pos = pos
+            best_frame = frame
+
+    if best_pos != current_z:
+        stage.move_to_pos(z_addr, best_pos)
+        if settle_s > 0:
+            time.sleep(settle_s)
+    return best_frame
+
+
+
+def connect_DPC(start_pos: float = 300.0) -> float:
+    """Initialisiert PI DPC via USB, verfuehrt auf Startposition und gibt Position zurueck."""
+    global _dpc_device, _dpc_axis
+    if _dpc_device is None or _dpc_axis is None:
+        dev = GCSDevice()
+        devices = dev.EnumerateUSB()
+        if not devices:
+            raise RuntimeError("Kein DPC-Geraet gefunden")
+        dev.ConnectUSB(devices[0])
+        axis = list(dev.qSAI())[0]
+        dev.SVO(axis, True)
+        pitools.startup(dev)
+        _dpc_device = dev
+        _dpc_axis = axis
+    assert _dpc_device is not None and _dpc_axis is not None
+    _dpc_device.MOV(_dpc_axis, start_pos)
+    pitools.waitontarget(_dpc_device, [_dpc_axis])
+    pos = float(_dpc_device.qPOS()[_dpc_axis])
+    return pos
+
+
+def close_DPC() -> None:
+    """Schliesst die DPC Verbindung, falls offen."""
+    global _dpc_device, _dpc_axis
+    if _dpc_device is None:
+        return
+    try:
+        _dpc_device.CloseConnection()
+    finally:
+        _dpc_device = None
+        _dpc_axis = None
+
+
+atexit.register(close_DPC)
+
+
+def _ensure_dpc() -> tuple[GCSDevice, Any]:
+    """Stellt sicher, dass eine DPC Verbindung besteht und liefert Device + Achse."""
+    if _dpc_device is None or _dpc_axis is None:
+        connect_DPC()
+    assert _dpc_device is not None and _dpc_axis is not None
+    return _dpc_device, _dpc_axis
+
+
+def startpos(delay_s: float = 2.0) -> tuple[int, int, int]:
+    """Faehrt die vordefinierten Startpositionen an."""
+    stage.move_to_pos(x_addr, startpos_x)
+    if delay_s:
+        time.sleep(delay_s)
+    stage.move_to_pos(y_addr, startpos_y)
+    if delay_s:
+        time.sleep(delay_s)
+    stage.move_to_pos(z_addr, startpos_z)
+    return startpos_x, startpos_y, startpos_z
+
+
+def acquire_single_frame() -> np.ndarray:
+    """Nimmt ein einzelnes Frame auf und fasst RGB zu einem Graubild zusammen."""
+    frame = capture_frame()
+    if frame is None:
+        raise RuntimeError("Konnte kein Kamerabild aufnehmen")
+    if frame.ndim == 3:
+        return frame.sum(axis=2).astype(np.uint16)
+    return frame.astype(np.uint16)
+
+
+def acquire_shiftstack(um_range: Sequence[float]) -> np.ndarray:
+    """Erstellt einen Stack ueber Piezo-Verfahrwege und liefert ihn als 3D-Array."""
+    piezo, axis = _ensure_dpc()
+    positions = list(um_range)
+    first_frame = acquire_single_frame()
+    height, width = first_frame.shape
+    shiftstack = np.zeros((len(positions), height, width), dtype=np.uint16)
+
+    for i, um in enumerate(positions):
+        piezo.MOV(axis, float(um))
+        pitools.waitontarget(piezo, [axis])
+        time.sleep(0.5)
+        shiftstack[i] = acquire_single_frame()
+
+    piezo.MOV(axis, 0.0)
+    pitools.waitontarget(piezo, [axis])
+    return shiftstack
+
+
+def save_shiftstack(shiftstack: np.ndarray, dirname: str | Path = "Testmeasurement") -> Path:
+    """Speichert den Stack als TIF und liefert den Pfad zur Datei."""
+    out_dir = Path(dirname)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rotated = np.rot90(shiftstack, k=1, axes=(1, 2))
+    out_file = out_dir / "BWstack_rotated.tif"
+    tif.imwrite(out_file, rotated.astype("uint16"), photometric="minisblack")
+    return out_file
+
+
+def GratingShiftwSave(
+    save_dir: str | Path = "piezo_angle_meas",
+    um_range: Sequence[float] | np.ndarray = np.arange(0, 300, 10),
+) -> Path:
+    """Verfuehrt Piezo-Schritte, speichert die aufgenommenen Frames und liefert das Zielverzeichnis."""
+    piezo, axis = _ensure_dpc()
+    out_dir = Path(save_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stage.move_to_pos(x_addr, SIM31_SEcornerpos[0])
+    stage.move_to_pos(y_addr, SIM31_SEcornerpos[1])
+    time.sleep(3)
+
+    for um in um_range:
+        piezo.MOV(axis, float(um))
+        pitools.waitontarget(piezo, [axis])
+        frame = capture_frame()
+        if frame is None:
+            continue
+        cv2.imwrite(str(out_dir / f"Voltage_{int(um)}mV.tif"), frame)
+
+    piezo.MOV(axis, 0.0)
+    pitools.waitontarget(piezo, [axis])
+    return out_dir
+
+
+def MeasureShiftFFT(
+    um_range: Sequence[float] | np.ndarray = np.arange(0, 300, 10),
+) -> tuple[float, float]:
+    """Piezo-Gitterwinkel ueber FFT-Analyse bestimmen."""
+    connect_DPC()
+    stage.move_to_pos(z_addr, startpos_z + working_distance_dif)
+    stage.move_to_pos(x_addr, SIM31_centerpos[0])
+    stage.move_to_pos(y_addr, SIM31_centerpos[1])
+    autofocus()
+    time.sleep(2.5)
+
+    shiftstack = acquire_shiftstack(um_range)
+    shiftstack = np.flip(shiftstack, axis=2)
+    piezo_angle, grating_angle = AAF.AnalysePiezoAngleFFT(shiftstack)
+    update_grating_angle_error(grating_angle, piezo_angle)
+    return piezo_angle, grating_angle
+
+
+def MeasureShiftGratingEdge(
+    um_range: Sequence[float] | np.ndarray = np.arange(0, 300, 10),
+    shift_dy: int = -150,
+    shift_dx: int = -200,
+) -> tuple[float, float]:
+    """Piezo-Gitterwinkel ueber Kantenverschiebung bestimmen."""
+    stage.move_to_pos(x_addr, SIM31_SEcornerpos[0])
+    time.sleep(2.5)
+    stage.move_to_pos(y_addr, SIM31_SEcornerpos[1])
+    time.sleep(5)
+
+    shiftstack = acquire_shiftstack(um_range)
+    piezo_angle, grating_angle = AAF.AnalysePiezoAngleGratingEdge(shiftstack, shift_dy, shift_dx)
+    update_grating_angle_error(grating_angle, piezo_angle)
+    return piezo_angle, grating_angle
+
+
+def MeasureSingleImageGratingAngle() -> float:
+    """Gitterwinkel aus einem Einzelbild bestimmen."""
+    stage.move_to_pos(y_addr, SIM31_centerpos[1])
+    time.sleep(1)
+    stage.move_to_pos(x_addr, SIM31_centerpos[0])
+    time.sleep(1)
+
+    single_frame = acquire_single_frame()
+    angle_deg = SingleImageGratingAngle(single_frame)
+    update_grating_angle_error(angle_deg, piezoshift_angle_to_cam)
+    return angle_deg
+
+
+def update_grating_angle_error(grating_angle: float, shift_angle: float) -> float:
+    """Aktualisiert die globalen Winkelwerte und gibt den Fehler zurueck."""
+    global grating_angle_error, piezoshift_angle_to_cam, grating_angle_to_cam
+
+    piezoshift_angle_to_cam = shift_angle
+    grating_angle_to_cam = grating_angle
+
+    grating_angle_error = -1 * (grating_angle_to_cam - THEORIE_WINKEL_DEG - piezoshift_angle_to_cam)
+    grating_angle_error_mrad = grating_angle_error * np.pi / 0.18
+    print(
+        f"New grating angle error is {round(grating_angle_error, 3)} degrees, "
+        f"or {round(grating_angle_error_mrad, 2)} mrad."
+    )
+    if abs(grating_angle_error_mrad) < GRATING_ERROR_TOLERANCE_MRAD:
+        print(f"Grating angle error is within tolerance of {GRATING_ERROR_TOLERANCE_MRAD} mrad.")
+    else:
+        direction = "clockwise" if grating_angle_error > 0 else "counter-clockwise"
+        print(f"Tolerance not yet reached. Please adjust grating ({direction}).")
+    return grating_angle_error
+
+
+__all__ = [
+    "capture_frame",
+    "process_image",
+    "particle_detection",
+    "analyse_current_frame_particles",
+    "analyse_current_frame_angle",
+    "SingleImageGratingAngle",
+    "autofocus",
+    "startpos",
+    "wait_time",
+    "acquire_single_frame",
+    "acquire_shiftstack",
+    "save_shiftstack",
+    "GratingShiftwSave",
+    "MeasureShiftFFT",
+    "MeasureShiftGratingEdge",
+    "MeasureSingleImageGratingAngle",
+    "update_grating_angle_error",
+    "connect_DPC",
+    "close_DPC",
+]
 
