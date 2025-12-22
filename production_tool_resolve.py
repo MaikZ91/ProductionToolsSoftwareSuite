@@ -1944,36 +1944,12 @@ class StageGUI(QWidget):
         statusCol = QVBoxLayout(); statusCol.setSpacing(4)
         self.lblPhase = QLabel("-")
         self.pbar = QProgressBar(); self._reset_progress()
-<<<<<<< HEAD:stagetest.py
-        self.cardStatus.body.addWidget(self.lblPhase)
-        self.cardStatus.body.addWidget(self.pbar)
-
-        # Kalibrierdaten
-        self.cardStatus.body.addItem(QSpacerItem(0,6, QSizePolicy.Minimum, QSizePolicy.Fixed))
-        self.lblCalibTitle = QLabel("Kalibrierung"); self.lblCalibTitle.setObjectName("CardTitle")
-        self.cardStatus.body.addWidget(self.lblCalibTitle)
-        self.lblCalib = QLabel("—")
-        self.cardStatus.body.addWidget(self.lblCalib)
-
-        # QA-Chips
-        self.cardStatus.body.addItem(QSpacerItem(0,6, QSizePolicy.Minimum, QSizePolicy.Fixed))
-        qaRow = QHBoxLayout()
-        self.chipMeasQA = QLabel("Messung QA: —"); self.chipMeasQA.setObjectName("Chip")
-        self.chipDurQA  = QLabel(f"Kombi-Test QA (Limit {DUR_MAX_UM:.1f} µm): —"); self.chipDurQA.setObjectName("Chip")
-        qaRow.addWidget(self.chipMeasQA); qaRow.addWidget(self.chipDurQA)
-        self.cardStatus.body.addLayout(qaRow)
-
-        # Neue Stage testen
-        self.cardStatus.body.addItem(QSpacerItem(0,8, QSizePolicy.Minimum, QSizePolicy.Fixed))
-        self.btnNewStage = QPushButton("✨ Neue Stage testen")
-=======
         statusCol.addWidget(self.lblPhase)
         statusCol.addWidget(self.pbar)
         statusCol.addWidget(UiFactory.section_label("Kalibrierung"))
         self.lblCalib = QLabel("-")
         statusCol.addWidget(self.lblCalib)
         self.btnNewStage = UiFactory.button("Neue Stage testen", variant="primary", min_height=32)
->>>>>>> 659a8bcf2c57ee6666e6e99c3f41743bbb661c9c:production_tool_resolve.py
         self.btnNewStage.setVisible(False)
         self.btnNewStage.clicked.connect(self._new_stage)
         statusCol.addWidget(self.btnNewStage)
@@ -2009,10 +1985,6 @@ class StageGUI(QWidget):
         # Linke Spalte: Kamera + Status + Chart
         leftCol = QVBoxLayout(); leftCol.setSpacing(10)
         cam_provider = lambda: gs.capture_frame()
-<<<<<<< HEAD:stagetest.py
-        self.gitterschieberCam = LiveCamEmbed(cam_provider, interval_ms=200, parent=self.gitterschieberPage)
-        gsCard.body.addWidget(self.gitterschieberCam)
-=======
         self.gitterschieberCam = LiveCamEmbed(
             cam_provider,
             interval_ms=150,
@@ -2020,7 +1992,6 @@ class StageGUI(QWidget):
             parent=self.gitterschieberPage,
         )
         leftCol.addWidget(self.gitterschieberCam)
->>>>>>> 659a8bcf2c57ee6666e6e99c3f41743bbb661c9c:production_tool_resolve.py
 
         angleRow = QHBoxLayout(); angleRow.setSpacing(8)
         angleRow.addWidget(UiFactory.section_label("Angle:"))
@@ -2332,8 +2303,6 @@ class StageGUI(QWidget):
         """
         try:
             self.stack.setCurrentWidget(self.gitterschieberPage)
-<<<<<<< HEAD:stagetest.py
-=======
             self._gitterschieber_total_count = 0
             try:
                 self.gitterschieberFrameCount.clear()
@@ -2359,7 +2328,6 @@ class StageGUI(QWidget):
                 self.btnGitterschieberParticle.setFocus()
             except Exception:
                 pass
->>>>>>> 659a8bcf2c57ee6666e6e99c3f41743bbb661c9c:production_tool_resolve.py
             self._set_status("Gitterschieber geöffnet.")
         except Exception as exc:
             QMessageBox.warning(self, "Gitterschieber", f"Start fehlgeschlagen:\n{exc}")
@@ -2958,11 +2926,7 @@ f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm |  Ergebnis: {self._dur_ma
         self.lblCalib.setText("—"); self._calib_vals = {"X": None, "Y": None}
         self._meas_max_um = None; self._dur_max_um = None
         self._set_chip(self.chipMeasQA, "Messung QA: —", ok=True)
-<<<<<<< HEAD:stagetest.py
-        self._set_chip(self.chipDurQA, f"Kombi-Test QA (Limit {DUR_MAX_UM:.1f} µm): —", ok=True)
-=======
         self._set_chip(self.chipDurQA, f"Dauertest QA (Limit {resolve_stage.DUR_MAX_UM:.1f} µm): —", ok=True)
->>>>>>> 659a8bcf2c57ee6666e6e99c3f41743bbb661c9c:production_tool_resolve.py
 
         self.lblTimer.setText(self._fmt_hms(self._duration_sec))
         self._set_dauer_button(False)
