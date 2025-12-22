@@ -117,6 +117,7 @@ class ZTriebController(QObject):
 
     logMessage = Signal(str)
     runCounterChanged = Signal(int)
+    positionChanged = Signal(int)
     hardwareAvailable = Signal(bool)
 
     lbPort = 1
@@ -131,7 +132,9 @@ class ZTriebController(QObject):
         super().__init__()
         self._bus = None
         self._driver = None
-        self._dummy = False  # Keinen Simulationsmodus mehr nutzen
+        self._dummy = False
+        self._polling = False
+        self._stop_polling_event = threading.Event()
 
     def connect_hardware(self):
         """(Re-)Establish the connection to the Z-Trieb driver."""
@@ -193,6 +196,30 @@ class ZTriebController(QObject):
             return False
         return True
 
+    def _start_polling(self):
+        if self._polling:
+            return
+        self._polling = True
+        self._stop_polling_event.clear()
+        threading.Thread(target=self._poll_loop, daemon=True).start()
+
+    def _stop_polling(self):
+        self._stop_polling_event.set()
+        self._polling = False
+
+    def _poll_loop(self):
+        while not self._stop_polling_event.is_set():
+            if self._driver:
+                try:
+                    pos, speed = self._driver.get_move()
+                    self.positionChanged.emit(int(pos))
+                    if speed == 0:
+                        break
+                except Exception:
+                    break
+            time.sleep(0.1)
+        self._polling = False
+
     # Utility
     def _emit_log(self, text: str):
         self.logMessage.emit(text)
@@ -207,6 +234,7 @@ class ZTriebController(QObject):
 
     # High level commands
     def goto_ref(self):
+        self._start_polling()
         d = self._driver
         if d is None and not self._ensure_driver():
             return
@@ -251,6 +279,7 @@ class ZTriebController(QObject):
             self._emit_log(f"[ERROR] goto_ref: {exc}")
 
     def goto_pos(self, slot_position: int):
+        self._start_polling()
         d = self._driver
         if d is None and not self._ensure_driver():
             return

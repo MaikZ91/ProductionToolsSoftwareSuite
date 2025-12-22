@@ -933,6 +933,81 @@ class AutofocusView(QWidget):
         except:
             pass
 
+class ZTriebVisualizer(QWidget):
+    """Circular gauge for the Z-Trieb motor position."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(220, 220)
+        self._current_pos = 0
+        self._max_steps = 2200
+        self._markers = {
+            0: "HOME",
+            400: "1MM",
+            2040: "0.17MM"
+        }
+
+    def set_position(self, pos):
+        self._current_pos = pos
+        self.update()
+
+    def _pos_to_angle(self, pos):
+        # 0..2200 steps -> -225..45 degrees
+        ratio = max(0, min(1, pos / self._max_steps))
+        return -225 + (ratio * 270)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        rect = self.rect().adjusted(15, 15, -15, -15)
+        size = min(rect.width(), rect.height())
+        center = rect.center()
+        
+        # Colors from main theme
+        bg_track = QColor(COLORS['surface_light'])
+        accent = QColor(COLORS['primary'])
+        text_muted = QColor(COLORS['text_muted'])
+        
+        # 1. Background Arc
+        painter.setPen(QPen(bg_track, 12, Qt.SolidLine, Qt.RoundCap))
+        # startAngle and spanAngle are in 1/16th of a degree
+        painter.drawArc(center.x() - size//2, center.y() - size//2, size, size, -225*16, 270*16)
+        
+        # 2. Markers
+        font = QFont(FONTS['ui'], 8, QFont.Bold)
+        painter.setFont(font)
+        for val, label in self._markers.items():
+            angle = self._pos_to_angle(val)
+            rad = np.radians(-angle) # Invert for screen coordinates
+            
+            p_inner = center + QPoint(int((size/2-15) * np.cos(rad)), int((size/2-15) * np.sin(rad)))
+            p_outer = center + QPoint(int((size/2-2) * np.cos(rad)), int((size/2-2) * np.sin(rad)))
+            
+            painter.setPen(QPen(QColor(COLORS['border']), 2))
+            painter.drawLine(p_inner, p_outer)
+            
+            painter.setPen(text_muted)
+            t_pos = center + QPoint(int((size/2-35) * np.cos(rad)), int((size/2-35) * np.sin(rad)))
+            painter.drawText(t_pos.x()-25, t_pos.y()-10, 50, 20, Qt.AlignCenter, label)
+
+        # 3. Needle
+        angle = self._pos_to_angle(self._current_pos)
+        rad = np.radians(-angle)
+        
+        painter.setPen(QPen(accent, 4, Qt.SolidLine, Qt.RoundCap))
+        needle_end = center + QPoint(int((size/2-10)*np.cos(rad)), int((size/2-10)*np.sin(rad)))
+        painter.drawLine(center, needle_end)
+        
+        # 4. Center Cap
+        painter.setBrush(bg_track)
+        painter.setPen(QPen(accent, 2))
+        painter.drawEllipse(center, 6, 6)
+        
+        # 5. Value
+        painter.setPen(QColor(COLORS['text']))
+        painter.setFont(QFont(FONTS['mono'], 14, QFont.Bold))
+        painter.drawText(self.rect(), Qt.AlignBottom | Qt.AlignHCenter, f"{int(self._current_pos)} STEPS")
+
 class ZTriebView(QWidget):
     """Modern UI for controlling the Objektivringversteller (Z-Trieb)."""
     def __init__(self, parent=None):
@@ -949,6 +1024,7 @@ class ZTriebView(QWidget):
         # Connect signals
         self.controller.logMessage.connect(self._append_log)
         self.controller.runCounterChanged.connect(self._update_counter)
+        self.controller.positionChanged.connect(self.visualizer.set_position)
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -963,6 +1039,10 @@ class ZTriebView(QWidget):
         control_card = Card("Drive Controls")
         cl = QVBoxLayout()
         cl.setSpacing(12)
+        
+        # Visualizer added here instead of just buttons
+        self.visualizer = ZTriebVisualizer()
+        cl.addWidget(self.visualizer, alignment=Qt.AlignCenter)
         
         self.btn_ref = ModernButton("Reference Run", "primary")
         self.btn_ref.clicked.connect(lambda: self._submit(self.controller.goto_ref))
