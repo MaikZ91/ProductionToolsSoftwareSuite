@@ -71,15 +71,15 @@ DASHBOARD_WIDGET_CLS, _DASHBOARD_IMPORT_ERROR = (None, None)
 
 # --- THEME CONFIGURATION (Matches Tailwind Config) ---
 COLORS = {
-    "bg": "#080f1a",           # Main Background
-    "surface": "#111b2b",      # Card Background
-    "surface_light": "#1c2a42",# Inputs / Hover
-    "border": "#1b2a3f",
-    "primary": "#5ce2cf",      # Mint
-    "primary_hover": "#46bfa9",
-    "secondary": "#f0b74a",    # Amber
-    "text": "#e8edf5",
-    "text_muted": "#9fb2c8",
+    "bg": "#000000",           # Main Background
+    "surface": "#0d0d0d",      # Card Background
+    "surface_light": "#1a1a1a",# Inputs / Hover
+    "border": "#262626",
+    "primary": "#ffffff",      # White accents
+    "primary_hover": "#cccccc",
+    "secondary": "#a0a0a0",    # Lighter Gray for highlights
+    "text": "#ffffff",
+    "text_muted": "#909090",
     "danger": "#ef4444",
     "success": "#10b981",
 }
@@ -88,6 +88,12 @@ FONTS = {
     "ui": "Segoe UI", # Fallback for Inter/Manrope
     "mono": "Consolas",
 }
+
+def hex_to_rgba(hex_color, alpha):
+    """Converts #RRGGBB to rgba(r, g, b, alpha) for reliable Qt styling."""
+    hex_color = hex_color.lstrip('#')
+    rgb = tuple(int(hex_color[i:i+2], 16) for i in range(0, 6, 2))
+    return f"rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, {alpha})"
 
 # Global Stylesheet for things hard to style in Python code
 GLOBAL_STYLESHEET = f"""
@@ -126,10 +132,26 @@ QScrollBar::handle:horizontal {{
 }}
 
 /* GENERIC WIDGETS */
+QPushButton {{
+    background-color: {COLORS['surface_light']};
+    border: 1px solid {COLORS['border']};
+    border-radius: 6px;
+    padding: 8px 16px;
+    color: {COLORS['text']};
+    font-weight: 600;
+}}
+QPushButton:hover {{
+    background-color: {COLORS['surface']};
+    border-color: {COLORS['text_muted']};
+}}
+QPushButton:pressed {{
+    background-color: {COLORS['border']};
+}}
+
 QLineEdit, QTextEdit {{
     background-color: {COLORS['surface_light']};
     border: 1px solid {COLORS['border']};
-    border-radius: 10px;
+    border-radius: 6px;
     padding: 10px 12px;
     color: {COLORS['text']};
     selection-background-color: {COLORS['primary']};
@@ -137,7 +159,7 @@ QLineEdit, QTextEdit {{
     font-size: 13px;
 }}
 QLineEdit:focus, QTextEdit:focus {{
-    border: 1px solid {COLORS['primary']};
+    border: 1px solid {COLORS['text_muted']};
     background-color: {COLORS['surface']};
 }}
 
@@ -184,6 +206,31 @@ QSlider::handle:horizontal {{
     margin: -6px 0;
     border-radius: 8px;
 }}
+
+/* PROGRESS BAR */
+QProgressBar {{
+    background-color: {COLORS['surface_light']};
+    border: 1px solid {COLORS['border']};
+    border-radius: 4px;
+    text-align: center;
+    color: {COLORS['text']};
+}}
+QProgressBar::chunk {{
+    background-color: {COLORS['primary']};
+    border-radius: 2px;
+}}
+
+/* SPIN BOX */
+QSpinBox, QDoubleSpinBox {{
+    background-color: {COLORS['surface_light']};
+    border: 1px solid {COLORS['border']};
+    border-radius: 6px;
+    padding: 5px;
+    color: {COLORS['text']};
+}}
+QSpinBox:focus, QDoubleSpinBox:focus {{
+    border-color: {COLORS['text_muted']};
+}}
 """
 
 # --- CUSTOM COMPONENTS ---
@@ -201,7 +248,7 @@ class ModernButton(QPushButton):
     def set_variant(self, variant):
         base_style = """
             QPushButton {
-                border-radius: 12px;
+                border-radius: 6px;
                 font-weight: 600;
                 font-size: 13px;
                 padding: 0 16px;
@@ -224,25 +271,25 @@ class ModernButton(QPushButton):
                     color: {COLORS['text']};
                     border: 1px solid {COLORS['border']};
                 }}
-                QPushButton:hover {{ border: 1px solid {COLORS['primary']}; background-color: {COLORS['border']}; }}
+                QPushButton:hover {{ border: 1px solid {COLORS['text_muted']}; background-color: {COLORS['border']}; }}
             """)
         elif variant == "ghost":
             self.setStyleSheet(base_style + f"""
                 QPushButton {{
                     background-color: transparent;
                     color: {COLORS['text_muted']};
-                    border: none;
+                    border: 1px solid transparent;
                 }}
-                QPushButton:hover {{ background-color: {COLORS['surface_light']}; color: {COLORS['text']}; }}
+                QPushButton:hover {{ background-color: {COLORS['surface_light']}; color: {COLORS['text']}; border: 1px solid {COLORS['border']}; }}
             """)
         elif variant == "danger":
             self.setStyleSheet(base_style + f"""
                 QPushButton {{
-                    background-color: rgba(239, 68, 68, 0.15);
+                    background-color: rgba(239, 68, 68, 0.1);
                     color: {COLORS['danger']};
-                    border: 1px solid rgba(239, 68, 68, 0.3);
+                    border: 1px solid rgba(239, 68, 68, 0.2);
                 }}
-                QPushButton:hover {{ background-color: rgba(239, 68, 68, 0.25); }}
+                QPushButton:hover {{ background-color: rgba(239, 68, 68, 0.2); }}
             """)
 
 class Card(QFrame):
@@ -255,7 +302,7 @@ class Card(QFrame):
             QFrame {{
                 background-color: {COLORS['surface']};
                 border: 1px solid {COLORS['border']};
-                border-radius: 16px;
+                border-radius: 8px;
             }}
         """)
         
@@ -351,68 +398,80 @@ class DashboardView(QWidget):
         self.data_updated.connect(self._on_data_received)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(15)
 
-        # 0. Selection & Refresh Controls
-        controls_layout = QHBoxLayout()
-        controls_layout.setSpacing(10)
+        # Main horizontal split
+        main_h_split = QHBoxLayout()
+        main_h_split.setSpacing(15)
+
+        # --- LEFT SIDE: CONTROLS & KPIs (Wrapped in ScrollArea) ---
+        self.left_scroll = QScrollArea()
+        self.left_scroll.setWidgetResizable(True)
+        self.left_scroll.setFrameShape(QFrame.NoFrame)
+        self.left_scroll.setStyleSheet("background: transparent; border: none;")
+        
+        left_container = QWidget()
+        left_container.setStyleSheet("background: transparent;")
+        left_side = QVBoxLayout(left_container)
+        left_side.setContentsMargins(0, 0, 5, 0) # Small margin for scrollbar
+        left_side.setSpacing(15)
+
+        # 0. Selection & Refresh
+        controls_card = Card("Data Source")
+        cl = QVBoxLayout()
+        cl.setSpacing(8)
         
         self.combo_testtype = QComboBox()
         self.combo_testtype.addItems(["kleberoboter", "gitterschieber_tool", "stage_test"])
         self.combo_testtype.currentIndexChanged.connect(self.trigger_refresh)
-        self.combo_testtype.setMinimumWidth(200)
-        self.combo_testtype.setStyleSheet(f"""
-            QComboBox {{
-                background-color: {COLORS['surface_light']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 8px;
-                padding: 8px;
-                font-weight: 600;
-            }}
-            QComboBox:hover {{ border-color: {COLORS['primary']}; }}
-        """)
+        self.combo_testtype.setFixedHeight(36)
+        cl.addWidget(self.combo_testtype)
         
         self.status_indicator = QPushButton("● LIVE")
         self.status_indicator.setCursor(Qt.PointingHandCursor)
         self.status_indicator.clicked.connect(self.trigger_refresh)
-        self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['success']}; font-weight: 800; font-size: 11px; margin-left: 10px; }}")
+        self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['success']}; font-weight: 800; font-size: 11px; text-align: left; padding-left: 5px; }}")
+        cl.addWidget(self.status_indicator)
         
-        controls_layout.addWidget(QLabel("SOURCE:"))
-        controls_layout.addWidget(self.combo_testtype)
-        controls_layout.addWidget(self.status_indicator)
-        controls_layout.addStretch()
-        
-        layout.addLayout(controls_layout)
+        controls_card.add_layout(cl)
+        left_side.addWidget(controls_card)
 
-        # 1. KPIs
-        kpi_layout = QHBoxLayout()
-        kpi_layout.setSpacing(24)
-        
-        self.kpi_total = self.add_kpi(kpi_layout, "Total Output", "0", "Records", COLORS['primary'])
-        self.kpi_pass = self.add_kpi(kpi_layout, "Pass Rate", "0%", "Success", COLORS['secondary'])
-        self.kpi_last = self.add_kpi(kpi_layout, "Last Result", "---", "Status", COLORS['success'])
-        
-        layout.addLayout(kpi_layout)
+        # 1. KPIs (Vertical Stack for compactness)
+        kpi_card = Card("Key Metrics")
+        kl = QVBoxLayout()
+        kl.setSpacing(10)
+        self.kpi_total = self.add_kpi_compact(kl, "Total", "0", COLORS['primary'])
+        self.kpi_pass = self.add_kpi_compact(kl, "Pass", "0%", COLORS['secondary'])
+        self.kpi_last = self.add_kpi_compact(kl, "Latest", "---", COLORS['success'])
+        kpi_card.add_layout(kl)
+        left_side.addWidget(kpi_card)
 
-        # 2. Table
-        table_card = Card("Recent Test Activity")
-        
+        # 3. Data Entry mask (Compact version)
+        self.setup_entry_ui_compact(left_side)
+        left_side.addStretch()
+
+        self.left_scroll.setWidget(left_container)
+        main_h_split.addWidget(self.left_scroll, 1)
+
+        # --- RIGHT SIDE: TABLE ---
+        table_card = Card("Recent Activity")
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["Timestamp", "Batch/Barcode", "Operator", "Type", "Status", "Details"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["Time", "Barcode", "User", "Status", "Details"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.setFocusPolicy(Qt.NoFocus)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setShowGrid(False)
-        self.table.setMinimumHeight(200) # Reduced to fit screens
         
         table_card.add_widget(self.table)
-        layout.addWidget(table_card, 2) # Give table more priority
+        main_h_split.addWidget(table_card, 2)
 
-        # 3. Data Entry mask (Send New Record)
-        self.setup_entry_ui(layout)
+        layout.addLayout(main_h_split)
 
         # 4. Live Update Timer
         self.timer = QTimer(self)
@@ -421,90 +480,71 @@ class DashboardView(QWidget):
         
         self.update_data()
 
-    def setup_entry_ui(self, layout):
-        entry_card = Card("Send New Test Record")
-        entry_card.setMinimumHeight(150)
-        entry_card.setMaximumHeight(220)
-        
+    def setup_entry_ui_compact(self, layout):
+        entry_card = Card("New Record")
         entry_layout = QVBoxLayout()
         entry_layout.setSpacing(8)
         
-        # Common Fields (Horizontal)
-        common_row = QHBoxLayout()
-        common_row.setSpacing(16)
-        
         self.le_barcode = QLineEdit()
-        self.le_barcode.setPlaceholderText("Scan Barcode...")
+        self.le_barcode.setPlaceholderText("Barcode...")
         self.le_user = QLineEdit()
-        self.le_user.setPlaceholderText("User ID...")
-        self.le_user.setFixedWidth(150)
+        self.le_user.setPlaceholderText("User...")
         
-        common_row.addWidget(QLabel("BARCODE:"))
-        common_row.addWidget(self.le_barcode)
-        common_row.addWidget(QLabel("USER:"))
-        common_row.addWidget(self.le_user)
+        row1 = QHBoxLayout()
+        row1.addWidget(self.le_barcode)
+        row1.addWidget(self.le_user)
+        entry_layout.addLayout(row1)
         
-        entry_layout.addLayout(common_row)
-        
-        # Test Specific Stack
         self.entry_stack = QStackedWidget()
-        
-        # Widget Kleberoboter
+        # Same widgets as before but more compact if needed
         w_kleber = QWidget()
-        l_kleber = QHBoxLayout(w_kleber)
-        l_kleber.setContentsMargins(0,0,0,0)
-        self.cb_ok = QCheckBox("Test OK?")
-        self.cb_ok.setStyleSheet("font-weight: bold; color: " + COLORS['primary'] + ";")
-        l_kleber.addWidget(self.cb_ok)
-        l_kleber.addStretch()
+        l_kleber = QHBoxLayout(w_kleber); l_kleber.setContentsMargins(0,0,0,0)
+        self.cb_ok = QCheckBox("Test OK?"); self.cb_ok.setStyleSheet("font-weight: bold; color: " + COLORS['primary'] + ";")
+        l_kleber.addWidget(self.cb_ok); l_kleber.addStretch()
         
-        # Widget Gitterschieber
         w_git = QWidget()
-        l_git = QHBoxLayout(w_git)
-        l_git.setContentsMargins(0,0,0,0)
-        self.le_particles = QLineEdit()
-        self.le_particles.setPlaceholderText("Particle Count")
-        self.le_angle = QLineEdit()
-        self.le_angle.setPlaceholderText("Angle (deg)")
-        l_git.addWidget(QLabel("PARTICLES:"))
-        l_git.addWidget(self.le_particles)
-        l_git.addWidget(QLabel("ANGLE:"))
-        l_git.addWidget(self.le_angle)
+        l_git = QHBoxLayout(w_git); l_git.setContentsMargins(0,0,0,0); l_git.setSpacing(5)
+        self.le_particles = QLineEdit(); self.le_particles.setPlaceholderText("P-Count")
+        self.le_angle = QLineEdit(); self.le_angle.setPlaceholderText("Angle")
+        l_git.addWidget(self.le_particles); l_git.addWidget(self.le_angle)
         
-        # Widget Stage
         w_stage = QWidget()
-        l_stage = QHBoxLayout(w_stage)
-        l_stage.setContentsMargins(0,0,0,0)
-        self.le_pos_name = QLineEdit()
-        self.le_pos_name.setPlaceholderText("Position (e.g. A1)")
-        self.le_fov = QLineEdit()
-        self.le_fov.setPlaceholderText("FOV")
-        l_stage.addWidget(QLabel("POS:"))
-        l_stage.addWidget(self.le_pos_name)
-        l_stage.addWidget(QLabel("FOV:"))
-        l_stage.addWidget(self.le_fov)
+        l_stage = QHBoxLayout(w_stage); l_stage.setContentsMargins(0,0,0,0); l_stage.setSpacing(5)
+        self.le_pos_name = QLineEdit(); self.le_pos_name.setPlaceholderText("Pos")
+        self.le_fov = QLineEdit(); self.le_fov.setPlaceholderText("FOV")
+        l_stage.addWidget(self.le_pos_name); l_stage.addWidget(self.le_fov)
         
-        self.entry_stack.addWidget(w_kleber)    # Index 0
-        self.entry_stack.addWidget(w_git)       # Index 1
-        self.entry_stack.addWidget(w_stage)     # Index 2
-        
-        self.entry_stack.setCurrentIndex(0)
+        self.entry_stack.addWidget(w_kleber); self.entry_stack.addWidget(w_git); self.entry_stack.addWidget(w_stage)
         entry_layout.addWidget(self.entry_stack)
         
-        # Buttons Row
         btn_row = QHBoxLayout()
-        self.btn_clear = ModernButton("Clear Fields", "ghost")
-        self.btn_clear.clicked.connect(self.clear_entry_fields)
-        self.btn_send = ModernButton("Send to Database", "primary")
+        self.btn_send = ModernButton("Send", "primary")
         self.btn_send.clicked.connect(self.send_current_entry)
-        
-        btn_row.addStretch()
-        btn_row.addWidget(self.btn_clear)
         btn_row.addWidget(self.btn_send)
-        
         entry_layout.addLayout(btn_row)
+        
         entry_card.add_layout(entry_layout)
         layout.addWidget(entry_card)
+
+    def add_kpi_compact(self, layout, title, value, color):
+        container = QFrame()
+        container.setStyleSheet(f"background-color: {COLORS['surface_light']}; border-radius: 8px; padding: 10px;")
+        l = QHBoxLayout(container)
+        l.setContentsMargins(10, 5, 10, 5)
+        
+        t_lbl = QLabel(title.upper())
+        t_lbl.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 700; font-size: 10px; border:none;")
+        
+        v_lbl = QLabel(value)
+        v_lbl.setStyleSheet(f"color: {COLORS['text']}; font-weight: 800; font-size: 18px; border:none;")
+        
+        l.addWidget(t_lbl)
+        l.addStretch()
+        l.addWidget(v_lbl)
+        
+        layout.addWidget(container)
+        container.value_label = v_lbl
+        return container
 
     def trigger_refresh(self):
         """Manually restart the timer and fetch data."""
@@ -551,22 +591,21 @@ class DashboardView(QWidget):
             self.kpi_total.value_label.setText("---")
             self.kpi_pass.value_label.setText("---")
             self.kpi_last.value_label.setText("N/A")
-            self.kpi_last.value_label.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 800; font-size: 22px; border:none;")
             
             # Show connection error in table
             self.table.setRowCount(1)
             item = QTableWidgetItem("Datenbankverbindung nicht verfügbar")
             item.setTextAlignment(Qt.AlignCenter)
             item.setForeground(QBrush(QColor(COLORS['danger'])))
-            item.setFont(QFont(FONTS['ui'], 12, QFont.Bold))
+            item.setFont(QFont(FONTS['ui'], 11, QFont.Bold))
             self.table.setItem(0, 0, item)
-            for col in range(1, 6):
+            for col in range(1, 5):
                 self.table.setItem(0, col, QTableWidgetItem(""))
-            self.table.setSpan(0, 0, 1, 6) # Span across all columns
+            self.table.setSpan(0, 0, 1, 5) # Span across all columns
             return
         else:
             self.status_indicator.setText("● LIVE")
-            self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['success']}; font-weight: 800; font-size: 11px; margin-left: 10px; }}")
+            self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['success']}; font-weight: 800; font-size: 11px; text-align: left; padding-left: 5px; }}")
             # Clear potential spans from error state
             self.table.clearSpans()
 
@@ -586,49 +625,38 @@ class DashboardView(QWidget):
         self.kpi_pass.value_label.setText(f"{ok_ratio}%")
         self.kpi_last.value_label.setText(last_result)
         
-        # Update colors based on status
-        if last_result == "FAIL":
-            self.kpi_last.value_label.setStyleSheet(f"color: {COLORS['danger']}; font-weight: 800; font-size: 22px; border:none;")
-        elif last_result == "OK":
-            self.kpi_last.value_label.setStyleSheet(f"color: {COLORS['success']}; font-weight: 800; font-size: 22px; border:none;")
-        else:
-            self.kpi_last.value_label.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 800; font-size: 22px; border:none;")
+        # Color based on status
+        color = COLORS['text']
+        if last_result == "FAIL": color = COLORS['danger']
+        elif last_result == "OK": color = COLORS['success']
+        self.kpi_last.value_label.setStyleSheet(f"color: {color}; font-weight: 800; font-size: 18px; border:none;")
 
         # Update Table
         self.table.setRowCount(len(df))
         for i, row in df.iterrows():
-            # Timestamp
+            # Time
             ts = row.get("StartTest", "---")
             ts_str = ts.strftime("%H:%M:%S") if pd.notna(ts) else "---"
             self.table.setItem(i, 0, QTableWidgetItem(ts_str))
             
-            # Barcode/Batch
+            # Barcode
             barcode = str(row.get("barcodenummer", "---"))
             self.table.setItem(i, 1, QTableWidgetItem(barcode))
             
-            # Operator
+            # User
             user = str(row.get("user", "---"))
             self.table.setItem(i, 2, QTableWidgetItem(user))
-            
-            # Type
-            type_item = QTableWidgetItem(testtype)
-            type_item.setForeground(QBrush(QColor(COLORS['text'])))
-            self.table.setItem(i, 3, type_item)
             
             # Status
             status_val = "OK"
             if "ok" in row and not pd.isna(row["ok"]):
                 status_val = "OK" if bool(row["ok"]) else "FAIL"
             
-            status_widget = QWidget()
-            sl = QHBoxLayout(status_widget)
-            sl.setContentsMargins(0,0,0,0)
-            sl.setAlignment(Qt.AlignLeft)
             badge = StatusBadge(status_val, "success" if status_val == "OK" else "danger")
-            sl.addWidget(badge)
-            self.table.setCellWidget(i, 4, status_widget)
+            # We wrap it for alignment if needed, but for simplicity:
+            self.table.setCellWidget(i, 3, badge)
             
-            # Details (JSON payload or similar)
+            # Details
             details = ""
             if testtype == "gitterschieber_tool":
                 details = f"P:{row.get('particle_count', '?')} A:{row.get('justage_angle', '?')}°"
@@ -640,7 +668,7 @@ class DashboardView(QWidget):
             det_item = QTableWidgetItem(details)
             det_item.setForeground(QBrush(QColor(COLORS['text_muted'])))
             det_item.setFont(QFont(FONTS['mono'], 9))
-            self.table.setItem(i, 5, det_item)
+            self.table.setItem(i, 4, det_item)
             
         # Also sync entry stack index
         self.entry_stack.setCurrentIndex(self.combo_testtype.currentIndex())
@@ -1031,26 +1059,32 @@ class ZTriebView(QWidget):
         layout.setContentsMargins(30, 30, 30, 30)
         layout.setSpacing(24)
 
-        # 1. Main Controls (Horizontal)
-        top_row = QHBoxLayout()
-        top_row.setSpacing(24)
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
 
-        # Control Card
-        control_card = Card("Drive Controls")
+        # Main horizontal split: Controls (Left) and Visualizer (Right)
+        main_h_layout = QHBoxLayout()
+        main_h_layout.setSpacing(15)
+
+        # --- LEFT COLUMN: CONTROLS ---
+        left_col = QVBoxLayout()
+        left_col.setSpacing(15)
+
+        # 1. Drive & Move Card (Consolidated)
+        control_card = Card("Drive & Position Control")
         cl = QVBoxLayout()
-        cl.setSpacing(12)
-        
-        # Visualizer added here instead of just buttons
-        self.visualizer = ZTriebVisualizer()
-        cl.addWidget(self.visualizer, alignment=Qt.AlignCenter)
-        
+        cl.setSpacing(10)
+
+        # Reference Button at top
         self.btn_ref = ModernButton("Reference Run", "primary")
         self.btn_ref.clicked.connect(lambda: self._submit(self.controller.goto_ref))
         cl.addWidget(self.btn_ref)
-        
+
+        # Preset positions grid (more compact)
         btn_grid = QGridLayout()
-        btn_grid.setSpacing(10)
-        
+        btn_grid.setSpacing(8)
         self.btn_home = ModernButton("Home", "secondary")
         self.btn_home.clicked.connect(lambda: self._submit(self.controller.goto_home))
         self.btn_1mm = ModernButton("1 mm", "secondary")
@@ -1060,68 +1094,62 @@ class ZTriebView(QWidget):
         
         btn_grid.addWidget(self.btn_home, 0, 0)
         btn_grid.addWidget(self.btn_1mm, 0, 1)
-        btn_grid.addWidget(self.btn_high, 1, 0, 1, 2)
-        
+        btn_grid.addWidget(self.btn_high, 0, 2)
         cl.addLayout(btn_grid)
-        control_card.add_layout(cl)
-        top_row.addWidget(control_card, 1)
 
-        # Move Card
-        move_card = Card("Custom Move")
-        ml = QVBoxLayout()
-        ml.setSpacing(15)
-        
-        lbl_pos = QLabel("TARGET POSITION (STEPS)")
-        lbl_pos.setStyleSheet(f"font-size: 11px; font-weight: 700; color: {COLORS['text_muted']}; border: none;")
-        ml.addWidget(lbl_pos)
-        
+        # Custom Move area (compact)
+        move_h = QHBoxLayout()
         self.spin_pos = QSpinBox()
         self.spin_pos.setRange(-100000, 100000)
         self.spin_pos.setValue(1000)
-        self.spin_pos.setStyleSheet(f"""
-            QSpinBox {{
-                background-color: {COLORS['surface_light']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 8px;
-                padding: 10px;
-                font-size: 16px;
-                font-family: {FONTS['mono']};
-                color: {COLORS['text']};
-            }}
-        """)
-        ml.addWidget(self.spin_pos)
+        self.spin_pos.setFixedWidth(120)
+        move_h.addWidget(self.spin_pos)
         
-        self.btn_move = ModernButton("Move to Position", "primary")
+        self.btn_move = ModernButton("Go to Custom Pos", "secondary")
         self.btn_move.clicked.connect(lambda: self._submit(self.controller.goto_pos, self.spin_pos.value()))
-        ml.addWidget(self.btn_move)
-        ml.addStretch()
-        
-        move_card.add_layout(ml)
-        top_row.addWidget(move_card, 1)
+        move_h.addWidget(self.btn_move)
+        cl.addLayout(move_h)
 
-        # Endurance Card
+        control_card.add_layout(cl)
+        left_col.addWidget(control_card)
+
+        # 2. Endurance Card (Compact)
         dauer_card = Card("Endurance Test")
-        dl = QVBoxLayout()
-        dl.setSpacing(12)
-        
+        dl = QHBoxLayout()
+        dl.setSpacing(15)
+
+        self.btn_dauer = ModernButton("Start Sequence", "primary")
+        self.btn_dauer.clicked.connect(self._toggle_dauertest)
+        dl.addWidget(self.btn_dauer, 1)
+
+        counter_layout = QVBoxLayout()
         self.lbl_runs = QLabel("0")
         self.lbl_runs.setAlignment(Qt.AlignCenter)
-        self.lbl_runs.setStyleSheet(f"font-size: 48px; font-weight: 800; color: {COLORS['secondary']}; border: none;")
-        dl.addWidget(self.lbl_runs)
+        self.lbl_runs.setStyleSheet(f"font-size: 28px; font-weight: 800; color: {COLORS['secondary']}; border: none;")
+        counter_layout.addWidget(self.lbl_runs)
         
-        lbl_desc = QLabel("COMPLETED RUNS")
+        lbl_desc = QLabel("RUNS")
         lbl_desc.setAlignment(Qt.AlignCenter)
-        lbl_desc.setStyleSheet(f"font-size: 11px; font-weight: 700; color: {COLORS['text_muted']}; border: none;")
-        dl.addWidget(lbl_desc)
-        
-        self.btn_dauer = ModernButton("Start Test Sequence", "primary")
-        self.btn_dauer.clicked.connect(self._toggle_dauertest)
-        dl.addWidget(self.btn_dauer)
-        
-        dauer_card.add_layout(dl)
-        top_row.addWidget(dauer_card, 1)
+        lbl_desc.setStyleSheet(f"font-size: 9px; font-weight: 700; color: {COLORS['text_muted']}; border: none;")
+        counter_layout.addWidget(lbl_desc)
+        dl.addLayout(counter_layout)
 
-        layout.addLayout(top_row)
+        dauer_card.add_layout(dl)
+        left_col.addWidget(dauer_card)
+        left_col.addStretch()
+
+        main_h_layout.addLayout(left_col, 2)
+
+        # --- RIGHT COLUMN: VISUALIZER ---
+        viz_card = Card("Visual Position")
+        vl = QVBoxLayout()
+        self.visualizer = ZTriebVisualizer()
+        vl.addWidget(self.visualizer, alignment=Qt.AlignCenter)
+        viz_card.add_layout(vl)
+        
+        main_h_layout.addWidget(viz_card, 3)
+
+        layout.addLayout(main_h_layout)
 
         # 2. Log Card
         log_card = Card("Controller Logs")
@@ -1129,7 +1157,7 @@ class ZTriebView(QWidget):
         self.log_view.setReadOnly(True)
         self.log_view.setStyleSheet(f"""
             QTextEdit {{
-                background-color: {COLORS['surface_light']}40;
+                background-color: {hex_to_rgba(COLORS['surface_light'], 0.2)};
                 border: 1px solid {COLORS['border']};
                 border-radius: 8px;
                 font-family: {FONTS['mono']};
@@ -1299,8 +1327,8 @@ class StageControlView(QWidget):
         # QA Box
         self.qa_box = QFrame()
         self.qa_box.setStyleSheet(f"""
-            background-color: {COLORS['success']}15;
-            border: 1px solid {COLORS['success']}40;
+            background-color: {hex_to_rgba(COLORS['success'], 0.1)};
+            border: 1px solid {hex_to_rgba(COLORS['success'], 0.3)};
             border-radius: 12px;
         """)
         qa_layout = QHBoxLayout(self.qa_box)
@@ -1632,10 +1660,10 @@ class StageControlView(QWidget):
             for spine in ax.spines.values():
                 spine.set_color(COLORS['border'])
 
-        ax1 = fig.add_subplot(221); style_ax(ax1); ax1.plot(idx, mot); ax1.set_title(f"Motorschritte · {axis}")
-        ax2 = fig.add_subplot(222); style_ax(ax2); ax2.scatter(mot, diff, c=idx, cmap="viridis"); ax2.set_title(f"Encoder-Delta · {axis}")
-        ax3 = fig.add_subplot(223); style_ax(ax3); ax3.plot(diff / epm * 1e6); ax3.set_title("Delta (µm) vs Index")
-        ax4 = fig.add_subplot(224); style_ax(ax4); ax4.scatter(mot / spm * 1e3, diff / epm * 1e6, c=idx, cmap="viridis"); ax4.set_title("Delta (µm) vs Weg")
+        ax1 = fig.add_subplot(221); style_ax(ax1); ax1.plot(idx, mot, color=COLORS['primary']); ax1.set_title(f"Motorschritte · {axis}")
+        ax2 = fig.add_subplot(222); style_ax(ax2); ax2.scatter(mot, diff, c=idx, cmap="gray"); ax2.set_title(f"Encoder-Delta · {axis}")
+        ax3 = fig.add_subplot(223); style_ax(ax3); ax3.plot(diff / epm * 1e6, color=COLORS['primary']); ax3.set_title("Delta (µm) vs Index")
+        ax4 = fig.add_subplot(224); style_ax(ax4); ax4.scatter(mot / spm * 1e3, diff / epm * 1e6, c=idx, cmap="gray"); ax4.set_title("Delta (µm) vs Weg")
         
         fig.suptitle(f"{axis}-Achse – Messung · Charge: {batch}", color=COLORS['text'], fontweight="semibold")
         fig.tight_layout()
@@ -1804,9 +1832,9 @@ class SidebarButton(QPushButton):
                 color: {COLORS['text']};
             }}
             QPushButton:checked {{
-                background-color: {COLORS['primary']}15;
+                background-color: {hex_to_rgba(COLORS['primary'], 0.15)};
                 color: {COLORS['primary']};
-                border: 1px solid {COLORS['primary']}30;
+                border: 1px solid {hex_to_rgba(COLORS['primary'], 0.3)};
             }}
         """)
 

@@ -200,6 +200,29 @@ def fetch_all_test_data(limit: int = 50) -> dict[str, pd.DataFrame]:
         data[testtype] = df
     return data
 
+def get_data_from_gateway(
+    device_id: str,
+    barcode: str,
+    limit: int = 1
+) -> dict:
+    """
+    Fragt den letzten Status eines Barcodes vom Gateway ab (GET).
+    """
+    payload = {
+        "mode": "QUERY",
+        "device_id": device_id,
+        "barcodenummer": barcode,
+        "limit": limit
+    }
+    
+    try:
+        with gateway_connect() as conn:
+            conn.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+            data = conn.recv(8192)
+            return json.loads(data.decode())
+    except Exception as e:
+        return {"status": "ERR", "message": str(e)}
+
 
 __all__ = [
     "DUMMY_BARCODE",
@@ -224,6 +247,15 @@ if __name__ == "__main__":
         device_id="kleberoboter",
         result="ok",
     )
+
+    bc = "999911200301203102103142124"
+    
+    # DATEN ABFRAGEN (GET)
+    db_status = get_data_from_gateway("kleberoboter", bc)
+    if db_status.get("status") == "OK" and db_status.get("data"):
+        print(f"Letztes Ergebnis in DB: {db_status['data'][0].get('ok')}")
+    else:
+        print("Keine Daten vorhanden oder Fehler.")
 
     conn = dbConnector.connection()
     try:
