@@ -339,10 +339,17 @@ class ModernChart(FigureCanvasQTAgg):
 # --- VIEWS ---
 
 class DashboardView(QWidget):
+    # Signal for background data update
+    data_updated = Signal(object, bool)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(f"background-color: {COLORS['bg']};")
+        
+        self._is_fetching = False
+        self.data_updated.connect(self._on_data_received)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
@@ -353,7 +360,7 @@ class DashboardView(QWidget):
         
         self.combo_testtype = QComboBox()
         self.combo_testtype.addItems(["kleberoboter", "gitterschieber_tool", "stage_test"])
-        self.combo_testtype.currentIndexChanged.connect(self.update_data)
+        self.combo_testtype.currentIndexChanged.connect(self.trigger_refresh)
         self.combo_testtype.setMinimumWidth(200)
         self.combo_testtype.setStyleSheet(f"""
             QComboBox {{
@@ -366,8 +373,10 @@ class DashboardView(QWidget):
             QComboBox:hover {{ border-color: {COLORS['primary']}; }}
         """)
         
-        self.status_indicator = QLabel("● LIVE")
-        self.status_indicator.setStyleSheet(f"color: {COLORS['success']}; font-weight: 800; font-size: 11px; margin-left: 10px;")
+        self.status_indicator = QPushButton("● LIVE")
+        self.status_indicator.setCursor(Qt.PointingHandCursor)
+        self.status_indicator.clicked.connect(self.trigger_refresh)
+        self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['success']}; font-weight: 800; font-size: 11px; margin-left: 10px; }}")
         
         controls_layout.addWidget(QLabel("SOURCE:"))
         controls_layout.addWidget(self.combo_testtype)
@@ -408,108 +417,50 @@ class DashboardView(QWidget):
         # 4. Live Update Timer
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_data)
-        self.timer.start(5000) # Update every 10 seconds
+        self.timer.start(10000) # Update every 10 seconds
         
         self.update_data()
 
-    def setup_entry_ui(self, layout):
-        entry_card = Card("Send New Test Record")
-        entry_card.setMinimumHeight(150)
-        entry_card.setMaximumHeight(220)
-        
-        entry_layout = QVBoxLayout()
-        entry_layout.setSpacing(8)
-        
-        # Common Fields (Horizontal)
-        common_row = QHBoxLayout()
-        common_row.setSpacing(16)
-        
-        self.le_barcode = QLineEdit()
-        self.le_barcode.setPlaceholderText("Scan Barcode...")
-        self.le_user = QLineEdit()
-        self.le_user.setPlaceholderText("User ID...")
-        self.le_user.setFixedWidth(150)
-        
-        common_row.addWidget(QLabel("BARCODE:"))
-        common_row.addWidget(self.le_barcode)
-        common_row.addWidget(QLabel("USER:"))
-        common_row.addWidget(self.le_user)
-        
-        entry_layout.addLayout(common_row)
-        
-        # Test Specific Stack
-        self.entry_stack = QStackedWidget()
-        
-        # Widget Kleberoboter
-        w_kleber = QWidget()
-        l_kleber = QHBoxLayout(w_kleber)
-        l_kleber.setContentsMargins(0,0,0,0)
-        self.cb_ok = QCheckBox("Test OK?")
-        self.cb_ok.setStyleSheet("font-weight: bold; color: " + COLORS['primary'] + ";")
-        l_kleber.addWidget(self.cb_ok)
-        l_kleber.addStretch()
-        
-        # Widget Gitterschieber
-        w_git = QWidget()
-        l_git = QHBoxLayout(w_git)
-        l_git.setContentsMargins(0,0,0,0)
-        self.le_particles = QLineEdit()
-        self.le_particles.setPlaceholderText("Particle Count")
-        self.le_angle = QLineEdit()
-        self.le_angle.setPlaceholderText("Angle (deg)")
-        l_git.addWidget(QLabel("PARTICLES:"))
-        l_git.addWidget(self.le_particles)
-        l_git.addWidget(QLabel("ANGLE:"))
-        l_git.addWidget(self.le_angle)
-        
-        # Widget Stage
-        w_stage = QWidget()
-        l_stage = QHBoxLayout(w_stage)
-        l_stage.setContentsMargins(0,0,0,0)
-        self.le_pos_name = QLineEdit()
-        self.le_pos_name.setPlaceholderText("Position (e.g. A1)")
-        self.le_fov = QLineEdit()
-        self.le_fov.setPlaceholderText("FOV")
-        l_stage.addWidget(QLabel("POS:"))
-        l_stage.addWidget(self.le_pos_name)
-        l_stage.addWidget(QLabel("FOV:"))
-        l_stage.addWidget(self.le_fov)
-        
-        self.entry_stack.addWidget(w_kleber)    # Index 0
-        self.entry_stack.addWidget(w_git)       # Index 1
-        self.entry_stack.addWidget(w_stage)     # Index 2
-        
-        entry_layout.addWidget(self.entry_stack)
-        
-        # Buttons Row
-        btn_row = QHBoxLayout()
-        self.btn_clear = ModernButton("Clear Fields", "ghost")
-        self.btn_clear.clicked.connect(self.clear_entry_fields)
-        self.btn_send = ModernButton("Send to Database", "primary")
-        self.btn_send.clicked.connect(self.send_current_entry)
-        
-        btn_row.addStretch()
-        btn_row.addWidget(self.btn_clear)
-        btn_row.addWidget(self.btn_send)
-        
-        entry_layout.addLayout(btn_row)
-        entry_card.add_layout(entry_layout)
-        layout.addWidget(entry_card)
+    def trigger_refresh(self):
+        """Manually restart the timer and fetch data."""
+        if not self.timer.isActive():
+            self.timer.start(10000)
+        self.update_data()
 
     def update_data(self):
-        """Fetches data from the database and updates the UI components."""
+        """Starts a background thread to fetch data."""
+        if self._is_fetching:
+            return
+            
+        testtype = self.combo_testtype.currentText()
+        self._is_fetching = True
+        
+        # UI Feedback
+        self.status_indicator.setText("● FETCHING...")
+        self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['text_muted']}; font-weight: 800; font-size: 11px; margin-left: 10px; }}")
+
+        def task():
+            try:
+                df, connected = db.fetch_test_data(testtype, limit=20)
+                self.data_updated.emit(df, connected)
+            except Exception as e:
+                print(f"Background Fetch Error: {e}")
+                self.data_updated.emit(pd.DataFrame(), False)
+        
+        threading.Thread(target=task, daemon=True).start()
+
+    def _on_data_received(self, df, connected):
+        """Processes the background result on the main thread."""
+        self._is_fetching = False
         testtype = self.combo_testtype.currentText()
         
-        try:
-            df, connected = db.fetch_test_data(testtype, limit=20)
-        except Exception as e:
-            print(f"Error calling fetch_test_data: {e}")
-            df, connected = pd.DataFrame(), False
-
         # Update Connection Status UI
         if not connected:
-            self.status_indicator.setText("● OFFLINE")
-            self.status_indicator.setStyleSheet(f"color: {COLORS['danger']}; font-weight: 800; font-size: 11px; margin-left: 10px;")
+            self.status_indicator.setText("● OFFLINE (Click to Retry)")
+            self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['danger']}; font-weight: 800; font-size: 11px; margin-left: 10px; }}")
+            
+            # Stop automatic retries as requested
+            self.timer.stop()
             
             # Update KPIs to fallback state
             self.kpi_total.value_label.setText("---")
@@ -530,7 +481,7 @@ class DashboardView(QWidget):
             return
         else:
             self.status_indicator.setText("● LIVE")
-            self.status_indicator.setStyleSheet(f"color: {COLORS['success']}; font-weight: 800; font-size: 11px; margin-left: 10px;")
+            self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['success']}; font-weight: 800; font-size: 11px; margin-left: 10px; }}")
             # Clear potential spans from error state
             self.table.clearSpans()
 
