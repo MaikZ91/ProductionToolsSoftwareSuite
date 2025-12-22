@@ -655,6 +655,7 @@ class Dashboard(QWidget):
         
         if not connected:
             # Show connection error in table if not connected
+            self.timer.stop()
             self.lbl_total.value_label.setText("---")
             self.lbl_ok.value_label.setText("---")
             self.lbl_last.value_label.setText("OFFLINE")
