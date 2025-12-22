@@ -609,21 +609,21 @@ class CombinedTestWorker(QObject):
     def run(self):
         try:
             move_idx = 0
-            phase = "small"
+            phase = "Kleine Amplituden"
             small_idx = 0
             large_idx = 0
             now = time.time()
             target_stop = self.stop_at_ts or float("inf")
 
             while self._running and now < target_stop:
-                phase_duration = self.small_phase_sec if phase == "small" else self.large_phase_sec
-                dwell = self.dwell_small if phase == "small" else self.dwell_large
+                phase_duration = self.small_phase_sec if phase == "Kleine Amplituden" else self.large_phase_sec
+                dwell = self.dwell_small if phase == "Kleine Amplituden" else self.dwell_large
                 phase_end = min(target_stop, now + phase_duration)
                 # rough estimate for progress in this phase
                 est_total = max(1, int(max(1.0, (phase_end - now) / max(0.01, dwell))))
 
                 while self._running and (time.time() < phase_end):
-                    if phase == "small":
+                    if phase == "Kleine Amplituden":
                         small_idx += 1
                         dx_raw = int(np.random.randint(-self.small_radius, self.small_radius + 1))
                         dy_raw = int(np.random.randint(-self.small_radius, self.small_radius + 1))
@@ -632,17 +632,17 @@ class CombinedTestWorker(QObject):
                         tx = self._clamp('X', self.center_x + dx)
                         ty = self._clamp('Y', self.center_y + dy)
                         move_idx += 1
-                        self._log_move("small", small_idx, est_total, tx, ty, move_idx, dwell)
+                        self._log_move("Kleine Amplituden", small_idx, est_total, tx, ty, move_idx, dwell)
                     else:
                         large_idx += 1
                         tx = int(np.random.randint(self.sc.low_lim['X'], self.sc.high_lim['X'] + 1))
                         ty = int(np.random.randint(self.sc.low_lim['Y'], self.sc.high_lim['Y'] + 1))
                         move_idx += 1
-                        self._log_move("large", large_idx, est_total, tx, ty, move_idx, dwell)
+                        self._log_move("Große Amplituden", large_idx, est_total, tx, ty, move_idx, dwell)
                     if self.stop_at_ts and time.time() >= self.stop_at_ts:
                         break
                 now = time.time()
-                phase = "large" if phase == "small" else "small"
+                phase = "Große Amplituden" if phase == "Kleine Amplituden" else "Kleine Amplituden"
 
             # Zurück zur Mitte, wenn nicht abgebrochen
             if self._running:

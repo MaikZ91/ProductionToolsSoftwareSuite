@@ -1029,13 +1029,33 @@ class ZTriebView(QWidget):
 class StageControlView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setup_ui()
+        self.sc = resolve_stage.StageController()
         self.running = False
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_chart)
-        self.x_data = deque(maxlen=60)
-        self.y1_data = deque(maxlen=60)
-        self.y2_data = deque(maxlen=60)
+        self.dauer_running = False
+        
+        # Test state
+        self._batch = "NoBatch"
+        self._run_outdir = None
+        self._last_outdir = None
+        self._duration_sec = 15 * 3600 # Default 15h
+        self._calib_vals = {"X": "---", "Y": "---"}
+        self._meas_max_um = None
+        self._dur_max_um = None
+        self.MEAS_MAX_UM = 10.0
+        
+        # Threading/Workers
+        self.thr = None
+        self.wrk = None
+        self.dauer_thr = None
+        self.dauer_wrk = None
+        self.executor = ThreadPoolExecutor(max_workers=3)
+
+        self.setup_ui()
+        
+        # Real-time data storage
+        self.x_data = deque(maxlen=300)
+        self.y1_data = deque(maxlen=300)
+        self.y2_data = deque(maxlen=300)
         self.tick = 0
 
     def setup_ui(self):
@@ -1047,29 +1067,70 @@ class StageControlView(QWidget):
         left_col = QVBoxLayout()
         left_col.setSpacing(24)
         
-        setup_card = Card("Test Setup")
+        setup_card = Card("Test-Setup")
         
         form_layout = QVBoxLayout()
         form_layout.setSpacing(15)
         
-        self.add_input(form_layout, "Operator", "M. Zschach")
-        self.add_input(form_layout, "Batch Number", "B2025-10-30-01")
+        self.inputs = {}
+        self.inputs["operator"] = self.add_input(form_layout, "Bediener", "M. Zschach")
+        self.inputs["batch"] = self.add_input(form_layout, "Chargennummer", "B2025-10-30-01")
         
-        lbl_note = QLabel("NOTES")
+        lbl_note = QLabel("NOTIZEN")
         lbl_note.setStyleSheet(f"font-size: 11px; font-weight: 700; color: {COLORS['text_muted']}; border: none;")
         form_layout.addWidget(lbl_note)
         
-        note_edit = QTextEdit()
-        note_edit.setPlaceholderText("Enter run comments...")
-        note_edit.setFixedHeight(70)
-        form_layout.addWidget(note_edit)
+        self.inputs["notes"] = QTextEdit()
+        self.inputs["notes"].setPlaceholderText("Kommentare hier eingeben...")
+        self.inputs["notes"].setFixedHeight(70)
+        form_layout.addWidget(self.inputs["notes"])
         
-        btn_layout = QGridLayout()
-        self.btn_start = ModernButton("Start Test", "primary")
-        self.btn_start.clicked.connect(self.toggle_test)
-        btn_layout.addWidget(self.btn_start, 0, 0, 1, 2)
-        btn_layout.addWidget(ModernButton("Open Folder", "secondary"), 1, 0)
-        btn_layout.addWidget(ModernButton("DB Sync", "ghost"), 1, 1)
+        btn_layout = QVBoxLayout()
+        btn_layout.setSpacing(10)
+        
+        self.btn_start = ModernButton("Kalibriermessung starten", "primary")
+        self.btn_start.clicked.connect(self.toggle_precision_test)
+        btn_layout.addWidget(self.btn_start)
+        
+        self.btn_dauer = ModernButton("Dauertest starten", "secondary")
+        self.btn_dauer.clicked.connect(self.toggle_endurance_test)
+        btn_layout.addWidget(self.btn_dauer)
+        
+        row_btn = QHBoxLayout()
+        self.btn_open = ModernButton("Ordner öffnen", "ghost")
+        self.btn_open.clicked.connect(self._open_folder)
+        self.btn_open.setEnabled(False)
+        row_btn.addWidget(self.btn_open)
+        
+        row_btn.addWidget(ModernButton("DB Sync", "ghost"))
+        btn_layout.addLayout(row_btn)
+        
+        # Progress Area
+        self.progress_container = QWidget()
+        pl = QVBoxLayout(self.progress_container)
+        pl.setContentsMargins(0, 10, 0, 0)
+        
+        self.lbl_phase = QLabel("BEREIT")
+        self.lbl_phase.setStyleSheet(f"font-size: 11px; font-weight: 800; color: {COLORS['primary']}; border: none;")
+        pl.addWidget(self.lbl_phase)
+        
+        self.progress = QProgressBar()
+        self.progress.setFixedHeight(8)
+        self.progress.setTextVisible(False)
+        self.progress.setStyleSheet(f"""
+            QProgressBar {{
+                background-color: {COLORS['surface_light']};
+                border: none;
+                border-radius: 4px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {COLORS['primary']};
+                border-radius: 4px;
+            }}
+        """)
+        pl.addWidget(self.progress)
+        
+        btn_layout.addWidget(self.progress_container)
         
         form_layout.addLayout(btn_layout)
         setup_card.add_layout(form_layout)
@@ -1077,14 +1138,14 @@ class StageControlView(QWidget):
         left_col.addWidget(setup_card)
         
         # Status Card
-        status_card = Card("QA Status")
+        status_card = Card("QA-Status")
         sl = QVBoxLayout()
         
         row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Calibration (X/Y)"))
-        calib_val = QLabel("1.002 / 0.998")
-        calib_val.setStyleSheet(f"font-family: {FONTS['mono']}; font-weight: bold; color: {COLORS['text']};")
-        row1.addWidget(calib_val)
+        row1.addWidget(QLabel("Kalibrierung (X/Y)"))
+        self.lbl_calib = QLabel("--- / ---")
+        self.lbl_calib.setStyleSheet(f"font-family: {FONTS['mono']}; font-weight: bold; color: {COLORS['text']};")
+        row1.addWidget(self.lbl_calib)
         sl.addLayout(row1)
         
         # QA Box
@@ -1097,7 +1158,7 @@ class StageControlView(QWidget):
         qa_layout = QHBoxLayout(self.qa_box)
         
         qa_info = QVBoxLayout()
-        qa_lbl = QLabel("Endurance QA")
+        qa_lbl = QLabel("Dauertest QA")
         qa_lbl.setStyleSheet(f"color: {COLORS['success']}; font-weight: bold; font-size: 12px; border:none; background:transparent;")
         qa_lim = QLabel("Limit: 8.0 µm")
         qa_lim.setStyleSheet(f"color: {COLORS['success']}; opacity: 0.8; font-size: 11px; border:none; background:transparent;")
@@ -1121,11 +1182,11 @@ class StageControlView(QWidget):
 
         # Right Column (Chart)
         right_col = QVBoxLayout()
-        chart_card = Card("Live Position Error")
+        chart_card = Card("Live-Positionsfehler")
         
         # Header inside chart
         top_row = QHBoxLayout()
-        top_row.addWidget(QLabel("Real-time deviation (X vs Y)"))
+        top_row.addWidget(QLabel("Echtzeit-Abweichung (X vs Y)"))
         top_row.addStretch()
         self.timer_lbl = QLabel("15:00:00")
         self.timer_lbl.setStyleSheet(f"font-family: {FONTS['mono']}; font-size: 20px; font-weight: bold; color: {COLORS['primary']};")
@@ -1133,8 +1194,8 @@ class StageControlView(QWidget):
         chart_card.add_layout(top_row)
         
         self.chart = ModernChart(height=5)
-        self.line_x, = self.chart.ax.plot([], [], color=COLORS['primary'], linewidth=2, label="Error X")
-        self.line_y, = self.chart.ax.plot([], [], color=COLORS['secondary'], linewidth=2, label="Error Y")
+        self.line_x, = self.chart.ax.plot([], [], color=COLORS['primary'], linewidth=2, label="Fehler X")
+        self.line_y, = self.chart.ax.plot([], [], color=COLORS['secondary'], linewidth=2, label="Fehler Y")
         
         # Chart Legend
         leg = self.chart.ax.legend(loc='upper right', facecolor=COLORS['surface'], edgecolor=COLORS['border'], labelcolor=COLORS['text'])
@@ -1152,49 +1213,342 @@ class StageControlView(QWidget):
         inp.setPlaceholderText(placeholder)
         layout.addWidget(lbl)
         layout.addWidget(inp)
+        return inp
 
-    def toggle_test(self):
+    def _acquire_metadata(self):
+        self._batch = resolve_stage.sanitize_batch(self.inputs["batch"].text()) or "NoBatch"
+
+    def _ensure_run_dir(self):
+        if self._run_outdir is None:
+            ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            self._run_outdir = resolve_stage.DATA_ROOT / self._batch / f"Run_{ts}"
+            self._run_outdir.mkdir(parents=True, exist_ok=True)
+            self._last_outdir = self._run_outdir
+            self.btn_open.setEnabled(True)
+        return self._run_outdir
+
+    def _open_folder(self):
+        path = self._last_outdir if self._last_outdir else pathlib.Path(".")
+        try:
+            if sys.platform == 'win32':
+                os.startfile(str(path.resolve()))
+            else:
+                subprocess.run(['xdg-open', str(path.resolve())])
+        except Exception as e:
+            QMessageBox.warning(self, "Ordner öffnen", f"Konnte Ordner nicht öffnen:\n{e}")
+
+    # --- Precision Test ---
+    def toggle_precision_test(self):
         if self.running:
-            self.running = False
-            self.btn_start.setText("Start Test")
-            self.btn_start.setStyleSheet(self.btn_start.styleSheet().replace(COLORS['danger'], COLORS['primary'])) # Reset to primary hack
-            self.timer.stop()
+            if self.wrk: self.wrk.stop() # Wait, TestWorker doesn't have stop? Checking...
+            self.btn_start.setText("Kalibriermessung starten")
+            self.btn_start.set_variant("primary")
         else:
-            self.running = True
-            self.btn_start.setText("Stop Test")
-            # Create a "Danger" variant on the fly or swap widgets
-            self.timer.start(100)
-            self.x_data.clear()
-            self.y1_data.clear()
-            self.y2_data.clear()
-            self.tick = 0
+            self._start_precision_test()
 
-    def update_chart(self):
+    def _start_precision_test(self):
+        if self.dauer_running:
+            QMessageBox.warning(self, "Test läuft", "Der Dauertest läuft bereits.")
+            return
+        self._acquire_metadata()
+        out_dir = self._ensure_run_dir()
+        
+        self.running = True
+        self.btn_start.setText("Test stoppen")
+        self.btn_start.set_variant("danger")
+        
+        self.thr = QThread()
+        self.wrk = resolve_stage.TestWorker(self.sc, batch=self._batch)
+        self.wrk.moveToThread(self.thr)
+        
+        self.thr.started.connect(self.wrk.run)
+        self.wrk.new_phase.connect(self._on_phase)
+        self.wrk.step.connect(self._on_step)
+        self.wrk.calib.connect(self._on_calib)
+        self.wrk.done.connect(self._on_precision_done)
+        self.wrk.error.connect(self._on_error)
+        
+        self.wrk.done.connect(self.thr.quit)
+        self.wrk.error.connect(self.thr.quit)
+        self.thr.finished.connect(self._on_thr_finished)
+        
+        self.thr.start()
+
+    def _on_phase(self, name, maxi):
+        self.lbl_phase.setText(name.upper())
+        self.progress.setMaximum(maxi)
+        self.progress.setValue(0)
+
+    def _on_step(self, val):
+        self.progress.setValue(val)
+
+    def _on_calib(self, d):
+        x = d.get("X_stepsPerMeter", "---")
+        y = d.get("Y_stepsPerMeter", "---")
+        self._calib_vals["X"] = x
+        self._calib_vals["Y"] = y
+        self.lbl_calib.setText(f"{x} / {y}")
+
+    def _on_precision_done(self, data):
+        self.running = False
+        self.btn_start.setText("Kalibriermessung starten")
+        self.btn_start.set_variant("primary")
+        self.lbl_phase.setText("BEENDET")
+        
+        out_dir = data["out"]
+        plots = data["plots"]
+        batch = data.get("batch", "NoBatch")
+        
+        fig_paths = []
+        max_abs_um = 0.0
+        for ax, mot, enc, calc, spm, epm in plots:
+            diff_um = np.abs((enc - calc) / epm * 1e6)
+            max_abs_um = max(max_abs_um, float(np.max(diff_um)))
+            png = self._plot_and_save(ax, mot, enc, calc, spm, epm, out_dir, batch)
+            fig_paths.append(str(png))
+        self._meas_max_um = max_abs_um
+        
+        # Check calib images
+        cal_x = out_dir / f"calib_x_{batch}.png"
+        cal_y = out_dir / f"calib_y_{batch}.png"
+        if cal_x.exists(): fig_paths.insert(0, str(cal_x))
+        if cal_y.exists(): fig_paths.insert(1, str(cal_y))
+        
+        report_path = out_dir / f"report_{batch}.pdf"
+        try:
+            self._write_report_pdf(report_path, fig_paths)
+        except Exception as e:
+            print(f"Report Error: {e}")
+
+        meas_ok = (self._meas_max_um <= self.MEAS_MAX_UM)
+        msg = f"Kalibriermessung beendet.\nMax. Abweichung: {self._meas_max_um:.2f} µm\nLimit: {self.MEAS_MAX_UM:.1f} µm -> {'OK' if meas_ok else 'FEHLER'}"
+        QMessageBox.information(self, "Test Beendet", msg)
+
+    # --- Endurance Test ---
+    def toggle_endurance_test(self):
+        if self.dauer_running:
+            self._stop_endurance_test()
+        else:
+            self._start_endurance_test()
+
+    def _start_endurance_test(self):
+        if self.running:
+            QMessageBox.warning(self, "Test läuft", "Die Kalibriermessung läuft bereits.")
+            return
+        self._acquire_metadata()
+        out_dir = self._ensure_run_dir()
+        
+        try:
+            x_center, y_center, _ = resolve_stage.get_current_pos()
+        except Exception as e:
+            QMessageBox.critical(self, "Fehler", f"Konnte aktuelle Position nicht abrufen: {e}")
+            return
+            
+        self.dauer_running = True
+        self.btn_dauer.setText("Dauertest stoppen")
+        self.btn_dauer.set_variant("danger")
+        
+        self.x_data.clear()
+        self.y1_data.clear()
+        self.y2_data.clear()
+        
+        self.dauer_thr = QThread()
+        avail_x = max(0, self.sc.high_lim.get("X", 0) - self.sc.low_lim.get("X", 0))
+        avail_y = max(0, self.sc.high_lim.get("Y", 0) - self.sc.low_lim.get("Y", 0))
+        avail_range = max(1, min(avail_x, avail_y))
+        small_step = max(500, int(avail_range * 0.01))
+        small_radius = max(2000, int(avail_range * 0.05))
+
+        self.dauer_wrk = resolve_stage.CombinedTestWorker(
+            self.sc,
+            batch=self._batch,
+            out_dir=out_dir,
+            center_x=x_center,
+            center_y=y_center,
+            small_step=small_step,
+            small_radius=small_radius,
+            stop_at_ts=time.time() + self._duration_sec
+        )
+        self.dauer_wrk.moveToThread(self.dauer_thr)
+        
+        self.dauer_thr.started.connect(self.dauer_wrk.run)
+        self.dauer_wrk.update.connect(self._on_endurance_update)
+        self.dauer_wrk.finished.connect(self._on_endurance_finished)
+        self.dauer_wrk.error.connect(self._on_error)
+        
+        self.dauer_wrk.finished.connect(self.dauer_thr.quit)
+        self.dauer_wrk.error.connect(self.dauer_thr.quit)
+        self.dauer_thr.finished.connect(self._on_thr_finished)
+        
+        self.dauer_thr.start()
+
+    def _on_endurance_update(self, data):
         self.tick += 1
-        noise = np.random.normal(0, 0.2)
-        val1 = np.sin(self.tick * 0.1) + noise
-        val2 = np.cos(self.tick * 0.1) * 0.5 + noise
+        err_x = data.get("err_x_um", 0.0)
+        err_y = data.get("err_y_um", 0.0)
+        max_err = data.get("max_abs_um", 0.0)
         
         self.x_data.append(self.tick)
-        self.y1_data.append(val1)
-        self.y2_data.append(val2)
+        self.y1_data.append(err_x)
+        self.y2_data.append(err_y)
         
-        self.line_x.set_data(self.x_data, self.y1_data)
-        self.line_y.set_data(self.x_data, self.y2_data)
+        self.line_x.set_data(list(self.x_data), list(self.y1_data))
+        self.line_y.set_data(list(self.x_data), list(self.y2_data))
         
         self.chart.ax.relim()
         self.chart.ax.autoscale_view()
-        self.chart.draw()
+        self.chart.draw_idle()
         
-        # Update QA text
-        max_err = max(abs(val1), abs(val2))
         self.qa_val.setText(f"{max_err:.2f} µm")
-        if max_err > 2.0: # Arbitrary visual limit
+        limit = data.get("limit_um", resolve_stage.DUR_MAX_UM)
+        if max_err > limit:
              self.qa_box.setStyleSheet(f"background-color: {COLORS['danger']}15; border: 1px solid {COLORS['danger']}40; border-radius: 12px;")
              self.qa_val.setStyleSheet(f"color: {COLORS['danger']}; font-weight: 800; font-size: 18px; border:none; background:transparent;")
         else:
              self.qa_box.setStyleSheet(f"background-color: {COLORS['success']}15; border: 1px solid {COLORS['success']}40; border-radius: 12px;")
              self.qa_val.setStyleSheet(f"color: {COLORS['success']}; font-weight: 800; font-size: 18px; border:none; background:transparent;")
+             
+        elapsed = time.time() - (self.dauer_wrk.stop_at_ts - self._duration_sec)
+        remaining = max(0, self._duration_sec - elapsed)
+        h = int(remaining // 3600)
+        m = int((remaining % 3600) // 60)
+        s = int(remaining % 60)
+        self.timer_lbl.setText(f"{h:02d}:{m:02d}:{s:02d}")
+        
+        self.lbl_phase.setText(data.get("phase", "DAUERTEST").upper())
+        self.progress.setMaximum(self._duration_sec)
+        self.progress.setValue(int(elapsed))
+
+    def _stop_endurance_test(self):
+        if self.dauer_wrk:
+            self.dauer_wrk.stop()
+        self.dauer_running = False
+        self.btn_dauer.setText("Start Endurance Test")
+        self.btn_dauer.set_variant("secondary")
+
+    def _on_endurance_finished(self, data):
+        self.dauer_running = False
+        self.btn_dauer.setText("Dauertest starten")
+        self.btn_dauer.set_variant("secondary")
+        self.lbl_phase.setText("BEENDET")
+        
+        outdir = self._ensure_run_dir()
+        batch = self._batch
+        
+        # Save live plot
+        try:
+            out_png = outdir / f"dauertest_{batch}.png"
+            self.chart.figure.savefig(out_png, dpi=110)
+        except Exception as e:
+            print(f"Save Plot Error: {e}")
+
+        self._dur_max_um = float(data.get("dur_max_um", 0.0))
+        limit = float(data.get("limit_um", resolve_stage.DUR_MAX_UM))
+        
+        # Update report
+        try:
+            images = []
+            for name in [f"calib_x_{batch}.png", f"calib_y_{batch}.png",
+                         f"X_{batch}.png", f"Y_{batch}.png",
+                         f"dauertest_{batch}.png"]:
+                f = outdir / name
+                if f.exists(): images.append(str(f))
+            report_path = outdir / f"report_{batch}.pdf"
+            self._write_report_pdf(report_path, images)
+        except Exception as e:
+            print(f"Report Update Error: {e}")
+
+        dur_ok = (self._dur_max_um <= limit)
+        msg = f"Endurance test completed.\nMax deviation: {self._dur_max_um:.2f} µm\nLimit: {limit:.1f} µm -> {'OK' if dur_ok else 'FAIL'}"
+        QMessageBox.information(self, "Endurance Done", msg)
+
+    def _on_thr_finished(self):
+        self.running = False
+        self.dauer_running = False
+        self.btn_start.setText("Start Precision Test")
+        self.btn_start.set_variant("primary")
+        self.btn_dauer.setText("Start Endurance Test")
+        self.btn_dauer.set_variant("secondary")
+
+    def _plot_and_save(self, axis, mot, enc, calc, spm, epm, out_dir: pathlib.Path, batch: str) -> pathlib.Path:
+        diff, idx = enc - calc, np.linspace(0, 1, len(mot))
+        fig = Figure(figsize=(12, 8), dpi=110, facecolor=COLORS['surface'])
+        
+        def style_ax(ax):
+            ax.set_facecolor(COLORS['surface'])
+            ax.tick_params(colors=COLORS['text'], labelsize=9)
+            ax.xaxis.label.set_color(COLORS['text_muted'])
+            ax.yaxis.label.set_color(COLORS['text_muted'])
+            ax.title.set_color(COLORS['text'])
+            ax.grid(True, color=COLORS['border'], linestyle='--', alpha=0.3)
+            for spine in ax.spines.values():
+                spine.set_color(COLORS['border'])
+
+        ax1 = fig.add_subplot(221); style_ax(ax1); ax1.plot(idx, mot); ax1.set_title(f"Motorschritte · {axis}")
+        ax2 = fig.add_subplot(222); style_ax(ax2); ax2.scatter(mot, diff, c=idx, cmap="viridis"); ax2.set_title(f"Encoder-Delta · {axis}")
+        ax3 = fig.add_subplot(223); style_ax(ax3); ax3.plot(diff / epm * 1e6); ax3.set_title("Delta (µm) vs Index")
+        ax4 = fig.add_subplot(224); style_ax(ax4); ax4.scatter(mot / spm * 1e3, diff / epm * 1e6, c=idx, cmap="viridis"); ax4.set_title("Delta (µm) vs Weg")
+        
+        fig.suptitle(f"{axis}-Achse – Messung · Charge: {batch}", color=COLORS['text'], fontweight="semibold")
+        fig.tight_layout()
+        out_png = out_dir / f"{axis}_{batch}.png"
+        fig.savefig(out_png)
+        return out_png
+
+    def _write_report_pdf(self, pdf_path: pathlib.Path, image_paths):
+        with PdfPages(pdf_path) as pdf:
+            fig = Figure(figsize=(11.69, 8.27), dpi=110, facecolor=COLORS['surface'])
+            ax = fig.add_subplot(111); ax.axis("off")
+            
+            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            op = self.inputs["operator"].text() or "---"
+            notes = self.inputs["notes"].toPlainText() or "---"
+            xspm = self._calib_vals.get("X", "---")
+            yspm = self._calib_vals.get("Y", "---")
+            
+            meas_result = "---"
+            if self._meas_max_um is not None:
+                meas_result = "OK" if self._meas_max_um <= self.MEAS_MAX_UM else "FAIL"
+                
+            dur_result = "---"
+            if self._dur_max_um is not None:
+                dur_result = "OK" if self._dur_max_um <= resolve_stage.DUR_MAX_UM else "FAIL"
+
+            text = (
+                f"Stage Test Report\n\n"
+                f"Zeitpunkt: {now}\n"
+                f"Charge: {self._batch}\n"
+                f"Operator: {op}\n\n"
+                f"Kalibrierung (stepsPerMeter):\n"
+                f"  X: {xspm}\n  Y: {yspm}\n\n"
+                f"Bemerkungen:\n{notes}\n\n"
+                f"QA-Grenzen:\n"
+                f"  Messung: ≤ {self.MEAS_MAX_UM:.1f} µm | Ergebnis: {self._meas_max_um if self._meas_max_um is not None else 0.0:.2f} µm -> {meas_result}\n"
+                f"  Dauertest: ≤ {resolve_stage.DUR_MAX_UM:.1f} µm | Ergebnis: {self._dur_max_um if self._dur_max_um is not None else 0.0:.2f} µm -> {dur_result}\n"
+            )
+            ax.text(0.05, 0.95, text, va="top", ha="left", fontsize=12, color=COLORS['text'], family='monospace')
+            pdf.savefig(fig)
+            self._images_to_pdf(image_paths, pdf)
+
+    def _images_to_pdf(self, image_paths, pdf: PdfPages):
+        for img_path in image_paths:
+            if not os.path.exists(img_path): continue
+            try:
+                img = mpimg.imread(img_path)
+                fig = Figure(figsize=(11.69, 8.27), dpi=110, facecolor=COLORS['surface'])
+                ax = fig.add_subplot(111); ax.imshow(img); ax.axis("off")
+                pdf.savefig(fig)
+            except Exception as e:
+                print(f"Error adding image to PDF: {e}")
+
+    def _on_error(self, msg):
+        QMessageBox.critical(self, "Error", msg)
+        self.running = False
+        self.dauer_running = False
+        self.btn_start.setText("Start Precision Test")
+        self.btn_start.set_variant("primary")
+        self.btn_dauer.setText("Start Endurance Test")
+        self.btn_dauer.set_variant("secondary")
 
 class GitterschieberView(QWidget):
     def __init__(self, parent=None):
