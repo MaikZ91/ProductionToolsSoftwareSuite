@@ -93,7 +93,7 @@ FONTS = {
 GLOBAL_STYLESHEET = f"""
 QMainWindow {{ background-color: {COLORS['bg']}; }}
 QWidget {{ 
-    background-color: transparent; 
+    background-color: {COLORS['bg']}; 
     color: {COLORS['text']}; 
     font-family: "{FONTS['ui']}";
     font-size: 14px;
@@ -341,6 +341,8 @@ class ModernChart(FigureCanvasQTAgg):
 class DashboardView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"background-color: {COLORS['bg']};")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
@@ -778,6 +780,8 @@ class AutofocusView(QWidget):
     """Modern UI for Autofocus / Kollimator Tool."""
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"background-color: {COLORS['bg']};")
         self._current_dev_idx = 0
         self.setup_ui()
 
@@ -897,6 +901,8 @@ class ZTriebView(QWidget):
     """Modern UI for controlling the Objektivringversteller (Z-Trieb)."""
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"background-color: {COLORS['bg']};")
         self.controller = ZTriebController()
         self.executor = ThreadPoolExecutor(max_workers=1)
         self._dauer_future = None
@@ -1053,6 +1059,8 @@ class ZTriebView(QWidget):
 class StageControlView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"background-color: {COLORS['bg']};")
         self.sc = resolve_stage.StageController()
         self.running = False
         self.dauer_running = False
@@ -1641,6 +1649,8 @@ class GitterschieberView(QWidget):
 class PlaceholderView(QWidget):
     def __init__(self, title):
         super().__init__()
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"background-color: {COLORS['bg']};")
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignCenter)
         l = QLabel(title)
