@@ -150,7 +150,7 @@ def parse_db_response(raw):
     return pd.DataFrame({"_raw": [str(raw)]})
 
 
-def fetch_test_data(testtype: str, limit: int = 50):
+def fetch_test_data(testtype: str, limit: int = 50) -> tuple[pd.DataFrame, bool]:
     """
     Fetch test data from the database and return as a pandas DataFrame.
     
@@ -159,7 +159,9 @@ def fetch_test_data(testtype: str, limit: int = 50):
         limit: Maximum number of rows to fetch
     
     Returns:
-        pandas DataFrame with test data, or empty DataFrame on error
+        tuple containing:
+        - pandas DataFrame with test data, or empty DataFrame on error
+        - bool: True if connection was successful, False otherwise
     """
     
     conn = None
@@ -177,11 +179,11 @@ def fetch_test_data(testtype: str, limit: int = 50):
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
 
-        return df
+        return df, True
 
     except Exception as e:
         print(f"Error fetching test data: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), False
 
     finally:
         if conn:
@@ -194,7 +196,8 @@ def fetch_all_test_data(limit: int = 50) -> dict[str, pd.DataFrame]:
     """Fetch test data for all known devices/test types."""
     data = {}
     for testtype in TESTTYPE_DB_MAP.keys():
-        data[testtype] = fetch_test_data(testtype, limit=limit)
+        df, _ = fetch_test_data(testtype, limit=limit)
+        data[testtype] = df
     return data
 
 

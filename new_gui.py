@@ -499,16 +499,43 @@ class DashboardView(QWidget):
         testtype = self.combo_testtype.currentText()
         
         try:
-            df = db.fetch_test_data(testtype, limit=20)
+            df, connected = db.fetch_test_data(testtype, limit=20)
         except Exception as e:
-            print(f"Error fetching data: {e}")
+            print(f"Error calling fetch_test_data: {e}")
+            df, connected = pd.DataFrame(), False
+
+        # Update Connection Status UI
+        if not connected:
+            self.status_indicator.setText("● OFFLINE")
+            self.status_indicator.setStyleSheet(f"color: {COLORS['danger']}; font-weight: 800; font-size: 11px; margin-left: 10px;")
+            
+            # Update KPIs to fallback state
+            self.kpi_total.value_label.setText("---")
+            self.kpi_pass.value_label.setText("---")
+            self.kpi_last.value_label.setText("N/A")
+            self.kpi_last.value_label.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 800; font-size: 22px; border:none;")
+            
+            # Show connection error in table
+            self.table.setRowCount(1)
+            item = QTableWidgetItem("Datenbankverbindung nicht verfügbar")
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setForeground(QBrush(QColor(COLORS['danger'])))
+            item.setFont(QFont(FONTS['ui'], 12, QFont.Bold))
+            self.table.setItem(0, 0, item)
+            for col in range(1, 6):
+                self.table.setItem(0, col, QTableWidgetItem(""))
+            self.table.setSpan(0, 0, 1, 6) # Span across all columns
             return
+        else:
+            self.status_indicator.setText("● LIVE")
+            self.status_indicator.setStyleSheet(f"color: {COLORS['success']}; font-weight: 800; font-size: 11px; margin-left: 10px;")
+            # Clear potential spans from error state
+            self.table.clearSpans()
 
         # Update KPIs
         total = len(df)
         ok_ratio = 0
         last_result = "N/A"
-        last_time = "---"
         
         if total > 0:
             if "ok" in df.columns:
@@ -516,11 +543,6 @@ class DashboardView(QWidget):
                 ok_count = ok_bool.sum()
                 ok_ratio = int((ok_count / total) * 100)
                 last_result = "OK" if bool(ok_bool.iloc[0]) else "FAIL"
-            
-            if "StartTest" in df.columns:
-                last_time = df["StartTest"].iloc[0]
-                if pd.notna(last_time):
-                    last_time = last_time.strftime("%H:%M:%S")
 
         self.kpi_total.value_label.setText(str(total))
         self.kpi_pass.value_label.setText(f"{ok_ratio}%")
@@ -529,8 +551,10 @@ class DashboardView(QWidget):
         # Update colors based on status
         if last_result == "FAIL":
             self.kpi_last.value_label.setStyleSheet(f"color: {COLORS['danger']}; font-weight: 800; font-size: 22px; border:none;")
-        else:
+        elif last_result == "OK":
             self.kpi_last.value_label.setStyleSheet(f"color: {COLORS['success']}; font-weight: 800; font-size: 22px; border:none;")
+        else:
+            self.kpi_last.value_label.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 800; font-size: 22px; border:none;")
 
         # Update Table
         self.table.setRowCount(len(df))

@@ -640,18 +640,31 @@ class Dashboard(QWidget):
             except Exception:
                 pass
 
-    def fetch_data_from_db(self, testtype: str, limit: int = LIMIT_ROWS) -> pd.DataFrame:
+    def fetch_data_from_db(self, testtype: str, limit: int = LIMIT_ROWS) -> tuple[pd.DataFrame, bool]:
         try:
             return db.fetch_test_data(testtype, limit=limit)
         except Exception as e:
-            QMessageBox.warning(self, "DB Fehler", f"Datenabruf fehlgeschlagen:\n{e}")
-            return pd.DataFrame()
+            print(f"Fetch error: {e}")
+            return pd.DataFrame(), False
 
     def update_data(self):
         key = self.combo_testtype.currentText()
         testtype = TESTTYPE_DB_MAP.get(key, key)
 
-        df = self.fetch_data_from_db(testtype, LIMIT_ROWS)
+        df, connected = self.fetch_data_from_db(testtype, LIMIT_ROWS)
+        
+        if not connected:
+            # Show connection error in table if not connected
+            self.lbl_total.value_label.setText("---")
+            self.lbl_ok.value_label.setText("---")
+            self.lbl_last.value_label.setText("OFFLINE")
+            self.lbl_last.value_label.setStyleSheet(f"color: {FG_MUTED};")
+            
+            error_df = pd.DataFrame({"Status": ["Datenbankverbindung nicht verfügbar"]})
+            model = PandasModel(error_df)
+            self.proxy_model.setSourceModel(model)
+            return
+
         if "StartTest" in df.columns:
             df = df.sort_values("StartTest", ascending=False).reset_index(drop=True)
 
@@ -670,6 +683,14 @@ class Dashboard(QWidget):
         self.lbl_total.value_label.setText(str(total))
         self.lbl_ok.value_label.setText(f"{ok_ratio}%")
         self.lbl_last.value_label.setText(last_result)
+        
+        # Color for last result
+        if last_result == "OK":
+            self.lbl_last.value_label.setStyleSheet(f"color: {ACCENT};")
+        elif last_result == "FAIL":
+            self.lbl_last.value_label.setStyleSheet(f"color: #ef4444;")
+        else:
+            self.lbl_last.value_label.setStyleSheet(f"color: {FG_MUTED};")
 
         model = PandasModel(df)
         self.proxy_model.setSourceModel(model)
