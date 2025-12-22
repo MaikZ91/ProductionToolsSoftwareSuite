@@ -7,7 +7,32 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+import os
 from typing import Callable, Optional
+from pathlib import Path
+import ctypes
+
+# Make sure the vendor MCS package (in this repo) is importable even with the space in the folder name.
+_HERE = Path(__file__).resolve().parent
+for _cand in (
+    _HERE / "Miltenyi CAN System (MCS)",
+    _HERE.parent / "Miltenyi CAN System (MCS)",
+):
+    if (_cand / "mcs").exists() and str(_cand) not in sys.path:
+        sys.path.insert(0, str(_cand))
+        break
+
+# Add local PCANBasic build (if present) to the loader path so libpcanbasic.so can be found without system install.
+_PCAN_LIB_DIR = _HERE / "peak-linux-driver-8.20.0" / "libpcanbasic" / "pcanbasic" / "lib"
+if _PCAN_LIB_DIR.exists():
+    _ld_paths = os.environ.get("LD_LIBRARY_PATH", "")
+    _ld_list = [p for p in _ld_paths.split(os.pathsep) if p]
+    if str(_PCAN_LIB_DIR) not in _ld_list:
+        os.environ["LD_LIBRARY_PATH"] = os.pathsep.join([str(_PCAN_LIB_DIR)] + _ld_list)
+    try:
+        ctypes.cdll.LoadLibrary(str(_PCAN_LIB_DIR / "libpcanbasic.so"))
+    except Exception:
+        pass
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
@@ -106,30 +131,67 @@ class ZTriebController(QObject):
         super().__init__()
         self._bus = None
         self._driver = None
-        self._dummy = False
+        self._dummy = False  # Keinen Simulationsmodus mehr nutzen
+
+    def connect(self):
+        """(Re-)Establish the connection to the Z-Trieb driver."""
         self._connect()
 
     def _connect(self):
+        self._emit_log(f"[DEBUG] Verbinde Z-Trieb @ CAN-Adresse 0x{self.address:X} …")
         if mcs is None:
-            self._dummy = True
-            self._driver = _DummyDriver(self._emit_log)
             self.hardwareAvailable.emit(False)
             self._emit_log(
-                "[INFO] MCS library nicht verfügbar – Z-Trieb läuft im Simulationsmodus."
+                "[ERROR] MCS-Bibliothek nicht verfügbar – Objektivringversteller nicht gefunden."
             )
             return
         try:
-            self._bus = mcs.get_mcs()
+            if self._bus is not None:
+                try:
+                    self._bus.close()
+                except Exception:
+                    pass
+                self._bus = None
+            self._driver = None
+            self._bus = mcs.get_mcs(register="scan")
+            try:
+                bus_info = getattr(self._bus, "info", None)
+                if callable(bus_info):
+                    self._emit_log(f"[DEBUG] MCS Info: {bus_info()}")
+            except Exception:
+                pass
+            try:
+                registered = [
+                    f"0x{dev.can_id:X}"
+                    for dev in (self._bus.get_registered_devices() or [])
+                ]
+            except Exception:
+                registered = []
+            self._emit_log(
+                f"[DEBUG] Registrierte Geräte: {', '.join(registered) if registered else 'keine'}"
+            )
             self._driver = self._bus.get_device(self.address)
             self.hardwareAvailable.emit(True)
-            self._emit_log("[INFO] MCS-Bus verbunden.")
+            self._emit_log(
+                "[INFO] MCS-Bus verbunden – Z-Trieb Treiber aktiv "
+                f"(Typ: {type(self._driver).__name__})."
+            )
         except Exception as exc:  # pragma: no cover - hardware specific
-            self._dummy = True
-            self._driver = _DummyDriver(self._emit_log)
             self.hardwareAvailable.emit(False)
             self._emit_log(
-                f"[WARN] Konnte MCS nicht verbinden ({exc}) – Simulationsmodus aktiv."
+                f"[ERROR] Objektivringversteller nicht gefunden ({exc})."
             )
+
+    def _ensure_driver(self) -> bool:
+        """Try to reconnect if the driver is missing."""
+        if self._driver is not None:
+            return True
+        self._emit_log("[WARN] Kein Treiber verbunden – versuche Neuverbindung …")
+        self._connect()
+        if self._driver is None:
+            self._emit_log("[ERROR] Z-Trieb Treiber weiterhin nicht verfügbar.")
+            return False
+        return True
 
     # Utility
     def _emit_log(self, text: str):
@@ -146,9 +208,9 @@ class ZTriebController(QObject):
     # High level commands
     def goto_ref(self):
         d = self._driver
-        if d is None:
-            self._emit_log("[ERROR] Kein Treiber verfügbar.")
+        if d is None and not self._ensure_driver():
             return
+        d = self._driver
         self._emit_log("Referenzfahrt gestartet…")
         try:
             d.set_parameter(0, 1)
@@ -190,9 +252,9 @@ class ZTriebController(QObject):
 
     def goto_pos(self, slot_position: int):
         d = self._driver
-        if d is None:
-            self._emit_log("[ERROR] Kein Treiber verfügbar.")
+        if d is None and not self._ensure_driver():
             return
+        d = self._driver
         self._emit_log(f"Fahre zu Position {slot_position}…")
         try:
             moveData = d.get_move()
@@ -257,6 +319,7 @@ class ZTriebWidget(QWidget):
         self.controller.logMessage.connect(self._append_log)
         self.controller.runCounterChanged.connect(self._update_counter)
         self.controller.hardwareAvailable.connect(self._on_hw_state)
+        self.controller.connect()
 
         self.executor = ThreadPoolExecutor(max_workers=1)
         self._dauer_future = None
@@ -346,11 +409,19 @@ class ZTriebWidget(QWidget):
         self.lblRuns.setText(f"Runs: {count}")
 
     def _on_hw_state(self, available: bool):
-        if not available and _MCS_IMPORT_ERROR is not None:
+        if available:
+            return
+        if _MCS_IMPORT_ERROR is not None:
             QMessageBox.information(
                 self,
                 "Z-Trieb",
                 f"MCS-Bibliothek nicht verfügbar ({_MCS_IMPORT_ERROR}). Simulationsmodus aktiv.",
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                "Z-Trieb",
+                "Z-Trieb Treiber nicht verfügbar – bitte Hardware und CAN-Verbindung prüfen. Details im Log.",
             )
 
     def closeEvent(self, event):
@@ -362,3 +433,23 @@ class ZTriebWidget(QWidget):
             pass
         super().closeEvent(event)
 
+
+def _run_standalone():
+    """Small debug GUI so Z-Trieb can be tested without the full Stage-Toolbox."""
+    import sys as _sys
+    from PySide6.QtWidgets import QApplication, QMainWindow
+
+    app = QApplication.instance() or QApplication(_sys.argv)
+    win = QMainWindow()
+    win.setWindowTitle("Z-Trieb Debug")
+    widget = ZTriebWidget()
+    win.setCentralWidget(widget)
+    win.resize(520, 420)
+    win.show()
+    widget._append_log("[DEBUG] Standalone-Modus gestartet.")
+    widget._append_log(f"[DEBUG] Adresse: 0x{widget.controller.address:X}")
+    _sys.exit(app.exec())
+
+
+if __name__ == "__main__":  # pragma: no cover - manual debug helper
+    _run_standalone()
