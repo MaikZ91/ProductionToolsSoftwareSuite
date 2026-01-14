@@ -820,7 +820,11 @@ class LiveCamEmbed(QWidget):
             frame = self._frame_provider()
             if frame is not None:
                 self._last_frame = frame
-                pm = frame_to_qpixmap(frame, (self.label.width(), self.label.height()))
+                if isinstance(frame, QImage):
+                    pm = QPixmap.fromImage(frame)
+                    pm = pm.scaled(self.label.width(), self.label.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                else:
+                    pm = frame_to_qpixmap(frame, (self.label.width(), self.label.height()))
                 self.label.setPixmap(pm)
                 self.status.setText(f"LIVE | {datetime.datetime.now().strftime('%H:%M:%S')}")
             else:
@@ -868,6 +872,10 @@ class AutofocusView(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(f"background-color: {COLORS['bg']};")
         self._current_dev_idx = 0
+        self._detector = LaserSpotDetector()
+        self._laser = None
+        self._last_center = None
+        self._last_frame_size = None
         self.setup_ui()
 
     def setup_ui(self):
@@ -879,7 +887,7 @@ class AutofocusView(QWidget):
         # Card without title to save vertical space
         monitor_card = Card() 
         monitor_card.setStyleSheet(monitor_card.styleSheet() + "border-color: #333;")
-        self.cam_embed = LiveCamEmbed(self._get_frame)
+        self.cam_embed = LiveCamEmbed(lambda: None, start_immediately=False)
         monitor_card.add_widget(self.cam_embed)
         layout.addWidget(monitor_card)
         
@@ -893,7 +901,7 @@ class AutofocusView(QWidget):
         cam_layout.setSpacing(6)
         
         cams = [
-            ("AF-Cam", 0),
+            ("MACSeq", 0),
             ("Res-40x", 1),
             ("Res-2", 2),
             ("MacSEQ", 3),
@@ -942,10 +950,36 @@ class AutofocusView(QWidget):
         expo_card.add_layout(sl)
         controls_row.addWidget(expo_card, 1)
 
+        # 3. Alignment Panel
+        align_card = Card("ALIGNMENT")
+        al = QVBoxLayout()
+        al.setSpacing(6)
+
+        self.btn_toggle_ref = ModernButton("Save Justage", "secondary")
+        self.btn_toggle_ref.setMinimumHeight(30)
+        self.btn_toggle_ref.clicked.connect(self._toggle_reference)
+        al.addWidget(self.btn_toggle_ref)
+
+        self.lbl_ref = QLabel("Ref: —")
+        self.lbl_dx = QLabel("dx: —")
+        self.lbl_dy = QLabel("dy: —")
+        self.lbl_dist = QLabel("dist: —")
+        self.lbl_align_status = QLabel("Status: —")
+        for lbl in (self.lbl_ref, self.lbl_dx, self.lbl_dy, self.lbl_dist, self.lbl_align_status):
+            lbl.setStyleSheet(
+                f"background: {COLORS['surface_light']}; border: 1px solid {COLORS['border']}; "
+                "border-radius: 6px; padding: 4px 6px; font-size: 11px;"
+            )
+            al.addWidget(lbl)
+
+        align_card.add_layout(al)
+        controls_row.addWidget(align_card, 1)
+
         layout.addLayout(controls_row)
         layout.addStretch() # Push everything up to keep it tight
         
         self._update_button_styles()
+        self._init_laser_controller(self._current_dev_idx)
 
     def _get_frame(self):
         try:
@@ -970,6 +1004,7 @@ class AutofocusView(QWidget):
         self._current_dev_idx = idx
         print(f"[INFO] Kamera gewechselt: {cam_name} (Index {idx})")
         self._update_button_styles()
+        self._init_laser_controller(idx)
         # Exposure neu lesen wenn möglich
         try:
             curr, min_e, max_e = autofocus.get_exposure_limits(idx)
@@ -1017,9 +1052,112 @@ class AutofocusView(QWidget):
 
     def _set_exposure(self, val_ms):
         try:
-            autofocus.set_exposure(self._current_dev_idx, int(val_ms * 1000))
+            if self._laser is not None:
+                self._laser.set_exposure_us(int(val_ms * 1000))
+            else:
+                autofocus.set_exposure(self._current_dev_idx, int(val_ms * 1000))
         except:
             pass
+
+    def _init_laser_controller(self, idx: int):
+        if self._laser is not None:
+            try:
+                self._laser.stop()
+                self._laser.shutdown()
+            except Exception:
+                pass
+        try:
+            self._laser = LiveLaserController(idx, self._detector, parent=self)
+            self._laser.frameReady.connect(self._on_laser_frame)
+            self._laser.centerChanged.connect(self._on_laser_center)
+            self._laser.start()
+            try:
+                self.btn_toggle_ref.setText("Save Justage")
+                self.lbl_ref.setText("Ref: —")
+            except Exception:
+                pass
+        except Exception as exc:
+            self._laser = None
+            print(f"[WARN] Laser-Controller konnte nicht gestartet werden: {exc}")
+
+    def _on_laser_frame(self, qimg: QImage):
+        try:
+            self._last_frame_size = (qimg.width(), qimg.height())
+            pm = QPixmap.fromImage(qimg)
+            pm = pm.scaled(self.cam_embed.label.width(), self.cam_embed.label.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.cam_embed.label.setPixmap(pm)
+            ts = datetime.datetime.now().strftime('%H:%M:%S')
+            if self._last_center is not None:
+                cx, cy = self._last_center
+                self.cam_embed.status.setText(f"LIVE | {ts} | {cx}, {cy}")
+            else:
+                self.cam_embed.status.setText(f"LIVE | {ts}")
+        except Exception as exc:
+            self.cam_embed.status.setText(f"Kamera-Fehler: {exc}")
+
+    def _on_laser_center(self, x: int, y: int):
+        self._last_center = (int(x), int(y))
+        self._update_alignment()
+
+    def _toggle_reference(self):
+        if self._laser is None:
+            return
+        ref = self._laser.get_reference_point()
+        if ref is None:
+            if self._last_center is None:
+                return
+            cx, cy = self._last_center
+            self._laser.set_reference_point(cx, cy)
+            self.btn_toggle_ref.setText("Clear Justage")
+        else:
+            self._laser.clear_reference_point()
+            self.btn_toggle_ref.setText("Save Justage")
+        self._update_alignment()
+
+    def _update_alignment(self):
+        if self._last_center is None:
+            return
+        if not self._last_frame_size:
+            return
+        w, h = self._last_frame_size
+        cx, cy = self._last_center
+        ref = self._laser.get_reference_point() if self._laser is not None else None
+        if ref is not None:
+            rx, ry = ref
+            dx = int(cx - rx)
+            dy = int(cy - ry)
+            self.lbl_ref.setText(f"Ref: {rx}, {ry}")
+        else:
+            dx = int(cx - w // 2)
+            dy = int(cy - h // 2)
+            self.lbl_ref.setText("Ref: —")
+        dist = float(np.hypot(dx, dy))
+
+        px_um = None
+        if self._laser is not None:
+            px_um = self._laser.get_pixel_size_um()
+        if px_um:
+            dx_um = dx * px_um
+            dy_um = dy * px_um
+            dist_um = dist * px_um
+            dist_mm = dist_um / 1000.0
+            self.lbl_dx.setText(f"dx: {dx:+d} px  ({dx_um:+.1f} µm)")
+            self.lbl_dy.setText(f"dy: {dy:+d} px  ({dy_um:+.1f} µm)")
+            self.lbl_dist.setText(f"dist: {dist:.2f} px  ({dist_um:.1f} µm · {dist_mm:.3f} mm)")
+        else:
+            self.lbl_dx.setText(f"dx: {dx:+d} px")
+            self.lbl_dy.setText(f"dy: {dy:+d} px")
+            self.lbl_dist.setText(f"dist: {dist:.2f} px")
+
+        tol_px = 5.0
+        ok = (dist <= tol_px)
+        color = "#2ecc71" if ok else "#ff2740"
+        text = "OK" if ok else "ALIGN"
+        self.lbl_align_status.setText(f"Status: {text} (≤ {tol_px:.1f} px)")
+        self.lbl_align_status.setStyleSheet(
+            f"background: {COLORS['surface_light']}; border: 1px solid {COLORS['border']}; "
+            f"border-radius: 6px; padding: 4px 6px; font-size: 11px; color: {color};"
+        )
 
 class ZTriebVisualizer(QWidget):
     """Circular gauge for the Z-Trieb motor position."""

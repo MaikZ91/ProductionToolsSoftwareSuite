@@ -262,6 +262,14 @@ class LiveLaserController(QObject):
     def get_reference_point(self) -> tuple[int, int] | None:
         return self._ref_point
 
+    def get_pixel_size_um(self) -> float | None:
+        if self.cam is None:
+            return None
+        try:
+            return float(self.cam.get_pixel_size_um())
+        except Exception:
+            return None
+
 
 atexit.register(shutdown_all)
 
