@@ -788,12 +788,14 @@ class LiveCamEmbed(QWidget):
         
         self.status = QLabel("Warte auf Frame...")
         self.status.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
+        self.status.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.status.setMaximumHeight(18)
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
-        layout.addWidget(self.label)
-        layout.addWidget(self.status)
+        layout.addWidget(self.label, 1)
+        layout.addWidget(self.status, 0)
         
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -896,6 +898,11 @@ class AutofocusView(QWidget):
             ("Res-2", 2),
             ("MacSEQ", 3),
         ]
+        self._cams = list(cams)
+        try:
+            print(f"[INFO] Kamera-Buttons (Name -> Index): {self._cams}")
+        except Exception:
+            pass
         self.btn_group = []
         for i, (text, idx) in enumerate(cams):
             btn = ModernButton(text, "secondary")
@@ -947,7 +954,21 @@ class AutofocusView(QWidget):
             return None
 
     def _select_camera(self, idx):
+        self._log_device_map()
+        try:
+            cam_name = next(name for name, cam_idx in self._cams if cam_idx == idx)
+        except Exception:
+            cam_name = f"Index {idx}"
+        if idx == self._current_dev_idx:
+            print(f"[INFO] Kamera unveraendert: {cam_name} (Index {idx})")
+            return
+        prev_idx = self._current_dev_idx
+        try:
+            autofocus.shutdown(prev_idx)
+        except Exception:
+            pass
         self._current_dev_idx = idx
+        print(f"[INFO] Kamera gewechselt: {cam_name} (Index {idx})")
         self._update_button_styles()
         # Exposure neu lesen wenn möglich
         try:
@@ -957,6 +978,35 @@ class AutofocusView(QWidget):
             self.spin_expo.blockSignals(False)
         except:
             pass
+
+    def _log_device_map(self):
+        try:
+            from ids_peak import ids_peak as p
+        except Exception as exc:
+            print(f"[WARN] ids_peak nicht verfuegbar: {exc}")
+            return
+        try:
+            p.Library.Initialize()
+            dm = p.DeviceManager.Instance()
+            dm.Update()
+            devs = dm.Devices()
+            print(f"[INFO] Gefundene IDS Geraete: {len(devs)}")
+            for i, dev in enumerate(devs):
+                try:
+                    name = dev.DisplayName()
+                except Exception:
+                    name = "unknown"
+                try:
+                    model = dev.ModelName()
+                except Exception:
+                    model = "unknown"
+                try:
+                    serial = dev.SerialNumber()
+                except Exception:
+                    serial = "unknown"
+                print(f"[INFO] IDS[{i}] name={name} model={model} serial={serial}")
+        except Exception as exc:
+            print(f"[WARN] Konnte IDS Geraete nicht lesen: {exc}")
 
     def _update_button_styles(self):
         for i, btn in enumerate(self.btn_group):

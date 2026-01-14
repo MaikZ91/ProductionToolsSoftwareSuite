@@ -1620,9 +1620,9 @@ class StageGUI(QWidget):
 
         self._autofocus_buttons = []
         cams = [
-            ("Autofocus", 0, "Autofocus"),
+            ("Autofocus", 2, "Autofocus"),
             ("MACS Resolve 40x", 1, "MACS Resolve 40x"),
-            ("Resolve 2", 2, "Resolve 2"),
+            ("Resolve 2", 0, "Resolve 2"),
             ("MacSEQ", 3, "MacSEQ"),
         ]
         for idx, (text, device_idx, label) in enumerate(cams):
