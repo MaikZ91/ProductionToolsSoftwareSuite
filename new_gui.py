@@ -880,6 +880,10 @@ class AutofocusView(QWidget):
         self._laser = None
         self._last_center = None
         self._last_frame_size = None
+        self._pending_cam_idx = None
+        self._switch_timer = QTimer(self)
+        self._switch_timer.setSingleShot(True)
+        self._switch_timer.timeout.connect(self._apply_pending_camera)
         self.setup_ui()
 
     def setup_ui(self):
@@ -1005,10 +1009,17 @@ class AutofocusView(QWidget):
             autofocus.shutdown(prev_idx)
         except Exception:
             pass
+        try:
+            autofocus.shutdown_all()
+        except Exception:
+            pass
         self._current_dev_idx = idx
         print(f"[INFO] Kamera gewechselt: {cam_name} (Index {idx})")
         self._update_button_styles()
-        self._init_laser_controller(idx)
+        self._pending_cam_idx = idx
+        if self._switch_timer.isActive():
+            self._switch_timer.stop()
+        self._switch_timer.start(500)
         # Exposure neu lesen wenn möglich
         try:
             curr, min_e, max_e = autofocus.get_exposure_limits(idx)
@@ -1017,6 +1028,13 @@ class AutofocusView(QWidget):
             self.spin_expo.blockSignals(False)
         except:
             pass
+
+    def _apply_pending_camera(self):
+        if self._pending_cam_idx is None:
+            return
+        idx = self._pending_cam_idx
+        self._pending_cam_idx = None
+        self._init_laser_controller(idx)
 
     def _log_device_map(self):
         try:

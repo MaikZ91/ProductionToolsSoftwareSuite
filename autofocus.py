@@ -6,16 +6,67 @@ from __future__ import annotations
 
 import atexit
 from typing import Dict, Tuple
+import time
 
 import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QTimer, Signal, Qt
 from PySide6.QtGui import QImage, QColor, QPainter, QPen
 
-from ie_Framework.Hardware.Camera.ids_camera import IdsCam
+from ie_Framework.Hardware.Camera import ids_camera as _ids_cam_mod
+IdsCam = _ids_cam_mod.IdsCam
 from ie_Framework.Algorithm.laser_spot_detection import LaserSpotDetector
 
 _cams: Dict[int, IdsCam] = {}
+
+
+def _patch_ids_cam_aquise_frame() -> None:
+    """Patch IdsCam.aquise_frame to fix an indentation bug in some installs."""
+    def _aquise_frame(self, timeout_ms: int = 50) -> np.ndarray:
+        if self._dummy or self.ds is None:
+            return np.zeros((self.height, self.width), dtype=np.uint8)
+
+        buf = self.ds.WaitForFinishedBuffer(timeout_ms)
+        w, h = buf.Width(), buf.Height()
+
+        if _ids_cam_mod.IDS_PEAK_IPL_AVAILABLE and _ids_cam_mod.BufferToImage is not None:
+            try:
+                img = _ids_cam_mod.BufferToImage(buf)
+                out = np.empty((h, w), dtype=np.uint8)
+                pf = _ids_cam_mod.ids_peak_ipl.PixelFormat(_ids_cam_mod.ids_peak_ipl.PixelFormatName_Mono8)
+                img.ConvertTo(pf, int(out.ctypes.data), int(out.nbytes))
+                self.ds.QueueBuffer(buf)
+                return out
+            except Exception:
+                pass
+
+        ptr, size = int(buf.BasePtr()), int(buf.Size())
+        arr = (_ids_cam_mod.ctypes.c_ubyte * size).from_address(ptr)
+        raw = bytes(memoryview(arr)[:size])
+
+        pixel_count = int(w * h)
+        if pixel_count <= 0:
+            self.ds.QueueBuffer(buf)
+            return np.zeros((h, w), dtype=np.uint8)
+
+        bpp = size / pixel_count
+        if abs(bpp - 1.0) < 0.01:
+            frame = np.frombuffer(raw, dtype=np.uint8, count=pixel_count).reshape(h, w)
+        elif abs(bpp - 2.0) < 0.01:
+            frame = np.frombuffer(raw, dtype=np.uint16, count=pixel_count).reshape(h, w)
+        else:
+            flat = np.frombuffer(raw, dtype=np.uint8)
+            if flat.size < pixel_count:
+                flat = np.pad(flat, (0, pixel_count - flat.size), mode="constant")
+            frame = flat[:pixel_count].reshape(h, w)
+
+        self.ds.QueueBuffer(buf)
+        return frame
+
+    IdsCam.aquise_frame = _aquise_frame
+
+
+_patch_ids_cam_aquise_frame()
 
 
 def acquire_frame(device_index: int = 0, timeout_ms: int = 200):
@@ -175,21 +226,35 @@ class LiveLaserController(QObject):
         self.detector = detector
         self.cam: IdsCam | None = None
         self.is_dummy = False
+        self._using_fallback = False
         self._sim_tick = 0
         self._ref_point: tuple[int, int] | None = None
-        self._timeout_ms = 200
+        self._timeout_ms = 250
+        self._last_init_attempt = 0.0
+        self._retry_interval_s = 1.0
+        self._last_init_error: str | None = None
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._init_camera()
 
     def _init_camera(self):
+        self._last_init_attempt = time.monotonic()
         try:
             self.cam = IdsCam(index=self.device_index, set_min_exposure=False)
             self.is_dummy = bool(getattr(self.cam, "_dummy", False))
+            self._using_fallback = False
+            self._last_init_error = None
         except Exception as exc:
-            self.cam = None
+            self.cam = _FallbackDummyCam()
             self.is_dummy = True
+            self._using_fallback = True
+            self._last_init_error = str(exc)
             print(f"[WARN] Kamera konnte nicht initialisiert werden: {exc}")
+
+    def _maybe_reinit_camera(self):
+        if (time.monotonic() - self._last_init_attempt) < self._retry_interval_s:
+            return
+        self._init_camera()
 
     def start(self, interval_ms: int = 120):
         if not self._timer.isActive():
@@ -209,7 +274,10 @@ class LiveLaserController(QObject):
 
     def _tick(self):
         if self.cam is None:
+            self._maybe_reinit_camera()
             return
+        if self.is_dummy and self._using_fallback:
+            self._maybe_reinit_camera()
         try:
             frame = self.cam.aquise_frame(timeout_ms=self._timeout_ms)
             if frame is None:
@@ -232,7 +300,7 @@ class LiveLaserController(QObject):
             return
         try:
             self.cam.set_exposure_us(int(exposure_us))
-            self._timeout_ms = max(50, int(exposure_us / 1000.0) + 50)
+            self._timeout_ms = max(100, int(exposure_us / 1000.0) + 150)
         except Exception as exc:
             print(f"[WARN] Exposure setzen fehlgeschlagen: {exc}")
 
@@ -271,6 +339,30 @@ class LiveLaserController(QObject):
             return float(self.cam.get_pixel_size_um())
         except Exception:
             return None
+
+
+class _FallbackDummyCam:
+    """Basic dummy camera used when IdsCam initialization raises."""
+    def __init__(self, width: int = 640, height: int = 480):
+        self._dummy = True
+        self.width = int(width)
+        self.height = int(height)
+        self.pixel_size_um = 2.2
+
+    def aquise_frame(self, timeout_ms: int = 50) -> np.ndarray:
+        return np.zeros((self.height, self.width), dtype=np.uint8)
+
+    def set_exposure_us(self, us: float) -> None:
+        return None
+
+    def get_exposure_limits_us(self) -> tuple[float, float, float]:
+        return 2000.0, 50.0, 200000.0
+
+    def get_pixel_size_um(self) -> float:
+        return float(self.pixel_size_um)
+
+    def shutdown(self) -> None:
+        return None
 
 
 atexit.register(shutdown_all)
