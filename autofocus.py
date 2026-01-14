@@ -18,13 +18,13 @@ from ie_Framework.Algorithm.laser_spot_detection import LaserSpotDetector
 _cams: Dict[int, IdsCam] = {}
 
 
-def acquire_frame(device_index: int = 0):
+def acquire_frame(device_index: int = 0, timeout_ms: int = 200):
     """Liefert ein aktuelles Frame der angegebenen IDS-Kamera (mit Cache)."""
     cam = _cams.get(device_index)
     if cam is None:
         cam = IdsCam(index=device_index, set_min_exposure=False)
         _cams[device_index] = cam
-    return cam.aquise_frame()
+    return cam.aquise_frame(timeout_ms=timeout_ms)
 
 
 def get_exposure_limits(device_index: int = 0) -> Tuple[int, int, int]:
@@ -177,6 +177,7 @@ class LiveLaserController(QObject):
         self.is_dummy = False
         self._sim_tick = 0
         self._ref_point: tuple[int, int] | None = None
+        self._timeout_ms = 200
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._init_camera()
@@ -210,7 +211,7 @@ class LiveLaserController(QObject):
         if self.cam is None:
             return
         try:
-            frame = self.cam.aquise_frame()
+            frame = self.cam.aquise_frame(timeout_ms=self._timeout_ms)
             if frame is None:
                 return
             qimg, (cx, cy) = paint_laser_overlay(
@@ -231,6 +232,7 @@ class LiveLaserController(QObject):
             return
         try:
             self.cam.set_exposure_us(int(exposure_us))
+            self._timeout_ms = max(50, int(exposure_us / 1000.0) + 50)
         except Exception as exc:
             print(f"[WARN] Exposure setzen fehlgeschlagen: {exc}")
 

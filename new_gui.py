@@ -65,6 +65,12 @@ from z_trieb import ZTriebController
 import gitterschieber as gs
 from z_trieb import ZTriebWidget
 import stage_control as resolve_stage
+try:
+    from panda import PcoCameraBackend
+    _PCO_IMPORT_ERROR = None
+except Exception as _exc:
+    PcoCameraBackend = None
+    _PCO_IMPORT_ERROR = str(_exc)
 
 # ========================== DATENBANK / INFRA ==========================
 BASE_DIR = _BASE_DIR
@@ -817,7 +823,12 @@ class LiveCamEmbed(QWidget):
 
     def _tick(self):
         try:
-            frame = self._frame_provider()
+            result = self._frame_provider()
+            status_text = None
+            if isinstance(result, tuple) and len(result) == 2:
+                frame, status_text = result
+            else:
+                frame = result
             if frame is not None:
                 self._last_frame = frame
                 if isinstance(frame, QImage):
@@ -826,7 +837,10 @@ class LiveCamEmbed(QWidget):
                 else:
                     pm = frame_to_qpixmap(frame, (self.label.width(), self.label.height()))
                 self.label.setPixmap(pm)
-                self.status.setText(f"LIVE | {datetime.datetime.now().strftime('%H:%M:%S')}")
+                if status_text:
+                    self.status.setText(status_text)
+                else:
+                    self.status.setText(f"LIVE | {datetime.datetime.now().strftime('%H:%M:%S')}")
             else:
                 self.status.setText("Warte auf Kameradaten...")
         except Exception as exc:
@@ -979,7 +993,7 @@ class AutofocusView(QWidget):
         layout.addStretch() # Push everything up to keep it tight
         
         self._update_button_styles()
-        self._init_laser_controller(self._current_dev_idx)
+        # Start controller lazily when the view is shown.
 
     def _get_frame(self):
         try:
@@ -1072,6 +1086,10 @@ class AutofocusView(QWidget):
             self._laser.centerChanged.connect(self._on_laser_center)
             self._laser.start()
             try:
+                self._set_exposure(self.spin_expo.value())
+            except Exception:
+                pass
+            try:
                 self.btn_toggle_ref.setText("Save Justage")
                 self.lbl_ref.setText("Ref: —")
             except Exception:
@@ -1079,6 +1097,21 @@ class AutofocusView(QWidget):
         except Exception as exc:
             self._laser = None
             print(f"[WARN] Laser-Controller konnte nicht gestartet werden: {exc}")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._laser is None:
+            self._init_laser_controller(self._current_dev_idx)
+
+    def hideEvent(self, event):
+        if self._laser is not None:
+            try:
+                self._laser.stop()
+                self._laser.shutdown()
+            except Exception:
+                pass
+            self._laser = None
+        super().hideEvent(event)
 
     def _on_laser_frame(self, qimg: QImage):
         try:
@@ -2063,6 +2096,134 @@ class GitterschieberView(QWidget):
         container.value_label = v
         return container
 
+
+class OptikkoerperView(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"background-color: {COLORS['bg']};")
+        self._cam = None
+        self._last_error = None
+        self._expo_initialized = False
+        self._updating_expo = False
+        self.cam_embed = None
+        self.spin_expo = None
+        self.slider_expo = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(15)
+
+        monitor_card = Card()
+        monitor_card.setStyleSheet(monitor_card.styleSheet() + "border-color: #333;")
+        self.cam_embed = LiveCamEmbed(self._get_frame, interval_ms=100, start_immediately=True)
+        monitor_card.add_widget(self.cam_embed)
+        layout.addWidget(monitor_card)
+
+        expo_card = Card("EXPOSURE")
+        sl = QVBoxLayout()
+        sl.setSpacing(8)
+        self.spin_expo = QDoubleSpinBox()
+        self.spin_expo.setRange(0.01, 500.0)
+        self.spin_expo.setValue(20.0)
+        self.spin_expo.setSuffix(" ms")
+        self.spin_expo.setFixedHeight(30)
+        self.spin_expo.setStyleSheet(f"background: {COLORS['surface_light']}; border-radius: 4px; padding: 2px;")
+        sl.addWidget(self.spin_expo)
+
+        self.slider_expo = QSlider(Qt.Horizontal)
+        self.slider_expo.setRange(1, 5000)
+        self.slider_expo.setValue(200)
+        sl.addWidget(self.slider_expo)
+
+        self.spin_expo.valueChanged.connect(lambda v: self.slider_expo.setValue(int(v * 10)))
+        self.slider_expo.valueChanged.connect(lambda v: self.spin_expo.setValue(v / 10.0))
+        self.spin_expo.valueChanged.connect(self._set_exposure)
+
+        expo_card.add_layout(sl)
+        layout.addWidget(expo_card)
+        layout.addStretch()
+
+    def _ensure_cam(self):
+        if self._cam is None:
+            self._cam = IdsCam(index=0, set_min_exposure=False)
+        try:
+            self._last_error = None
+            if not self._expo_initialized:
+                self._init_exposure_controls()
+            return True
+        except Exception as exc:
+            self._last_error = str(exc)
+            return False
+
+    def _get_frame(self):
+        if not self._ensure_cam():
+            return None
+        try:
+            frame = self._cam.aquise_frame()
+        except Exception as exc:
+            self._last_error = str(exc)
+            return None
+        if frame is None:
+            return None
+        if frame.dtype != np.uint8:
+            if frame.dtype == np.uint16:
+                frame = (frame >> 8).astype(np.uint8)
+            else:
+                max_val = float(frame.max()) if frame.size else 0.0
+                if max_val > 0:
+                    frame = (frame.astype(np.float32) / max_val * 255.0).astype(np.uint8)
+                else:
+                    frame = np.zeros_like(frame, dtype=np.uint8)
+        return frame
+
+    def _init_exposure_controls(self):
+        if self._cam is None or self.spin_expo is None or self.slider_expo is None:
+            return
+        try:
+            curr_us, min_us, max_us = self._cam.get_exposure_limits_us()
+        except Exception:
+            return
+
+        min_ms = max(0.01, float(min_us) / 1000.0)
+        max_ms = max(min_ms + 0.01, float(max_us) / 1000.0)
+        max_ms = min(max_ms, 10000.0)
+        self._updating_expo = True
+        self.spin_expo.setRange(min_ms, max_ms)
+        self.slider_expo.setRange(int(min_ms * 10), int(max_ms * 10))
+        curr_ms = max(min_ms, min(max_ms, float(curr_us) / 1000.0))
+        self.spin_expo.setValue(curr_ms)
+        self.slider_expo.setValue(int(curr_ms * 10))
+        self._updating_expo = False
+        self._expo_initialized = True
+
+    def _set_exposure(self, val_ms):
+        if self._updating_expo:
+            return
+        if self._cam is None:
+            return
+        try:
+            self._cam.set_exposure_us(float(val_ms) * 1000.0)
+        except Exception as exc:
+            self._last_error = str(exc)
+            if self.cam_embed is not None:
+                self.cam_embed.status.setText(f"EXPOSURE-Fehler: {exc}")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.cam_embed is not None:
+            self.cam_embed.start()
+
+    def hideEvent(self, event):
+        if self.cam_embed is not None:
+            self.cam_embed.stop()
+        if self._cam is not None:
+            self._cam.shutdown()
+            self._cam = None
+        self._expo_initialized = False
+        super().hideEvent(event)
+
+
 class PlaceholderView(QWidget):
     def __init__(self, title):
         super().__init__()
@@ -2076,6 +2237,175 @@ class PlaceholderView(QWidget):
         sub = QLabel("Module under development")
         sub.setStyleSheet(f"color: {COLORS['text_muted']}; margin-top: 10px;")
         layout.addWidget(sub)
+
+
+class LaserscanView(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"background-color: {COLORS['bg']};")
+        self._cam = None
+        self._last_error = None
+        self._expo_initialized = False
+        self._updating_expo = False
+        self._frame_counter = 0
+        self._last_signature = None
+        self._static_count = 0
+        self.cam_embed = None
+        self.spin_expo = None
+        self.slider_expo = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(15)
+
+        card = Card("PCO Panda")
+        if PcoCameraBackend is None:
+            msg = "PCO Backend nicht verfuegbar"
+            if _PCO_IMPORT_ERROR:
+                msg = f"{msg}: {_PCO_IMPORT_ERROR}"
+            lbl = QLabel(msg)
+            lbl.setStyleSheet(f"color: {COLORS['text_muted']};")
+            card.add_widget(lbl)
+        else:
+            self.cam_embed = LiveCamEmbed(self._get_frame, interval_ms=100, start_immediately=True)
+            card.add_widget(self.cam_embed)
+
+        layout.addWidget(card)
+
+        expo_card = Card("EXPOSURE")
+        sl = QVBoxLayout()
+        sl.setSpacing(8)
+        self.spin_expo = QDoubleSpinBox()
+        self.spin_expo.setRange(0.01, 500.0)
+        self.spin_expo.setValue(20.0)
+        self.spin_expo.setSuffix(" ms")
+        self.spin_expo.setFixedHeight(30)
+        self.spin_expo.setStyleSheet(f"background: {COLORS['surface_light']}; border-radius: 4px; padding: 2px;")
+        sl.addWidget(self.spin_expo)
+
+        self.slider_expo = QSlider(Qt.Horizontal)
+        self.slider_expo.setRange(1, 5000)
+        self.slider_expo.setValue(200)
+        sl.addWidget(self.slider_expo)
+
+        self.spin_expo.valueChanged.connect(lambda v: self.slider_expo.setValue(int(v * 10)))
+        self.slider_expo.valueChanged.connect(lambda v: self.spin_expo.setValue(v / 10.0))
+        self.spin_expo.valueChanged.connect(self._set_exposure)
+
+        expo_card.add_layout(sl)
+        layout.addWidget(expo_card)
+        layout.addStretch()
+
+    def _ensure_cam(self):
+        if self._cam is None:
+            self._cam = PcoCameraBackend()
+        try:
+            self._cam.start()
+            self._last_error = None
+            if not self._expo_initialized:
+                self._init_exposure_controls()
+            return True
+        except Exception as exc:
+            self._last_error = str(exc)
+            return False
+
+    def _get_frame(self):
+        if PcoCameraBackend is None:
+            return None
+        if not self._ensure_cam():
+            return None
+        try:
+            frame = self._cam.get_frame()
+        except Exception as exc:
+            self._last_error = str(exc)
+            return None
+        if frame is None:
+            return None
+        if frame.dtype != np.uint8:
+            if frame.dtype == np.uint16:
+                frame = (frame >> 8).astype(np.uint8)
+            else:
+                max_val = float(frame.max()) if frame.size else 0.0
+                if max_val > 0:
+                    frame = (frame.astype(np.float32) / max_val * 255.0).astype(np.uint8)
+                else:
+                    frame = np.zeros_like(frame, dtype=np.uint8)
+        self._frame_counter += 1
+        rec_count = None
+        if self._cam is not None:
+            rec_count = self._cam.get_recorded_count()
+        if frame.size:
+            sample = frame[::64, ::64]
+            signature = (int(sample.min()), int(sample.max()), int(sample.mean()))
+        else:
+            signature = (0, 0, 0)
+
+        if signature == self._last_signature:
+            self._static_count += 1
+        else:
+            self._static_count = 0
+            self._last_signature = signature
+
+        ts = datetime.datetime.now().strftime('%H:%M:%S')
+        status = (
+            f"LIVE | {ts} | min={signature[0]} max={signature[1]} mean={signature[2]} "
+            f"| frame={self._frame_counter}"
+        )
+        if rec_count is not None:
+            status += f" | rec={rec_count}"
+        if self._static_count > 5:
+            status += f" | STATIC x{self._static_count}"
+        return frame, status
+
+    def _init_exposure_controls(self):
+        if self._cam is None or self.spin_expo is None or self.slider_expo is None:
+            return
+        limits = self._cam.get_exposure_limits_s()
+        if limits is not None:
+            min_s, max_s = limits
+            min_ms = max(0.01, min_s * 1000.0)
+            max_ms = max(min_ms + 0.01, max_s * 1000.0)
+            max_ms = min(max_ms, 10000.0)
+            self._updating_expo = True
+            self.spin_expo.setRange(min_ms, max_ms)
+            self.slider_expo.setRange(int(min_ms * 10), int(max_ms * 10))
+            self._updating_expo = False
+
+        curr_s = self._cam.get_exposure_s()
+        if curr_s is not None:
+            curr_ms = max(self.spin_expo.minimum(), min(self.spin_expo.maximum(), curr_s * 1000.0))
+            self._updating_expo = True
+            self.spin_expo.setValue(curr_ms)
+            self.slider_expo.setValue(int(curr_ms * 10))
+            self._updating_expo = False
+        self._expo_initialized = True
+
+    def _set_exposure(self, val_ms):
+        if self._updating_expo:
+            return
+        if self._cam is None:
+            return
+        try:
+            self._cam.set_exposure_ms(val_ms)
+        except Exception as exc:
+            self._last_error = str(exc)
+            if self.cam_embed is not None:
+                self.cam_embed.status.setText(f"EXPOSURE-Fehler: {exc}")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.cam_embed is not None:
+            self.cam_embed.start()
+
+    def hideEvent(self, event):
+        if self.cam_embed is not None:
+            self.cam_embed.stop()
+        if self._cam is not None:
+            self._cam.stop()
+            self._cam = None
+        self._expo_initialized = False
+        super().hideEvent(event)
 
 # --- NAVIGATION SIDEBAR ---
 
@@ -2160,10 +2490,11 @@ class MainWindow(QMainWindow):
         
         self.btn_ztrieb = add_nav("Z-Trieb", ZTriebView())
         self.btn_af = add_nav("Autofocus", AutofocusView())
+        add_nav("Optikkorper", OptikkoerperView())
         
         add_nav("Stage Control", StageControlView())
         add_nav("Gitterschieber", GitterschieberView())
-        add_nav("Laserscan", PlaceholderView("Laserscan"))
+        add_nav("Laserscan", LaserscanView())
         
         side_layout.addStretch()
         
@@ -2199,7 +2530,7 @@ class MainWindow(QMainWindow):
         hl = QHBoxLayout(header)
         hl.setContentsMargins(30, 0, 30, 0)
         
-        self.page_title = QLabel("Production Dashboard")
+        self.page_title = QLabel("Resolve Production Tool")
         self.page_title.setStyleSheet("font-size: 20px; font-weight: 700; letter-spacing: -0.5px;")
         
         search_bar = QLineEdit()
