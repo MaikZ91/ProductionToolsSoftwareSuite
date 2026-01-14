@@ -20,12 +20,6 @@ import pandas as pd
 pd.set_option('future.no_silent_downcasting', True)
 import numpy as np
 
-# Ensure relocated modules are importable (./Hardware, ./Algorithmen)
-_BASE_DIR = pathlib.Path(__file__).resolve().parent
-for _sub in ("Hardware", "Algorithmen"):
-    _cand = _BASE_DIR / _sub
-    if _cand.exists():
-        sys.path.insert(0, str(_cand))
 
 import cv2
 
@@ -65,15 +59,11 @@ from z_trieb import ZTriebController
 import gitterschieber as gs
 from z_trieb import ZTriebWidget
 import stage_control as resolve_stage
-try:
-    from panda import PcoCameraBackend
-    _PCO_IMPORT_ERROR = None
-except Exception as _exc:
-    PcoCameraBackend = None
-    _PCO_IMPORT_ERROR = str(_exc)
+from ie_Framework.Hardware.Camera.panda import PcoCameraBackend
+
 
 # ========================== DATENBANK / INFRA ==========================
-BASE_DIR = _BASE_DIR
+
 DASHBOARD_WIDGET_CLS, _DASHBOARD_IMPORT_ERROR = (None, None)
 
 # --- THEME CONFIGURATION ---
