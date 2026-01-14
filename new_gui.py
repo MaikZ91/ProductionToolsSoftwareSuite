@@ -31,7 +31,8 @@ import cv2
 
 from PySide6.QtCore import (
     Qt, QTimer, QSize, QPoint, QRect, Signal, Slot, QPropertyAnimation, QEasingCurve,
-    QObject, QThread, QRegularExpression, QEvent, QSortFilterProxyModel, QAbstractTableModel
+    QObject, QThread, QRegularExpression, QEvent, QSortFilterProxyModel, QAbstractTableModel,
+    QMetaObject
 )
 from PySide6.QtGui import (
     QColor, QPalette, QFont, QPainter, QPen, QBrush, QLinearGradient, QGradient, QIcon,
@@ -69,7 +70,7 @@ import stage_control as resolve_stage
 BASE_DIR = _BASE_DIR
 DASHBOARD_WIDGET_CLS, _DASHBOARD_IMPORT_ERROR = (None, None)
 
-# --- THEME CONFIGURATION (Matches Tailwind Config) ---
+# --- THEME CONFIGURATION ---
 COLORS = {
     "bg": "#000000",           # Main Background
     "surface": "#0d0d0d",      # Card Background
@@ -85,7 +86,7 @@ COLORS = {
 }
 
 FONTS = {
-    "ui": "Segoe UI", # Fallback for Inter/Manrope
+    "ui": "Segoe UI",
     "mono": "Consolas",
 }
 
@@ -108,16 +109,16 @@ QWidget {{
 /* SCROLLBARS */
 QScrollBar:vertical {{
     border: none;
-    background: {COLORS['bg']};
-    width: 8px;
-    margin: 0px 0px 0px 0px;
+    background: #050505;
+    width: 10px;
+    margin: 0px;
 }}
 QScrollBar::handle:vertical {{
-    background: {COLORS['border']};
-    min-height: 20px;
-    border-radius: 4px;
+    background: #444444;
+    min-height: 30px;
+    border-radius: 5px;
 }}
-QScrollBar::handle:vertical:hover {{ background: {COLORS['surface_light']}; }}
+QScrollBar::handle:vertical:hover {{ background: #666666; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
 
 QScrollBar:horizontal {{
@@ -292,10 +293,9 @@ class ModernButton(QPushButton):
                 QPushButton:hover {{ background-color: rgba(239, 68, 68, 0.2); }}
             """)
 
+
 class Card(QFrame):
-    """
-    Simulates the rounded, bordered card component.
-    """
+    """Rounded, bordered card component."""
     def __init__(self, title=None, parent=None):
         super().__init__(parent)
         self.setStyleSheet(f"""
@@ -307,10 +307,9 @@ class Card(QFrame):
         """)
         
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(0, 0, 0, 0) # Handle padding internally
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
-        # Header
         if title:
             header_frame = QFrame()
             header_frame.setStyleSheet(f"border-bottom: 1px solid {COLORS['border']}; border-radius: 16px 16px 0 0; background-color: {COLORS['surface']}; border-left: none; border-right: none; border-top: none;")
@@ -320,16 +319,13 @@ class Card(QFrame):
             lbl = QLabel(title)
             lbl.setStyleSheet("border: none; font-size: 13px; font-weight: 700; letter-spacing: 0.3px;")
             header_layout.addWidget(lbl)
-            
             self.main_layout.addWidget(header_frame)
 
-        # Body
         self.content_widget = QWidget()
         self.content_widget.setStyleSheet("border: none;")
         self.content_layout = QVBoxLayout(self.content_widget)
         self.content_layout.setContentsMargins(16, 12, 16, 12)
         self.content_layout.setSpacing(12)
-        
         self.main_layout.addWidget(self.content_widget)
 
     def add_widget(self, widget):
@@ -337,6 +333,7 @@ class Card(QFrame):
 
     def add_layout(self, layout):
         self.content_layout.addLayout(layout)
+
 
 class StatusBadge(QLabel):
     def __init__(self, text, status="success"):
@@ -397,47 +394,36 @@ class DashboardView(QWidget):
         self._is_fetching = False
         self.data_updated.connect(self._on_data_received)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(15)
+        # Main layout for the entire view (Horizontal split)
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(20)
 
-        # Main horizontal split
-        main_h_split = QHBoxLayout()
-        main_h_split.setSpacing(15)
-
-        # --- LEFT SIDE: CONTROLS & KPIs (Wrapped in ScrollArea) ---
-        self.left_scroll = QScrollArea()
-        self.left_scroll.setWidgetResizable(True)
-        self.left_scroll.setFrameShape(QFrame.NoFrame)
-        self.left_scroll.setStyleSheet("background: transparent; border: none;")
-        
-        left_container = QWidget()
-        left_container.setStyleSheet("background: transparent;")
-        left_side = QVBoxLayout(left_container)
-        left_side.setContentsMargins(0, 0, 5, 0) # Small margin for scrollbar
+        # --- LEFT SIDE: CONTROLS ---
+        left_side = QVBoxLayout()
         left_side.setSpacing(15)
 
         # 0. Selection & Refresh
         controls_card = Card("Data Source")
         cl = QVBoxLayout()
         cl.setSpacing(8)
-        
         self.combo_testtype = QComboBox()
         self.combo_testtype.addItems(["kleberoboter", "gitterschieber_tool", "stage_test"])
         self.combo_testtype.currentIndexChanged.connect(self.trigger_refresh)
         self.combo_testtype.setFixedHeight(36)
         cl.addWidget(self.combo_testtype)
-        
         self.status_indicator = QPushButton("● LIVE")
         self.status_indicator.setCursor(Qt.PointingHandCursor)
         self.status_indicator.clicked.connect(self.trigger_refresh)
         self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['success']}; font-weight: 800; font-size: 11px; text-align: left; padding-left: 5px; }}")
         cl.addWidget(self.status_indicator)
-        
         controls_card.add_layout(cl)
         left_side.addWidget(controls_card)
 
-        # 1. KPIs (Vertical Stack for compactness)
+        # 1. New Record (Moved UP to ensure visibility)
+        self.setup_entry_ui_compact(left_side)
+
+        # 2. Key Metrics
         kpi_card = Card("Key Metrics")
         kl = QVBoxLayout()
         kl.setSpacing(10)
@@ -446,32 +432,31 @@ class DashboardView(QWidget):
         self.kpi_last = self.add_kpi_compact(kl, "Latest", "---", COLORS['success'])
         kpi_card.add_layout(kl)
         left_side.addWidget(kpi_card)
-
-        # 3. Data Entry mask (Compact version)
-        self.setup_entry_ui_compact(left_side)
+        
         left_side.addStretch()
+        main_layout.addLayout(left_side, 1)
 
-        self.left_scroll.setWidget(left_container)
-        main_h_split.addWidget(self.left_scroll, 1)
-
-        # --- RIGHT SIDE: TABLE ---
-        table_card = Card("Recent Activity")
+        # --- RIGHT SIDE: ACTIVITY TABLE ---
+        activity_card = Card("Recent Activity")
+        al = QVBoxLayout()
+        al.setContentsMargins(0, 0, 0, 0)
+        
         self.table = QTableWidget()
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(["Time", "Barcode", "User", "Status", "Details"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setFocusPolicy(Qt.NoFocus)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setShowGrid(False)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
-        table_card.add_widget(self.table)
-        main_h_split.addWidget(table_card, 2)
-
-        layout.addLayout(main_h_split)
+        # Style the header
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        
+        activity_card.add_widget(self.table)
+        main_layout.addWidget(activity_card, 2)
 
         # 4. Live Update Timer
         self.timer = QTimer(self)
@@ -787,7 +772,7 @@ def frame_to_qpixmap(frame, target_size=None) -> QPixmap:
         return QPixmap()
 
 class LiveCamEmbed(QWidget):
-    """Einfacher Live-Kameraview für BGR/Mono Frames mit Frame-Provider."""
+    """Live camera view widget for BGR/Mono frames."""
     def __init__(self, frame_provider, *, interval_ms: int = 150, start_immediately: bool = True, parent=None):
         super().__init__(parent)
         self._frame_provider = frame_provider
@@ -797,8 +782,9 @@ class LiveCamEmbed(QWidget):
         
         self.label = QLabel("Kein Bild")
         self.label.setAlignment(Qt.AlignCenter)
-        self.label.setMinimumHeight(400)
-        self.label.setStyleSheet(f"background-color: {COLORS['bg']}; border-radius: 12px; border: 1px solid {COLORS['border']};")
+        self.label.setFixedHeight(380) # Fixed height to prevent layout jumps
+        self.label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.label.setStyleSheet(f"background-color: #050505; border-radius: 8px; border: 1px solid {COLORS['border']};")
         
         self.status = QLabel("Warte auf Frame...")
         self.status.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
@@ -840,6 +826,39 @@ class LiveCamEmbed(QWidget):
         except Exception as exc:
             self.status.setText(f"Kamera-Fehler: {exc}")
 
+def add_camera_monitor(layout, frame_provider, title="Monitor", stretch=1):
+    """
+    Creates a complete camera monitoring card and adds it to the layout.
+    """
+    card = Card(title)
+    cam = LiveCamEmbed(frame_provider)
+    card.add_widget(cam)
+    layout.addWidget(card, stretch)
+    return cam
+
+class CameraWindow(QWidget):
+    """Standalone window for camera monitoring."""
+    def __init__(self, frame_provider, title="Camera Feed", size=(800, 600)):
+        super().__init__()
+        self.setWindowTitle(title)
+        self.resize(*size)
+        self.setStyleSheet(f"background-color: {COLORS['bg']};")
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        self.cam = add_camera_monitor(layout, frame_provider, title=None)
+        
+    def closeEvent(self, event):
+        self.cam.stop()
+        super().closeEvent(event)
+
+def open_camera_window(frame_provider, title="Camera Feed"):
+    """Helper to open a standalone camera window."""
+    win = CameraWindow(frame_provider, title)
+    win.show()
+    return win
+
+
 class AutofocusView(QWidget):
     """Modern UI for Autofocus / Kollimator Tool."""
     def __init__(self, parent=None):
@@ -851,84 +870,75 @@ class AutofocusView(QWidget):
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 30, 30, 30)
-        layout.setSpacing(24)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(15)
 
-        # Top Row: Camera Selection and Exposure
-        top_row = QHBoxLayout()
-        top_row.setSpacing(24)
+        # --- TOP: LIVE MONITOR (STABLE HEIGHT) ---
+        # Card without title to save vertical space
+        monitor_card = Card() 
+        monitor_card.setStyleSheet(monitor_card.styleSheet() + "border-color: #333;")
+        self.cam_embed = LiveCamEmbed(self._get_frame)
+        monitor_card.add_widget(self.cam_embed)
+        layout.addWidget(monitor_card)
+        
+        # --- BOTTOM: CONTROLS (HORIZONTAL & COMPACT) ---
+        controls_row = QHBoxLayout()
+        controls_row.setSpacing(15)
 
-        # Camera Selection
-        cam_card = Card("Kamera Auswahl")
-        cl = QVBoxLayout()
-        cl.setSpacing(10)
+        # 1. Camera Selection - Compact Grid
+        cam_card = Card("SYSTEM")
+        cam_layout = QGridLayout()
+        cam_layout.setSpacing(6)
         
         cams = [
-            ("Autofocus", 0),
-            ("Resolve 40x", 1),
-            ("Resolve 2", 2),
+            ("AF-Cam", 0),
+            ("Res-40x", 1),
+            ("Res-2", 2),
             ("MacSEQ", 3),
         ]
         self.btn_group = []
-        for text, idx in cams:
+        for i, (text, idx) in enumerate(cams):
             btn = ModernButton(text, "secondary")
-            btn.clicked.connect(lambda _, i=idx: self._select_camera(i))
-            cl.addWidget(btn)
+            btn.setMinimumHeight(34)
+            btn.setFont(QFont(FONTS['ui'], 11, QFont.Bold))
+            btn.clicked.connect(lambda _, id=idx: self._select_camera(id))
+            cam_layout.addWidget(btn, i // 2, i % 2)
             self.btn_group.append(btn)
         
-        # Highlight first button
-        self._update_button_styles()
-        
-        cam_card.add_layout(cl)
-        top_row.addWidget(cam_card, 1)
+        cam_card.add_layout(cam_layout)
+        controls_row.addWidget(cam_card, 2)
 
-        # Exposure Controls
-        expo_card = Card("Belichtung (Exposure)")
-        el = QVBoxLayout()
-        el.setSpacing(15)
+        # 2. Exposure Control - Very Narrow
+        expo_card = Card("EXPOSURE")
+        sl = QVBoxLayout()
+        sl.setSpacing(8)
         
-        lbl_expo = QLabel("EXPOSURE (ms)")
-        lbl_expo.setStyleSheet(f"font-size: 11px; font-weight: 700; color: {COLORS['text_muted']}; border: none;")
-        el.addWidget(lbl_expo)
-        
+        header = QHBoxLayout()
         self.spin_expo = QDoubleSpinBox()
         self.spin_expo.setRange(0.01, 500.0)
         self.spin_expo.setValue(20.0)
-        self.spin_expo.setDecimals(2)
         self.spin_expo.setSuffix(" ms")
-        self.spin_expo.setStyleSheet(f"""
-            QDoubleSpinBox {{
-                background-color: {COLORS['surface_light']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 8px;
-                padding: 10px;
-                font-size: 16px;
-                color: {COLORS['text']};
-            }}
-        """)
-        el.addWidget(self.spin_expo)
+        self.spin_expo.setFixedHeight(30)
+        self.spin_expo.setStyleSheet(f"background: {COLORS['surface_light']}; border-radius: 4px; padding: 2px;")
+        header.addWidget(self.spin_expo)
+        sl.addLayout(header)
         
         self.slider_expo = QSlider(Qt.Horizontal)
-        self.slider_expo.setRange(1, 5000) # 0.1ms steps -> 0.1ms to 500ms
+        self.slider_expo.setRange(1, 5000)
         self.slider_expo.setValue(200)
-        el.addWidget(self.slider_expo)
+        sl.addWidget(self.slider_expo)
         
-        # Link slider and spinbox
         self.spin_expo.valueChanged.connect(lambda v: self.slider_expo.setValue(int(v * 10)))
         self.slider_expo.valueChanged.connect(lambda v: self.spin_expo.setValue(v / 10.0))
         self.spin_expo.valueChanged.connect(self._set_exposure)
         
-        el.addStretch()
-        expo_card.add_layout(el)
-        top_row.addWidget(expo_card, 1)
-        
-        layout.addLayout(top_row)
+        expo_card.add_layout(sl)
+        controls_row.addWidget(expo_card, 1)
 
-        # Main Camera View
-        video_card = Card("Monitor")
-        self.cam_embed = LiveCamEmbed(self._get_frame)
-        video_card.add_widget(self.cam_embed)
-        layout.addWidget(video_card, 3)
+        layout.addLayout(controls_row)
+        layout.addStretch() # Push everything up to keep it tight
+        
+        self._update_button_styles()
 
     def _get_frame(self):
         try:
@@ -1729,26 +1739,17 @@ class StageControlView(QWidget):
 class GitterschieberView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.executor = ThreadPoolExecutor(max_workers=2)
+        self._overlay_active = False
+        self._last_frame = None
+        self._last_overlay = None
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(30, 30, 30, 30)
         layout.setSpacing(24)
         
         # Visualizer Card (Left)
-        viz_card = Card()
-        
-        # Custom Paint Widget for the "Live Feed" look
-        self.viz_widget = QWidget()
-        self.viz_widget.setStyleSheet(f"background-color: #000; border-radius: 12px;")
-        
-        # Mock overlay layout
-        vl = QVBoxLayout(self.viz_widget)
-        badge = QLabel(" • LIVE ANALYSIS ")
-        badge.setStyleSheet(f"background-color: rgba(0,0,0,0.6); color: {COLORS['primary']}; border-radius: 4px; padding: 4px 8px; font-weight: bold; font-size: 11px;")
-        vl.addWidget(badge, 0, Qt.AlignLeft | Qt.AlignTop)
-        vl.addStretch()
-        
-        viz_card.add_widget(self.viz_widget)
-        layout.addWidget(viz_card, 2)
+        self.cam_embed = add_camera_monitor(layout, self._get_frame, title="Live Feed", stretch=2)
         
         # Controls (Right)
         right_panel = QVBoxLayout()
@@ -1757,25 +1758,107 @@ class GitterschieberView(QWidget):
         ctrl_card = Card("Analysis Control")
         cl = QVBoxLayout()
         cl.setSpacing(12)
-        cl.addWidget(ModernButton("Detect Particles", "primary"))
-        cl.addWidget(ModernButton("Measure Angle", "secondary"))
-        cl.addWidget(ModernButton("Autofocus", "ghost"))
-        ctrl_card.add_layout(cl)
+        self.btn_detect = ModernButton("Detect Particles", "primary")
+        self.btn_detect.clicked.connect(self._detect_particles)
+        cl.addWidget(self.btn_detect)
+
+        self.btn_angle = ModernButton("Measure Angle", "secondary")
+        self.btn_angle.clicked.connect(self._measure_angle)
+        cl.addWidget(self.btn_angle)
+
+        self.btn_af = ModernButton("Autofocus", "ghost")
+        self.btn_af.clicked.connect(self._run_autofocus)
+        cl.addWidget(self.btn_af)
         
+        ctrl_card.add_layout(cl)
         right_panel.addWidget(ctrl_card)
         
         metric_card = Card("Metrics")
         ml = QVBoxLayout()
         ml.setSpacing(16)
         
-        self.add_metric(ml, "Calculated Angle", "0.05°", COLORS['text'])
-        self.add_metric(ml, "Particle Count", "142", COLORS['primary'])
+        self.metric_angle = self.add_metric(ml, "Calculated Angle", "---", COLORS['text'])
+        self.metric_particles = self.add_metric(ml, "Particle Count", "---", COLORS['primary'])
         
         metric_card.add_layout(ml)
         right_panel.addWidget(metric_card)
         right_panel.addStretch()
         
         layout.addLayout(right_panel, 1)
+
+    def _get_frame(self):
+        if self._overlay_active and self._last_overlay is not None:
+            return self._last_overlay
+        frame = gs.capture_frame()
+        self._last_frame = frame
+        return frame
+
+    def _detect_particles(self):
+        self.btn_detect.setEnabled(False)
+        self.btn_detect.setText("Analyzing...")
+        
+        def task():
+            try:
+                # Capture fresh frame if live is off, or use last
+                frame = gs.capture_frame()
+                if frame is None: return
+                
+                results = gs.process_image(frame)
+                count = results["count"]
+                overlay = results["overlay"]
+                
+                # Update UI
+                def update_ui():
+                    self.metric_particles.value_label.setText(str(count))
+                    self._last_overlay = overlay
+                    self._overlay_active = True
+                    # Reset overlay after 4 seconds
+                    QTimer.singleShot(4000, self._clear_overlay)
+                    self.btn_detect.setEnabled(True)
+                    self.btn_detect.setText("Detect Particles")
+
+                QMetaObject.invokeMethod(self, update_ui)
+            except Exception as e:
+                print(f"Detection Error: {e}")
+                QMetaObject.invokeMethod(self, lambda: self.btn_detect.setEnabled(True))
+
+        self.executor.submit(task)
+
+    def _clear_overlay(self):
+        self._overlay_active = False
+        self._last_overlay = None
+
+    def _measure_angle(self):
+        self.btn_angle.setEnabled(False)
+        self.btn_angle.setText("Measuring...")
+        
+        def task():
+            try:
+                angle = gs.MeasureSingleImageGratingAngle()
+                def update_ui():
+                    self.metric_angle.value_label.setText(f"{angle:.3f}°")
+                    self.btn_angle.setEnabled(True)
+                    self.btn_angle.setText("Measure Angle")
+                QMetaObject.invokeMethod(self, update_ui)
+            except Exception as e:
+                print(f"Angle Error: {e}")
+                QMetaObject.invokeMethod(self, lambda: self.btn_angle.setEnabled(True))
+
+        self.executor.submit(task)
+
+    def _run_autofocus(self):
+        self.btn_af.setEnabled(False)
+        self.btn_af.setText("Focusing...")
+        
+        def task():
+            try:
+                gs.autofocus()
+                QMetaObject.invokeMethod(self, lambda: (self.btn_af.setEnabled(True), self.btn_af.setText("Autofocus")))
+            except Exception as e:
+                print(f"AF Error: {e}")
+                QMetaObject.invokeMethod(self, lambda: self.btn_af.setEnabled(True))
+
+        self.executor.submit(task)
 
     def add_metric(self, layout, label, value, color):
         container = QFrame()
@@ -1789,6 +1872,8 @@ class GitterschieberView(QWidget):
         cl.addWidget(l)
         cl.addWidget(v)
         layout.addWidget(container)
+        container.value_label = v
+        return container
 
 class PlaceholderView(QWidget):
     def __init__(self, title):

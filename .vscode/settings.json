@@ -3,5 +3,9 @@
         "./Algorithmen",
         "./Hardware"
     ],
-    "python-envs.pythonProjects": []
+    "python-envs.pythonProjects": [],
+    "cursorpyright.analysis.extraPaths": [
+        "./Algorithmen",
+        "./Hardware"
+    ]
 }
