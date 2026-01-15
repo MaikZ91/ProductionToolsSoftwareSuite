@@ -1,0 +1,7 @@
+setuptools~=70.0.0
+PySide6~=6.5.3
+pandas~=2.2.0
+commonIE~=1.0.0
+pyqtgraph~=0.13.3
+numpy~=1.26.3
+matplotlib~=3.8.2

@@ -99,7 +99,7 @@ QWidget {{
     background-color: {COLORS['bg']}; 
     color: {COLORS['text']}; 
     font-family: "{FONTS['ui']}";
-    font-size: 14px;
+    font-size: 13px;
 }}
 
 /* SCROLLBARS */
@@ -778,7 +778,7 @@ class LiveCamEmbed(QWidget):
         
         self.label = QLabel("Kein Bild")
         self.label.setAlignment(Qt.AlignCenter)
-        self.label.setFixedHeight(380) # Fixed height to prevent layout jumps
+        self.label.setFixedHeight(280) # Reduced from 320 for better vertical fit
         self.label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.label.setStyleSheet(f"background-color: #050505; border-radius: 8px; border: 1px solid {COLORS['border']};")
         
@@ -888,13 +888,14 @@ class AutofocusView(QWidget):
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(15)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
 
         # --- TOP: LIVE MONITOR (STABLE HEIGHT) ---
         # Card without title to save vertical space
         monitor_card = Card() 
         monitor_card.setStyleSheet(monitor_card.styleSheet() + "border-color: #333;")
+        monitor_card.setFixedHeight(360) # Standard height for camera cards (Reduced from 410)
         self.cam_embed = LiveCamEmbed(lambda: None, start_immediately=False)
         monitor_card.add_widget(self.cam_embed)
         layout.addWidget(monitor_card)
@@ -1475,12 +1476,12 @@ class StageControlView(QWidget):
 
     def setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(30, 30, 30, 30)
-        layout.setSpacing(24)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(15)
 
         # Left Column
         left_col = QVBoxLayout()
-        left_col.setSpacing(24)
+        left_col.setSpacing(15)
         
         setup_card = Card("Test-Setup")
         
@@ -1974,11 +1975,18 @@ class GitterschieberView(QWidget):
         self._last_overlay = None
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(30, 30, 30, 30)
-        layout.setSpacing(24)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(15)
+        layout.setAlignment(Qt.AlignTop)
         
         # Visualizer Card (Left)
-        self.cam_embed = add_camera_monitor(layout, self._get_frame, title="Live Feed", stretch=2)
+        # Use a container widget to hold everything and prevent jumping
+        self.cam_embed = add_camera_monitor(layout, self._get_frame, title="Live Feed")
+        
+        # Fix dimensions for absolute stability
+        camera_card = self.cam_embed.parent().parent()
+        camera_card.setFixedHeight(360) # 280 image + header + buffers
+        camera_card.setFixedWidth(580)
         
         # Controls (Right)
         right_panel = QVBoxLayout()
@@ -2119,11 +2127,12 @@ class OptikkoerperView(QWidget):
         self.slider_expo = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(15)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
 
         monitor_card = Card()
         monitor_card.setStyleSheet(monitor_card.styleSheet() + "border-color: #333;")
+        monitor_card.setFixedHeight(360)
         self.cam_embed = LiveCamEmbed(self._get_frame, interval_ms=100, start_immediately=True)
         monitor_card.add_widget(self.cam_embed)
         layout.addWidget(monitor_card)
@@ -2264,8 +2273,8 @@ class LaserscanView(QWidget):
         self.slider_expo = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(15)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
 
         card = Card("PCO Panda")
         if PcoCameraBackend is None:
@@ -2423,7 +2432,7 @@ class SidebarButton(QPushButton):
         self.setCheckable(True)
         self.setAutoExclusive(True)
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(48)
+        self.setMinimumHeight(42)
         self.icon_char = icon_char
         
         self.setStyleSheet(f"""
@@ -2455,7 +2464,16 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Stage-Toolbox Pro")
-        self.resize(1280, 850)
+        
+        # Dynamic sizing: Strictly tied to the available screen vertical space.
+        screen_geo = QApplication.primaryScreen().availableGeometry()
+        w = min(1200, int(screen_geo.width() * 0.95))
+        # Use 85% of height to ensure the taskbar and title bar don't push it off-screen
+        h = int(screen_geo.height() * 0.85) 
+        self.resize(w, h)
+        
+        # Center the window
+        self.move(screen_geo.center() - self.rect().center())
         
         central = QWidget()
         self.setCentralWidget(central)
@@ -2467,15 +2485,15 @@ class MainWindow(QMainWindow):
         
         # 1. Sidebar
         self.sidebar = QFrame()
-        self.sidebar.setFixedWidth(260)
+        self.sidebar.setFixedWidth(230)
         self.sidebar.setStyleSheet(f"background-color: {COLORS['surface']}; border-right: 1px solid {COLORS['border']};")
         
         side_layout = QVBoxLayout(self.sidebar)
         side_layout.setContentsMargins(16, 24, 16, 24)
         
         # Brand
-        brand = QLabel("StageBox")
-        brand.setStyleSheet(f"font-size: 22px; font-weight: 800; color: {COLORS['primary']}; padding-left: 12px; margin-bottom: 30px;")
+        brand = QLabel("Resolve Production Tool")
+        brand.setStyleSheet(f"font-size: 16px; font-weight: 800; color: {COLORS['primary']}; padding-left: 12px; margin-bottom: 15px;")
         side_layout.addWidget(brand)
         
         # Nav Items
@@ -2487,7 +2505,10 @@ class MainWindow(QMainWindow):
             side_layout.addWidget(btn)
             self.stack.addWidget(widget)
             index = self.stack.count() - 1
-            btn.clicked.connect(lambda: self.stack.setCurrentIndex(index))
+            def on_click():
+                self.stack.setCurrentIndex(index)
+                self.page_title.setText(text)
+            btn.clicked.connect(on_click)
             return btn
             
         self.btn_dash = add_nav("Dashboard", DashboardView())
@@ -2533,12 +2554,12 @@ class MainWindow(QMainWindow):
         
         # Header Bar
         header = QFrame()
-        header.setFixedHeight(70)
+        header.setFixedHeight(60)
         header.setStyleSheet(f"background-color: {COLORS['bg']}; border-bottom: 1px solid {COLORS['border']};")
         hl = QHBoxLayout(header)
         hl.setContentsMargins(30, 0, 30, 0)
         
-        self.page_title = QLabel("Resolve Production Tool")
+        self.page_title = QLabel("Dashboard")
         self.page_title.setStyleSheet("font-size: 20px; font-weight: 700; letter-spacing: -0.5px;")
         
         search_bar = QLineEdit()
@@ -2555,7 +2576,13 @@ class MainWindow(QMainWindow):
         hl.addWidget(search_bar)
         
         content_col.addWidget(header)
-        content_col.addWidget(self.stack)
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("background-color: transparent;")
+        scroll.setWidget(self.stack)
+        content_col.addWidget(scroll)
         
         content_widget = QWidget()
         content_widget.setLayout(content_col)
@@ -2565,14 +2592,21 @@ class MainWindow(QMainWindow):
         self.btn_dash.click()
 
 if __name__ == "__main__":
+    # Enable High DPI Scaling for Windows
+    try:
+        from ctypes import windll
+        windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
     app.setStyleSheet(GLOBAL_STYLESHEET)
     
     # Set app font
     font = QFont(FONTS['ui'])
-    font.setPixelSize(14)
+    font.setPixelSize(13)
     app.setFont(font)
     
     window = MainWindow()
-    window.show()
+    window.showMaximized()
     sys.exit(app.exec())
