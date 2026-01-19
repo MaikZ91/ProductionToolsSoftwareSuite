@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QFrame, QStackedWidget, QLineEdit, QTextEdit, QTableWidget, QTableWidgetItem, QHeaderView,
     QGridLayout, QSlider, QSizePolicy, QScrollArea, QGraphicsDropShadowEffect, QAbstractItemView,
     QProgressBar, QMessageBox, QSpacerItem, QComboBox, QToolButton, QTableView, QDoubleSpinBox, QSpinBox,
-    QDialog, QListWidget, QCheckBox, QFormLayout, QGroupBox, QDial
+    QDialog, QListWidget, QCheckBox, QFormLayout, QGroupBox, QDial, QInputDialog
 )
 
 # Matplotlib integration
@@ -79,12 +79,398 @@ COLORS = {
     "text_muted": "#909090",
     "danger": "#ef4444",
     "success": "#10b981",
+    "warning": "#f59e0b",
 }
 
 FONTS = {
     "ui": "Segoe UI",
     "mono": "Consolas",
 }
+
+# --- STUDIO MODE / CONFIG MANAGER ---
+class ConfigManager:
+    _instance = None
+    CONFIG_FILE = "ui_config.json"
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(ConfigManager, cls).__new__(cls)
+            cls._instance.config = cls._instance._load()
+        return cls._instance
+
+    def _load(self):
+        if os.path.exists(self.CONFIG_FILE):
+            try:
+                with open(self.CONFIG_FILE, "r") as f:
+                    return json.load(f)
+            except: return {}
+        return {}
+
+    def save(self):
+        with open(self.CONFIG_FILE, "w") as f:
+            json.dump(self.config, f, indent=4)
+
+    def get(self, key, default):
+        return self.config.get(key, default)
+
+    def set(self, key, value):
+        self.config[key] = value
+        self.save()
+
+    def delete(self, key):
+        if key in self.config:
+            del self.config[key]
+            self.save()
+
+UI_CONFIG = ConfigManager()
+STUDIO_MODE = False 
+
+# ========================== CAMERA REGISTRY ==========================
+
+class GlobalCameraRegistry:
+    """Central registry to map indices or names to frame providers (Singletons)."""
+    def __init__(self):
+        # Name, Index/ID
+        self.cams = [
+            ("PCO Panda", -1),
+            ("IDS Camera 1 (Idx 0)", 0),
+            ("IDS Camera 2 (Idx 1)", 1),
+            ("IDS Camera 3 (Idx 2)", 2),
+            ("IDS Camera 4 (Idx 3)", 3),
+        ]
+        self._instances = {} # Map idx -> camera_instance
+
+    def get_instance(self, idx):
+        if idx in self._instances:
+            return self._instances[idx]
+            
+        instance = None
+        if idx == -1: # PCO
+            if PcoCameraBackend is not None:
+                try:
+                    instance = PcoCameraBackend()
+                    instance.start()
+                    print("[CameraRegistry] Started PCO Panda.")
+                except Exception as e:
+                    print(f"[CameraRegistry] Failed to start PCO: {e}")
+            else:
+                 print("[CameraRegistry] PCO Class not available.")
+        else: # IDS
+            # For IDS we use the autofocus helper which manages its own caching, 
+            # but here we might want a direct object if needed. 
+            # Actually autofocus.acquire_frame handles caching internally.
+            # So we don't strictly need an instance object here for IDS if we use the helper.
+            pass
+            
+        if instance:
+            self._instances[idx] = instance
+        return instance
+
+    def get_provider(self, idx):
+        """Returns a callable that returns a frame (QImage or numpy)."""
+        if idx == -1: # PCO
+            def pco_provider():
+                cam = self.get_instance(-1)
+                if cam:
+                    try:
+                        return cam.get_frame()
+                    except: return None
+                return None
+            return pco_provider
+        
+        # IDS via autofocus helper
+        def ids_provider():
+            try:
+                import autofocus
+                return autofocus.acquire_frame(idx)
+            except: return None
+        return ids_provider
+
+CAMERA_REGISTRY = GlobalCameraRegistry()
+class PropertyEditor(QDialog):
+    def __init__(self, target_widget, parent=None):
+        super().__init__(parent)
+        self.target = target_widget
+        self.setWindowTitle(f"Studio Editor: {target_widget.objectName() or 'Element'}")
+        self.setFixedWidth(320)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        self.setStyleSheet(f"background-color: {COLORS['surface']}; color: {COLORS['text']}; border: 1px solid {COLORS['border']};")
+        
+        layout = QFormLayout(self)
+        
+        # 1. Name/Text
+        # 1. Text Properties
+        self.le_text = QLineEdit()
+        self.le_placeholder = QLineEdit()
+        
+        # Determine current values
+        curr_text = ""
+        curr_placeholder = ""
+        
+        # Check text
+        if hasattr(target_widget, "text") and callable(target_widget.text):
+            curr_text = target_widget.text() 
+        elif isinstance(target_widget, Card) and hasattr(target_widget, "title_label"):
+             curr_text = target_widget.title_label.text()
+             
+        # Check placeholder
+        if hasattr(target_widget, "placeholderText") and callable(target_widget.placeholderText):
+            curr_placeholder = target_widget.placeholderText()
+
+        print(f"[Studio Debug] Editor Init: {target_widget.objectName()} | Text: '{curr_text}' | Placeholder: '{curr_placeholder}'")
+
+        self.le_text.setText(curr_text)
+        self.le_placeholder.setText(curr_placeholder)
+        
+        layout.addRow("Display Text:", self.le_text)
+        if hasattr(target_widget, "placeholderText") or isinstance(target_widget, QLineEdit):
+            layout.addRow("Placeholder:", self.le_placeholder)
+        
+        # 1.5 Object Name (Read Only)
+        self.lbl_id = QLabel(target_widget.objectName())
+        if not target_widget.objectName() or target_widget.objectName().startswith("qt_"):
+             self.lbl_id.setText(f"{type(target_widget).__name__} (WARNING: NO ID)")
+             self.lbl_id.setStyleSheet(f"color: {COLORS['warning']}; font-weight: bold; font-size: 11px;")
+             self.lbl_id.setToolTip("This element has no permanent ID. Changes might NOT stick after restart.")
+        else:
+             self.lbl_id.setStyleSheet("color: #666; font-size: 11px;")
+        layout.addRow("Object ID:", self.lbl_id)
+        self.le_color = QLineEdit()
+        self.le_color.setPlaceholderText("#RRGGBB")
+        layout.addRow("Background Color:", self.le_color)
+        
+        # 2. Dimensions
+        self.spin_w = QSpinBox(); self.spin_w.setRange(0, 2000); self.spin_w.setValue(target_widget.width())
+        self.spin_h = QSpinBox(); self.spin_h.setRange(0, 2000); self.spin_h.setValue(target_widget.height())
+        layout.addRow("Fixed Width:", self.spin_w)
+        layout.addRow("Fixed Height:", self.spin_h)
+        
+        # 3. Object ID (Internal)
+        # self.lbl_id = QLabel(target_widget.objectName() or "No ID (Rename Recommended)")
+        # layout.addRow("Object ID:", self.lbl_id)
+
+        btn_save = ModernButton("Apply & Save", "primary")
+        btn_save.clicked.connect(self.apply_changes)
+        layout.addRow(btn_save)
+
+        # Only show Delete if it's a dynamic element (starts with Dyn_ or inside StudioToolView)
+        is_dynamic = self.target.objectName().startswith("Dyn_")
+        parent = self.target.parent()
+        while parent:
+            if isinstance(parent, StudioToolView):
+                is_dynamic = True
+                break
+            parent = parent.parent()
+
+        if is_dynamic:
+            btn_delete = ModernButton("Delete Element", "danger")
+            btn_delete.clicked.connect(self.delete_widget)
+            layout.addRow(btn_delete)
+
+    def apply_changes(self):
+        obj_name = self.target.objectName()
+        if not obj_name:
+            obj_name = f"{type(self.target).__name__}_{id(self.target)}"
+            self.target.setObjectName(obj_name)
+            
+        props = {}
+        
+        # Apply Text
+        new_text = self.le_text.text()
+        # Only apply if changed or empty? Apply always to be safe.
+        if hasattr(self.target, "setText"):
+            self.target.setText(new_text)
+            props["text"] = new_text
+        elif isinstance(self.target, Card) and hasattr(self.target, "title_label") and self.target.title_label:
+            self.target.title_label.setText(new_text)
+            props["text"] = new_text
+            
+        # Apply Placeholder
+        if hasattr(self.target, "setPlaceholderText"):
+            new_ph = self.le_placeholder.text()
+            self.target.setPlaceholderText(new_ph)
+            props["placeholder"] = new_ph
+            
+        # Apply dimensions
+        if self.spin_w.value() > 0:
+            self.target.setFixedWidth(self.spin_w.value())
+            props["fixed_width"] = self.spin_w.value()
+        if self.spin_h.value() > 0:
+            self.target.setFixedHeight(self.spin_h.value())
+            props["fixed_height"] = self.spin_h.value()
+            
+        # Apply Color
+        new_color = self.le_color.text().strip()
+        if new_color.startswith("#") and len(new_color) == 7:
+            self.target.setStyleSheet(f"background-color: {new_color}; border: 1px solid {COLORS['border']}; border-radius: 8px;")
+            props["bg_color"] = new_color
+        
+        self.target.update()
+        if self.target.parent(): self.target.parent().update()
+            
+        UI_CONFIG.set(obj_name, props)
+        
+        # Sync with dynamic_tools if applicable
+        sync_dynamic_tool_config(obj_name, props)
+        self.accept()
+
+    def delete_widget(self):
+        confirm = QMessageBox.question(self, "Delete", f"Delete {self.target.objectName()}?", QMessageBox.Yes | QMessageBox.No)
+        if confirm == QMessageBox.Yes:
+            name = self.target.objectName()
+            UI_CONFIG.delete(name)
+            # Find in dynamic tools if needed
+            tools = UI_CONFIG.get("dynamic_tools", {})
+            for tname, tcfg in tools.items():
+                widgets = tcfg.get("widgets", [])
+                new_widgets = [w for w in widgets if w.get("id") != name]
+                if len(new_widgets) != len(widgets):
+                    tcfg["widgets"] = new_widgets
+                    UI_CONFIG.set("dynamic_tools", tools)
+                    break
+            self.target.setParent(None)
+            self.target.deleteLater()
+            self.accept()
+
+class GlobalEditFilter(QObject):
+    def eventFilter(self, obj, event):
+        if not STUDIO_MODE:
+            return False
+            
+        # Handle Injection logic
+        if event.type() == QEvent.Enter:
+             if self._is_editable(obj):
+                 self._ensure_handle(obj)
+
+        if event.type() == QEvent.MouseButtonPress:
+            if event.button() == Qt.RightButton:
+                target = QApplication.instance().widgetAt(event.globalPos())
+                if target:
+                    # Check for View background click
+                    temp = target
+                    while temp:
+                        if isinstance(temp, StudioToolView):
+                             # Only if we didn't click a child widget that is editable
+                             if target == temp or target.parent() == temp:
+                                self._show_view_menu(temp, event.globalPos())
+                                return True
+                             break
+                        temp = temp.parent()
+                        
+                    print(f"[Studio Debug] Right-click recognized on {target.objectName() or type(target).__name__}")
+                    self.open_editor(target)
+                    return True 
+        return False
+
+    def _is_editable(self, obj):
+        # Allow resizing of ANY widget that has a stable ID, 
+        # but exclude top-level windows to avoid confusion.
+        if not isinstance(obj, QWidget): return False
+        if isinstance(obj, (QMainWindow, QDialog)): return False
+        if not obj.objectName(): return False
+        # filter out internal Qt widgets starting with qt_
+        if obj.objectName().startswith("qt_"): return False
+        
+        # Exclude SidebarButtons from resizing handles so navigation always works
+        # We check by class name string to avoid import issues
+        if obj.__class__.__name__ == "SidebarButton": return False
+
+        return True
+
+    def _ensure_handle(self, obj):
+        # Check if already has handle
+        for child in obj.children():
+            if isinstance(child, StudioResizeHandle):
+                child.raise_()
+                child.show()
+                return
+        
+        # Create handle
+        h = StudioResizeHandle(obj)
+        h.show()
+
+    def _show_view_menu(self, view, pos):
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu()
+        menu.setStyleSheet(f"background-color: {COLORS['surface']}; color: {COLORS['text']}; border: 1px solid {COLORS['border']};")
+        act_add = menu.addAction("Add Component...")
+        act_del = menu.addAction("Delete Tool")
+        
+        action = menu.exec(pos)
+        if action == act_add:
+            dialog = AddComponentDialog(view.tool_name, view)
+            if dialog.exec(): view._on_add_success()
+        elif action == act_del:
+            self.delete_tool(view)
+
+    def delete_tool(self, view):
+        confirm = QMessageBox.question(None, "Delete", f"Delete tool '{view.tool_name}'?", QMessageBox.Yes | QMessageBox.No)
+        if confirm == QMessageBox.Yes:
+            tools = UI_CONFIG.get("dynamic_tools", {})
+            if view.tool_name in tools:
+                del tools[view.tool_name]
+                UI_CONFIG.set("dynamic_tools", tools)
+                # We can't easily remove from Sidebar without complex logic, so request restart
+                QMessageBox.information(None, "Success", "Tool deleted. Please restart.")
+
+    def open_editor(self, obj):
+        target = obj
+        # Climb up to find something useful to edit (Card, Button, etc.)
+        while target:
+            if isinstance(target, (Card, ModernButton, QPushButton, QLabel, QLineEdit)): break
+            if isinstance(target, QMainWindow): break
+            target = target.parent()
+        if not target: return
+        
+        # Check if target has a valid ObjectName
+        if not target.objectName() or target.objectName().startswith("qt_"):
+             # It's an internal or unnamed widget. 
+             # We can't save it reliably.
+             # We try to warn the user or auto-name it if it's a specific type.
+             print(f"[Studio WARN] Editing widget without stable ID: {target}")
+             # We could Auto-name it based on parent chain, but that's complex to get unique.
+             # For now, we just proceed, but maybe add a visual warning in the editor?
+             pass 
+
+        print(f"[Studio] Editing: {target.objectName()} | Type: {type(target).__name__}")
+        editor = PropertyEditor(target, QApplication.activeWindow())
+        # Ensure it stays on top and is modal
+        editor.setWindowModality(Qt.ApplicationModal)
+        editor.exec()
+
+def apply_saved_ui(widget):
+    """Checks UI_CONFIG for saved properties for this widget's objectName."""
+    name = widget.objectName()
+    if not name: return
+    
+    config = UI_CONFIG.get(name, None)
+    if not config: return
+    
+    if "text" in config:
+        if hasattr(widget, "setText"):
+            widget.setText(config["text"])
+        elif isinstance(widget, Card) and hasattr(widget, "title_label") and widget.title_label:
+            widget.title_label.setText(config["text"])
+            
+    if "placeholder" in config and hasattr(widget, "setPlaceholderText"):
+        widget.setPlaceholderText(config["placeholder"])
+            
+    if "fixed_width" in config:
+        widget.setFixedWidth(config["fixed_width"])
+    if "fixed_height" in config:
+        widget.setFixedHeight(config["fixed_height"])
+    if "bg_color" in config:
+        widget.setStyleSheet(f"background-color: {config['bg_color']}; border: 1px solid {COLORS['border']}; border-radius: 8px;")
+
+def apply_saved_ui_recursive(parent):
+    # Apply to self first
+    apply_saved_ui(parent)
+    
+    # Iterate all children recursively using findChildren
+    # We use QWidget to get everything
+    all_widgets = parent.findChildren(QWidget)
+    for w in all_widgets:
+        apply_saved_ui(w)
 
 def hex_to_rgba(hex_color, alpha):
     """Converts #RRGGBB to rgba(r, g, b, alpha) for reliable Qt styling."""
@@ -238,9 +624,9 @@ class ModernButton(QPushButton):
     """
     def __init__(self, text="", variant="primary", icon=None, parent=None):
         super().__init__(text, parent)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(42)
+        self.setObjectName(f"Btn_{text.replace(' ', '_')}")
         self.set_variant(variant)
+        apply_saved_ui(self)
 
     def set_variant(self, variant):
         base_style = """
@@ -294,6 +680,7 @@ class Card(QFrame):
     """Rounded, bordered card component."""
     def __init__(self, title=None, parent=None):
         super().__init__(parent)
+        self.title_label = None
         self.setStyleSheet(f"""
             QFrame {{
                 background-color: {COLORS['surface']};
@@ -308,14 +695,17 @@ class Card(QFrame):
 
         if title:
             header_frame = QFrame()
-            header_frame.setStyleSheet(f"border-bottom: 1px solid {COLORS['border']}; border-radius: 16px 16px 0 0; background-color: {COLORS['surface']}; border-left: none; border-right: none; border-top: none;")
+            header_frame.setStyleSheet("background-color: transparent; border: none; border-bottom: 1px solid " + COLORS['border'] + ";")
             header_layout = QHBoxLayout(header_frame)
-            header_layout.setContentsMargins(16, 10, 16, 10)
-            
-            lbl = QLabel(title)
-            lbl.setStyleSheet("border: none; font-size: 13px; font-weight: 700; letter-spacing: 0.3px;")
-            header_layout.addWidget(lbl)
+            header_layout.setContentsMargins(16, 12, 16, 12)
+            header_layout.setSpacing(0)
+
+            self.title_label = QLabel(title)
+            self.title_label.setObjectName(f"Title_{title.replace(' ', '_')}")
+            self.title_label.setStyleSheet("border: none; font-size: 13px; font-weight: 700; letter-spacing: 0.3px;")
+            header_layout.addWidget(self.title_label)
             self.main_layout.addWidget(header_frame)
+            apply_saved_ui(self.title_label)
 
         self.content_widget = QWidget()
         self.content_widget.setStyleSheet("border: none;")
@@ -323,6 +713,10 @@ class Card(QFrame):
         self.content_layout.setContentsMargins(16, 12, 16, 12)
         self.content_layout.setSpacing(12)
         self.main_layout.addWidget(self.content_widget)
+        
+        if title:
+            self.setObjectName(f"Card_{title.replace(' ', '_')}")
+            apply_saved_ui(self)
 
     def add_widget(self, widget):
         self.content_layout.addWidget(widget)
@@ -413,6 +807,13 @@ class DashboardView(QWidget):
         self.status_indicator.clicked.connect(self.trigger_refresh)
         self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['success']}; font-weight: 800; font-size: 11px; text-align: left; padding-left: 5px; }}")
         cl.addWidget(self.status_indicator)
+        cl.addWidget(self.status_indicator)
+        
+        # IPC Shortcut Button
+        self.btn_goto_ipc = ModernButton("In Process Control (IPC)", "secondary")
+        self.btn_goto_ipc.setObjectName("Dash_Btn_IPC")
+        cl.addWidget(self.btn_goto_ipc)
+        
         controls_card.add_layout(cl)
         left_side.addWidget(controls_card)
 
@@ -451,6 +852,8 @@ class DashboardView(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         
+        self.table.setObjectName("Dash_Table")
+        
         activity_card.add_widget(self.table)
         main_layout.addWidget(activity_card, 2)
 
@@ -468,8 +871,10 @@ class DashboardView(QWidget):
         
         self.le_barcode = QLineEdit()
         self.le_barcode.setPlaceholderText("Barcode...")
+        self.le_barcode.setObjectName("Dash_Entry_Barcode")
         self.le_user = QLineEdit()
         self.le_user.setPlaceholderText("User...")
+        self.le_user.setObjectName("Dash_Entry_User")
         
         row1 = QHBoxLayout()
         row1.addWidget(self.le_barcode)
@@ -778,8 +1183,9 @@ class LiveCamEmbed(QWidget):
         
         self.label = QLabel("Kein Bild")
         self.label.setAlignment(Qt.AlignCenter)
-        self.label.setFixedHeight(280) # Reduced from 320 for better vertical fit
-        self.label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # self.label.setFixedHeight(280) # Removed fixed height to allow resizing
+        self.label.setMinimumHeight(150) # Set a reasonable minimum
+        self.label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.label.setStyleSheet(f"background-color: #050505; border-radius: 8px; border: 1px solid {COLORS['border']};")
         
         self.status = QLabel("Warte auf Frame...")
@@ -909,12 +1315,7 @@ class AutofocusView(QWidget):
         cam_layout = QGridLayout()
         cam_layout.setSpacing(6)
         
-        cams = [
-            ("MACSeq", 0),
-            ("Res-40x", 1),
-            ("Res-2", 2),
-            ("MacSEQ", 3),
-        ]
+        cams = CAMERA_REGISTRY.cams # Use the global registry
         self._cams = list(cams)
         try:
             print(f"[INFO] Kamera-Buttons (Name -> Index): {self._cams}")
@@ -1296,11 +1697,6 @@ class ZTriebView(QWidget):
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 30, 30, 30)
-        layout.setSpacing(24)
-
-    def setup_ui(self):
-        layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
 
@@ -1314,11 +1710,13 @@ class ZTriebView(QWidget):
 
         # 1. Drive & Move Card (Consolidated)
         control_card = Card("Drive & Position Control")
+        control_card.setObjectName("ZTrieb_Card_Control")
         cl = QVBoxLayout()
         cl.setSpacing(10)
 
         # Reference Button at top
         self.btn_ref = ModernButton("Reference Run", "primary")
+        self.btn_ref.setObjectName("ZTrieb_Btn_Ref")
         self.btn_ref.clicked.connect(lambda: self._submit(self.controller.goto_ref))
         cl.addWidget(self.btn_ref)
 
@@ -2256,6 +2654,221 @@ class PlaceholderView(QWidget):
         layout.addWidget(sub)
 
 
+        self.chk_edit.toggled.connect(self.toggle_edit_mode)
+        cl.addWidget(self.chk_edit)
+
+class IPCView(QWidget):
+    """Graphical In Process Control View (connected to DB)."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"background-color: {COLORS['bg']};")
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20,20,20,20)
+        
+        # Top Controls
+        top_card = Card("Process Control Settings")
+        tl = QHBoxLayout()
+        
+        # Source Selector
+        tl.addWidget(QLabel("Data Source:"))
+        self.combo_source = QComboBox()
+        self.combo_source.addItems(["gitterschieber_tool", "stage_test", "kleberoboter"])
+        self.combo_source.currentIndexChanged.connect(self.refresh_data)
+        tl.addWidget(self.combo_source)
+        
+        tl.addStretch()
+        
+        btn_refresh = ModernButton("Refresh Data", "primary")
+        btn_refresh.clicked.connect(self.refresh_data)
+        tl.addWidget(btn_refresh)
+        
+        top_card.add_layout(tl)
+        layout.addWidget(top_card)
+        
+        # Charts
+        charts_layout = QHBoxLayout()
+        
+        # Chart 1: Variable Correlation (Scatter)
+        c1 = Card("Correlation Analysis")
+        self.chart1 = ModernChart()
+        # Initialize Scatter
+        self.scat = self.chart1.ax.scatter([], [], alpha=0.6, color=COLORS['primary'])
+        self.chart1.ax.set_title("Waiting for data...")
+        c1.add_widget(self.chart1)
+        charts_layout.addWidget(c1)
+        
+        # Chart 2: Process Stability (Trend)
+        c2 = Card("Process Stability (Trend)")
+        self.chart2 = ModernChart()
+        self.line_trend, = self.chart2.ax.plot([], [], color=COLORS['success'], linewidth=2)
+        self.chart2.ax.set_title("TimeSeries Trend")
+        c2.add_widget(self.chart2)
+        charts_layout.addWidget(c2)
+        
+        layout.addLayout(charts_layout, 1)
+        
+        # Auto-Refresh Timer
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.refresh_data)
+        self.timer.start(10000) # 10s
+        
+        # Initial Fetch
+        QTimer.singleShot(500, self.refresh_data)
+
+    def refresh_data(self):
+        source = self.combo_source.currentText()
+        
+        def fetch_task():
+            try:
+                # Fetch more data for statistics (e.g. 100)
+                df, ok = db.fetch_test_data(source, limit=100)
+                if ok and not df.empty:
+                    return df
+            except: pass
+            return None
+            
+        # Run in thread or just quick fetch? fetch_test_data is sync but usually fast.
+        # For responsiveness, lets assume it returns fast enough or do threaded if needed.
+        # Given limitations, we do it in main thread to simplify plotting updates or use a helper
+        # But previous Dashboard used a thread. Let's do simple safely here for now.
+        df = fetch_task()
+        if df is not None:
+            self._update_charts(df, source)
+        else:
+            print("[IPC] No data or fetch error.")
+
+    def _update_charts(self, df, source):
+        # Clear
+        self.chart1.ax.cla()
+        self.chart2.ax.cla()
+        
+        # Default styling
+        def style(ax, title, xl, yl):
+            ax.set_title(title, color=COLORS['text'])
+            ax.set_xlabel(xl, color=COLORS['text_muted'])
+            ax.set_ylabel(yl, color=COLORS['text_muted'])
+            ax.grid(True, linestyle='--', alpha=0.3, color=COLORS['border'])
+            
+        # Logic per source
+        try:
+            if source == "gitterschieber_tool":
+                # Plot Justage Angle vs Particle Count
+                if "justage_angle" in df.columns and "particle_count" in df.columns:
+                    x = pd.to_numeric(df["particle_count"], errors='coerce').fillna(0)
+                    y = pd.to_numeric(df["justage_angle"], errors='coerce').fillna(0)
+                    
+                    style(self.chart1.ax, "Angle vs Particles", "Particles", "Angle [°]")
+                    self.chart1.ax.scatter(x, y, color=COLORS['primary'], alpha=0.7)
+                    
+                    # Trend: Angle over time (index mostly if time is not parsed perfectly)
+                    # Use index as proxy for time (assuming sorted desc, so we reverse)
+                    y_trend = y.iloc[::-1].values # Newest is 0, so reverse to have history->new
+                    x_trend = np.arange(len(y_trend))
+                    
+                    style(self.chart2.ax, "Angle Trend", "Sample Index", "Angle [°]")
+                    self.chart2.ax.plot(x_trend, y_trend, '-o', color=COLORS['success'], markersize=4)
+                    
+            elif source == "stage_test":
+                # Plot X vs Y coordinates of CAM1
+                if "x_coordinate_cam1" in df.columns and "y_coordinate_cam1" in df.columns:
+                    x = pd.to_numeric(df["x_coordinate_cam1"], errors='coerce').fillna(0)
+                    y = pd.to_numeric(df["y_coordinate_cam1"], errors='coerce').fillna(0)
+                    
+                    style(self.chart1.ax, "Cam1 Position scatter", "X [mm]", "Y [mm]")
+                    self.chart1.ax.scatter(x, y, c=range(len(x)), cmap='viridis', label="Pos")
+                    
+                    # Trend: X pos
+                    y_trend = x.iloc[::-1].values
+                    style(self.chart2.ax, "X-Pos Drift", "Sample", "X [mm]")
+                    self.chart2.ax.plot(np.arange(len(y_trend)), y_trend, color=COLORS['warning'])
+
+            elif source == "kleberoboter":
+                 # Usually just OK/Fail. Let's plot "Duration" if time available or just yield?
+                 # We can calculate 'Result' as 1=OK, 0=Fail
+                 if "ok" in df.columns:
+                     vals = df["ok"].apply(lambda v: 1 if v else 0).values
+                     vals = vals[::-1]
+                     
+                     style(self.chart1.ax, "Pass/Fail Distribution", "Sample", "Status")
+                     self.chart1.ax.scatter(np.arange(len(vals)), vals + np.random.normal(0,0.05,len(vals)), color=COLORS['secondary'])
+                     
+                     # Moving Average of Yield?
+                     window = 5
+                     if len(vals) > window:
+                         mv = pd.Series(vals).rolling(window).mean()
+                         style(self.chart2.ax, f"Yield Trend (MA {window})", "Sample", "Yield Rate")
+                         self.chart2.ax.plot(np.arange(len(vals)), mv, color=COLORS['primary'])
+                         self.chart2.ax.set_ylim(-0.1, 1.1)
+
+        except Exception as e:
+            print(f"[IPC] Plotting error: {e}")
+            
+        self.chart1.draw_idle()
+        self.chart2.draw_idle()
+
+class SettingsView(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(20)
+        
+        title = QLabel("Application Settings")
+        title.setStyleSheet(f"font-size: 26px; font-weight: 800; color: {COLORS['primary']};")
+        layout.addWidget(title)
+        
+        # UI Settings Card
+        ui_card = Card("User Interface Customization")
+        cl = QVBoxLayout()
+        
+        self.chk_edit = QCheckBox("Enable Studio Mode (Visual Editor)")
+        self.chk_edit.setStyleSheet(f"font-size: 16px; font-weight: 600; padding: 10px; color: {COLORS['success'] if STUDIO_MODE else COLORS['text']};")
+        self.chk_edit.setChecked(STUDIO_MODE)
+        self.chk_edit.toggled.connect(self.toggle_edit_mode)
+        cl.addWidget(self.chk_edit)
+        
+        info = QLabel("Tip: When Studio Mode is active, Right-Click on any Title, Button or Card to edit its properties.")
+        info.setStyleSheet(f"color: {COLORS['text_muted']}; font-style: italic;")
+        cl.addWidget(info)
+        
+        ui_card.add_layout(cl)
+        layout.addWidget(ui_card)
+        
+        btn_reset = ModernButton("Reset UI Configuration", "danger")
+        btn_reset.clicked.connect(self.reset_config)
+        layout.addWidget(btn_reset)
+        
+        layout.addStretch()
+
+    def toggle_edit_mode(self, checked):
+        global STUDIO_MODE
+        STUDIO_MODE = checked
+        print(f"[Studio] Mode changed to: {STUDIO_MODE}")
+        
+        color = COLORS['success'] if STUDIO_MODE else COLORS['text']
+        self.chk_edit.setStyleSheet(f"font-size: 16px; font-weight: 600; padding: 10px; color: {color};")
+        
+        if STUDIO_MODE:
+            QApplication.setOverrideCursor(Qt.CrossCursor)
+        else:
+            QApplication.restoreOverrideCursor()
+            
+        # Update visibility of Studio elements
+        win = self.window()
+        if isinstance(win, MainWindow):
+            win.update_studio_visibility()
+        
+        # Force a refresh of the entire UI overlay
+        QApplication.activeWindow().update()
+
+    def reset_config(self):
+        if os.path.exists(UI_CONFIG.CONFIG_FILE):
+            os.remove(UI_CONFIG.CONFIG_FILE)
+            QMessageBox.information(self, "Success", "Configuration reset. Please restart the application.")
+
+
 class LaserscanView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2276,7 +2889,13 @@ class LaserscanView(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
         card = Card("PCO Panda")
+        card.setObjectName("Laserscan_Card_Cam")
+        
+        # Check global PcoCameraBackend
         if PcoCameraBackend is None:
             msg = "PCO Backend nicht verfuegbar"
             if _PCO_IMPORT_ERROR:
@@ -2286,11 +2905,13 @@ class LaserscanView(QWidget):
             card.add_widget(lbl)
         else:
             self.cam_embed = LiveCamEmbed(self._get_frame, interval_ms=100, start_immediately=True)
+            self.cam_embed.setObjectName("Laserscan_CamEmbed") # IMPORTANT FOR RESIZE
             card.add_widget(self.cam_embed)
 
         layout.addWidget(card)
 
         expo_card = Card("EXPOSURE")
+        expo_card.setObjectName("Laserscan_Card_Expo")
         sl = QVBoxLayout()
         sl.setSpacing(8)
         self.spin_expo = QDoubleSpinBox()
@@ -2424,6 +3045,378 @@ class LaserscanView(QWidget):
         self._expo_initialized = False
         super().hideEvent(event)
 
+class AddComponentDialog(QDialog):
+    def __init__(self, tool_name, parent=None):
+        super().__init__(parent)
+        self.tool_name = tool_name
+        self.setWindowTitle(f"Add Component to {tool_name}")
+        self.setFixedWidth(300)
+        self.setStyleSheet(f"background-color: {COLORS['surface']}; color: {COLORS['text']}; border: 1px solid {COLORS['border']};")
+        
+        layout = QFormLayout(self)
+        
+        self.combo_type = QComboBox()
+        self.combo_type.addItems(["Card", "ModernButton", "QLabel", "QLineEdit", "LiveCamEmbed"])
+        layout.addRow("Component Type:", self.combo_type)
+        
+        self.le_id = QLineEdit()
+        self.le_id.setPlaceholderText("Unique ID (e.g., my_button_1)")
+        layout.addRow("Object ID:", self.le_id)
+        
+        self.le_text = QLineEdit()
+        self.le_text.setPlaceholderText("Text (for Card, Button, Label)")
+        layout.addRow("Text:", self.le_text)
+
+        self.combo_cam_idx = QComboBox()
+        for name, idx in CAMERA_REGISTRY.cams:
+            self.combo_cam_idx.addItem(name, idx)
+        layout.addRow("Camera Source:", self.combo_cam_idx)
+        
+        btn_add = ModernButton("Add Component", "primary")
+        btn_add.clicked.connect(self.add_component)
+        layout.addRow(btn_add)
+
+    def add_component(self):
+        comp_type = self.combo_type.currentText()
+        obj_id = self.le_id.text().strip()
+        text = self.le_text.text().strip()
+        cam_idx = self.combo_cam_idx.currentData()
+
+        if not obj_id:
+            QMessageBox.warning(self, "Error", "Object ID cannot be empty.")
+            return
+
+        tools = UI_CONFIG.get("dynamic_tools", {})
+        tool_config = tools.get(self.tool_name, {"widgets": []})
+        
+        # Check for duplicate ID within this tool
+        for widget_cfg in tool_config["widgets"]:
+            if widget_cfg.get("id") == obj_id:
+                QMessageBox.warning(self, "Error", f"Component with ID '{obj_id}' already exists in this tool.")
+                return
+
+        new_widget_cfg = {"type": comp_type, "id": obj_id}
+        if text:
+            new_widget_cfg["text"] = text
+        if comp_type == "LiveCamEmbed":
+            new_widget_cfg["cam_idx"] = cam_idx
+
+        tool_config["widgets"].append(new_widget_cfg)
+        tools[self.tool_name] = tool_config
+        UI_CONFIG.set("dynamic_tools", tools)
+        self.accept()
+
+# --- STUDIO HELPERS ---
+
+def sync_dynamic_tool_config(obj_id, props):
+    """Updates the dynamic tool configuration for a given object ID and property set."""
+    tools = UI_CONFIG.get("dynamic_tools", {})
+    changed = False
+    for tool_name, tool_cfg in tools.items():
+        for w_cfg in tool_cfg.get("widgets", []):
+            if w_cfg.get("id") == obj_id:
+                for k, v in props.items():
+                    if k == "fixed_width": w_cfg["fixed_width"] = v
+                    elif k == "fixed_height": w_cfg["fixed_height"] = v
+                    elif k == "text": w_cfg["text"] = v
+                    elif k == "placeholder": w_cfg["placeholder"] = v
+                    elif k == "bg_color": w_cfg["bg_color"] = v
+                changed = True
+    
+    if changed:
+        UI_CONFIG.set("dynamic_tools", tools)
+        print(f"[Studio] Synced changes for {obj_id} to dynamic tool config")
+
+class StudioResizeHandle(QWidget):
+    """Non-blocking overlay: Move via Top-Left, Resize via Bottom-Right. Center is click-through."""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        # Cover the whole parent
+        self.resize(parent.size())
+        
+        # Default HIDDEN until hover
+        self.setVisible(False)
+        # We need to make sure we receive hover events even if hidden? 
+        # No, if hidden we get nothing.
+        # So we need to install event filter on PARENT to show us!
+        
+        parent.installEventFilter(self)
+        
+        self._dragging = False
+        self._resizing = False
+        
+    def _update_geom(self):
+        if self.parent():
+            self.resize(self.parent().size())
+            self.raise_()
+
+    def eventFilter(self, obj, event):
+        if not STUDIO_MODE: return False
+        
+        if obj == self.parent():
+            if event.type() == QEvent.Resize:
+                self._update_geom()
+            elif event.type() == QEvent.Enter:
+                self.setVisible(True)
+                self.raise_()
+            elif event.type() == QEvent.Leave:
+                # hide only if we are not moving into the overlay itself
+                # But since overlay covers parent, we might get weird behavior.
+                # Actually, when we show overlay, it might block parent Enter/Leave?
+                # No, because we set overlay transparent for mouse?
+                # We need overlay to accept mouse for dragging.
+                pass
+                
+        return False
+        
+    def enterEvent(self, event):
+        # We are Inside the overlay
+        pass
+
+    def leaveEvent(self, event):
+        # We left the overlay
+        if not self._dragging and not self._resizing:
+            self.setVisible(False)
+        
+    def paintEvent(self, event):
+        if not STUDIO_MODE: return
+        
+        qp = QPainter(self)
+        qp.setRenderHint(QPainter.Antialiasing)
+        
+        # 1. Dashed Border
+        pen = QPen(QColor(COLORS['primary']))
+        pen.setStyle(Qt.DashLine)
+        pen.setWidth(2)
+        qp.setPen(pen)
+        qp.setBrush(Qt.NoBrush) 
+        rect = self.rect().adjusted(1,1,-1,-1)
+        qp.drawRect(rect)
+        
+        # 2. Resize Handle (Bottom Right) - Green
+        qp.setBrush(QBrush(QColor(COLORS['success'])))
+        qp.setPen(Qt.NoPen)
+        self._resize_rect = QRect(rect.right() - 14, rect.bottom() - 14, 14, 14)
+        qp.drawEllipse(self._resize_rect)
+        
+        # 3. Move Handle (Top Left) - Primary Color
+        qp.setBrush(QBrush(QColor(COLORS['primary'])))
+        self._move_rect = QRect(rect.left(), rect.top(), 16, 16)
+        # Draw a small grip icon (rectangle)
+        qp.drawRect(self._move_rect)
+        
+        # Optional: Add small text or icon inside move rect? simpler is better.
+        
+    def mousePressEvent(self, event):
+        if not STUDIO_MODE:
+            event.ignore()
+            return
+        
+        self._start_pos = event.globalPos()
+        self._p_start_size = self.parent().size()
+        
+        # Logic: Only capture if on handles
+        if self._resize_rect.contains(event.pos()) and event.button() == Qt.LeftButton:
+            self._resizing = True
+            event.accept()
+        elif self._move_rect.contains(event.pos()) and event.button() == Qt.LeftButton:
+            self._dragging = True
+            self.setCursor(Qt.SizeAllCursor)
+            event.accept()
+        else:
+            # Pass through everything else! (Clicks on the button itself)
+            event.ignore()
+
+    def mouseMoveEvent(self, event):
+        if not STUDIO_MODE:
+            event.ignore()
+            return
+
+        # Cursor Updates
+        if self._resize_rect.contains(event.pos()):
+            self.setCursor(Qt.SizeFDiagCursor)
+        elif self._move_rect.contains(event.pos()):
+            self.setCursor(Qt.SizeAllCursor)
+        else:
+            self.setCursor(Qt.ArrowCursor)
+
+        # Actions
+        if self._resizing:
+            diff = event.globalPos() - self._start_pos
+            new_w = max(40, self._p_start_size.width() + diff.x())
+            new_h = max(20, self._p_start_size.height() + diff.y())
+            self.parent().setFixedSize(new_w, new_h)
+            
+        elif self._dragging:
+            # Reorder Logic
+            drag_dist = event.globalPos() - self._start_pos
+            threshold = 50
+            
+            p_widget = self.parent()
+            if not p_widget.parentWidget(): return
+            
+            layout = p_widget.parentWidget().layout()
+            
+            if layout and isinstance(layout, (QVBoxLayout, QHBoxLayout)):
+                idx = layout.indexOf(p_widget)
+                
+                # Vertical Swap
+                if isinstance(layout, QVBoxLayout):
+                    if drag_dist.y() > threshold and idx < layout.count() - 1:
+                        self._swap_widgets(layout, idx, idx + 1)
+                        self._start_pos = event.globalPos()
+                    elif drag_dist.y() < -threshold and idx > 0:
+                        self._swap_widgets(layout, idx, idx - 1)
+                        self._start_pos = event.globalPos()
+
+                # Horizontal Swap
+                elif isinstance(layout, QHBoxLayout):
+                    if drag_dist.x() > threshold and idx < layout.count() - 1:
+                        self._swap_widgets(layout, idx, idx + 1)
+                        self._start_pos = event.globalPos()
+                    elif drag_dist.x() < -threshold and idx > 0:
+                        self._swap_widgets(layout, idx, idx - 1)
+                        self._start_pos = event.globalPos()
+                        
+    def _swap_widgets(self, layout, i, j):
+        item = layout.takeAt(i)
+        layout.insertItem(j, item)
+        
+    def mouseReleaseEvent(self, event):
+        if not self._dragging and not self._resizing:
+            event.ignore()
+            return
+
+        self._dragging = False
+        self._resizing = False
+        self.setCursor(Qt.ArrowCursor)
+        
+        # Save Geometry
+        if self.parent() and self.parent().objectName():
+            props = {
+                "fixed_width": self.parent().width(),
+                "fixed_height": self.parent().height()
+            }
+            UI_CONFIG.set(self.parent().objectName(), props)
+            sync_dynamic_tool_config(self.parent().objectName(), props)
+            
+            # Save Order
+            p_view = self.parent().parentWidget()
+            if isinstance(p_view, StudioToolView):
+                self._save_tool_order(p_view)
+
+    def _save_tool_order(self, view):
+        # Re-read layout and update config order
+        layout = view.layout()
+        if not layout: return
+        
+        new_order_ids = []
+        for i in range(layout.count()):
+            w = layout.itemAt(i).widget()
+            if w and w.objectName():
+                new_order_ids.append(w.objectName())
+                
+        # Update UI_CONFIG
+        tools = UI_CONFIG.get("dynamic_tools", {})
+        if view.tool_name in tools:
+            current_widgets = tools[view.tool_name]["widgets"]
+            w_map = {w["id"]: w for w in current_widgets if "id" in w}
+            reordered = []
+            for oid in new_order_ids:
+                if oid in w_map: reordered.append(w_map[oid])
+            for w in current_widgets:
+                if w.get("id") not in new_order_ids: reordered.append(w)
+                    
+            tools[view.tool_name]["widgets"] = reordered
+            UI_CONFIG.set("dynamic_tools", tools)
+            print("[Studio] Layout order saved.")
+
+# class StudioWrapper(QFrame): ... REMOVED in favor of universal handle injection
+
+class StudioToolView(QWidget):
+    def __init__(self, tool_name, parent=None):
+        super().__init__(parent)
+        self.tool_name = tool_name
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"background-color: {COLORS['bg']};")
+        
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(20, 20, 20, 20)
+        self.main_layout.setSpacing(15)
+
+        self.add_component_button = ModernButton(f"Click to build {tool_name} (Studio Mode)", "ghost")
+        self.add_component_button.clicked.connect(self._add_component)
+        self.main_layout.addWidget(self.add_component_button)
+        
+        # Only visible in Studio Mode
+        self.add_component_button.setVisible(STUDIO_MODE)
+        
+        self.load_components()
+        self.main_layout.addStretch()
+
+    def _on_add_success(self):
+        self._reload_full()
+
+    def _reload_full(self):
+        self.clear_layout(self.main_layout)
+        self.add_component_button = ModernButton(f"Click to build {self.tool_name}", "ghost")
+        self.add_component_button.clicked.connect(self._add_component)
+        self.main_layout.addWidget(self.add_component_button)
+        self.load_components()
+        self.main_layout.addStretch()
+        
+    def load_components(self):
+        tools = UI_CONFIG.get("dynamic_tools", {})
+        tool_config = tools.get(self.tool_name, {"widgets": []})
+        
+        for widget_cfg in tool_config["widgets"]:
+            self._create_and_add_widget(widget_cfg)
+
+    def _create_and_add_widget(self, widget_cfg):
+        comp_type = widget_cfg.get("type")
+        obj_id = widget_cfg.get("id")
+        text = widget_cfg.get("text", "")
+        cam_idx = widget_cfg.get("cam_idx", 0)
+
+        widget = None
+        if comp_type == "Card":
+            widget = Card(title=text)
+        elif comp_type == "ModernButton":
+            widget = ModernButton(text)
+        elif comp_type == "QLabel":
+            widget = QLabel(text)
+        elif comp_type == "QLineEdit":
+            widget = QLineEdit()
+            widget.setPlaceholderText(text)
+        elif comp_type == "LiveCamEmbed":
+            provider = CAMERA_REGISTRY.get_provider(cam_idx)
+            card = Card(title=f"Camera {cam_idx}")
+            cam_embed = LiveCamEmbed(provider)
+            card.add_widget(cam_embed)
+            widget = card
+            
+        if widget:
+            widget.setObjectName(obj_id)
+            widget.setObjectName(obj_id)
+            apply_saved_ui(widget) # Apply any saved studio mode properties
+            
+            # Just add widget via wrapper? NO, universal handle now.
+            self.main_layout.addWidget(widget)
+
+    def _add_component(self):
+        dialog = AddComponentDialog(self.tool_name, self)
+        if dialog.exec() == QDialog.Accepted:
+            self._on_add_success()
+
+    def clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            if item.layout():
+                self.clear_layout(item.layout())
+
 # --- NAVIGATION SIDEBAR ---
 
 class SidebarButton(QPushButton):
@@ -2463,17 +3456,18 @@ class SidebarButton(QPushButton):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Stage-Toolbox Pro")
+        self.setWindowTitle("Resolve Production Suite")
+        self.setObjectName("MainWindow")
         
         # Dynamic sizing: Strictly tied to the available screen vertical space.
         screen_geo = QApplication.primaryScreen().availableGeometry()
-        w = min(1200, int(screen_geo.width() * 0.95))
-        # Use 85% of height to ensure the taskbar and title bar don't push it off-screen
-        h = int(screen_geo.height() * 0.85) 
-        self.resize(w, h)
         
-        # Center the window
-        self.move(screen_geo.center() - self.rect().center())
+        # Load saved size if exists
+        saved = UI_CONFIG.get("MainWindow", {})
+        w = saved.get("fixed_width", min(1200, int(screen_geo.width() * 0.95)))
+        h = saved.get("fixed_height", int(screen_geo.height() * 0.85))
+        
+        self.resize(w, h)
         
         central = QWidget()
         self.setCentralWidget(central)
@@ -2488,13 +3482,13 @@ class MainWindow(QMainWindow):
         self.sidebar.setFixedWidth(230)
         self.sidebar.setStyleSheet(f"background-color: {COLORS['surface']}; border-right: 1px solid {COLORS['border']};")
         
-        side_layout = QVBoxLayout(self.sidebar)
-        side_layout.setContentsMargins(16, 24, 16, 24)
+        self.side_layout = QVBoxLayout(self.sidebar) # Made self.side_layout for access in _filter_navigation
+        self.side_layout.setContentsMargins(16, 24, 16, 24)
         
         # Brand
         brand = QLabel("Resolve Production Tool")
         brand.setStyleSheet(f"font-size: 16px; font-weight: 800; color: {COLORS['primary']}; padding-left: 12px; margin-bottom: 15px;")
-        side_layout.addWidget(brand)
+        self.side_layout.addWidget(brand)
         
         # Nav Items
         self.stack = QStackedWidget()
@@ -2502,20 +3496,34 @@ class MainWindow(QMainWindow):
         # Helper to add nav items
         def add_nav(text, widget):
             btn = SidebarButton(text)
-            side_layout.addWidget(btn)
+            # Give it a stable ID so we can save changes!
+            btn.setObjectName(f"NavBtn_{text.replace(' ', '_')}")
+            
+            self.side_layout.addWidget(btn)
             self.stack.addWidget(widget)
             index = self.stack.count() - 1
             def on_click():
                 self.stack.setCurrentIndex(index)
                 self.page_title.setText(text)
             btn.clicked.connect(on_click)
+            
+            # Apply saved config immediately
+            apply_saved_ui(btn)
             return btn
             
-        self.btn_dash = add_nav("Dashboard", DashboardView())
+        # Initialize views that need cross-referencing
+        self.dashboard = DashboardView()
+        self.ipc_view = IPCView()
+
+        self.btn_dash = add_nav("Dashboard", self.dashboard)
+        self.btn_ipc = add_nav("In Process Control", self.ipc_view)
+        
+        # Connect Dashboard Button to IPC View
+        self.dashboard.btn_goto_ipc.clicked.connect(lambda: self.btn_ipc.click())
         
         lbl_wf = QLabel("WORKFLOWS")
         lbl_wf.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px; font-weight: 800; padding-left: 12px; margin-top: 20px; margin-bottom: 10px;")
-        side_layout.addWidget(lbl_wf)
+        self.side_layout.addWidget(lbl_wf)
         
         self.btn_ztrieb = add_nav("Z-Trieb", ZTriebView())
         self.btn_af = add_nav("Autofocus", AutofocusView())
@@ -2525,8 +3533,25 @@ class MainWindow(QMainWindow):
         add_nav("Gitterschieber", GitterschieberView())
         add_nav("Laserscan", LaserscanView())
         
-        side_layout.addStretch()
+        # Load Dynamic Tools
+        dynamic_tools = UI_CONFIG.get("dynamic_tools", {})
+        if dynamic_tools:
+            lbl_dyn = QLabel("CUSTOM TOOLS")
+            lbl_dyn.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px; font-weight: 800; padding-left: 12px; margin-top: 20px; margin-bottom: 10px;")
+            self.side_layout.addWidget(lbl_dyn)
+            for tool_name in dynamic_tools:
+                add_nav(tool_name, StudioToolView(tool_name))
         
+        self.btn_new_tool = SidebarButton("+ Create New Tool")
+        self.btn_new_tool.setStyleSheet(self.btn_new_tool.styleSheet() + f"color: {COLORS['success']}; border: 1px dashed {COLORS['success']}; margin-top: 10px;")
+        self.btn_new_tool.clicked.connect(self.create_tool)
+        self.side_layout.addWidget(self.btn_new_tool)
+        self.btn_new_tool.hide() # Hidden by default
+
+        self.side_layout.addStretch()
+        
+        # New Settings button
+        self.btn_settings = add_nav("Settings", SettingsView())
         # User Profile at bottom
         user_row = QHBoxLayout()
         avatar = QLabel("MZ")
@@ -2543,7 +3568,7 @@ class MainWindow(QMainWindow):
         user_frame = QFrame()
         user_frame.setStyleSheet(f"background-color: {COLORS['surface_light']}; border-radius: 12px; padding: 8px;")
         user_frame.setLayout(user_row)
-        side_layout.addWidget(user_frame)
+        self.side_layout.addWidget(user_frame)
         
         main_layout.addWidget(self.sidebar)
         
@@ -2562,10 +3587,10 @@ class MainWindow(QMainWindow):
         self.page_title = QLabel("Dashboard")
         self.page_title.setStyleSheet("font-size: 20px; font-weight: 700; letter-spacing: -0.5px;")
         
-        search_bar = QLineEdit()
-        search_bar.setPlaceholderText("Search Serial Number...")
-        search_bar.setFixedWidth(280)
-        search_bar.setStyleSheet(f"""
+        self.search_bar = QLineEdit()
+        self.search_bar.setPlaceholderText("Search Serial Number...")
+        self.search_bar.setFixedWidth(280)
+        self.search_bar.setStyleSheet(f"""
             border-radius: 20px; 
             background-color: {COLORS['surface']};
             padding-left: 16px;
@@ -2573,7 +3598,8 @@ class MainWindow(QMainWindow):
         
         hl.addWidget(self.page_title)
         hl.addStretch()
-        hl.addWidget(search_bar)
+        hl.addWidget(self.search_bar)
+        self.search_bar.textChanged.connect(self._filter_navigation)
         
         content_col.addWidget(header)
         
@@ -2590,6 +3616,90 @@ class MainWindow(QMainWindow):
 
         # Init
         self.btn_dash.click()
+        
+        # Final Step: Apply all saved configurations to the entire UI
+        apply_saved_ui_recursive(self)
+
+    def _filter_navigation(self, text):
+        """Simple search filter for the sidebar."""
+        text = text.lower()
+        for i in range(self.side_layout.count()):
+            item = self.side_layout.itemAt(i)
+            if item and item.widget():
+                widget = item.widget()
+                if isinstance(widget, SidebarButton):
+                    widget.setVisible(text in widget.text().lower())
+                elif isinstance(widget, QLabel) and widget.text().isupper(): # Workflow labels
+                    # Hide workflow labels if all subsequent buttons are hidden
+                    all_hidden_after_label = True
+                    for j in range(i + 1, self.side_layout.count()):
+                        next_item = self.side_layout.itemAt(j)
+                        if next_item and next_item.widget() and isinstance(next_item.widget(), SidebarButton):
+                            if next_item.widget().isVisible():
+                                all_hidden_after_label = False
+                                break
+                        elif next_item and next_item.widget() and isinstance(next_item.widget(), QLabel) and next_item.widget().text().isupper():
+                            # Stop at next label
+                            break
+                    widget.setVisible(not all_hidden_after_label)
+                else:
+                    # For other widgets like brand, user profile, etc., keep them visible
+                    widget.setVisible(True)
+
+
+    def create_tool(self):
+        name, ok = QInputDialog.getText(self, "New Custom Tool", "Enter tool name:")
+        if ok and name:
+            tools = UI_CONFIG.get("dynamic_tools", {})
+            if name in tools:
+                QMessageBox.warning(self, "Error", "Tool already exists.")
+                return
+            tools[name] = {"widgets": []}
+            UI_CONFIG.set("dynamic_tools", tools)
+            
+            # Instant update: add it to sidebar without restart
+            # Check if CUSTOM TOOLS label exists or add it
+            has_label = False
+            for i in range(self.side_layout.count()):
+                w = self.side_layout.itemAt(i).widget()
+                if isinstance(w, QLabel) and w.text() == "CUSTOM TOOLS":
+                    has_label = True
+                    break
+            
+            if not has_label:
+                lbl_dyn = QLabel("CUSTOM TOOLS")
+                lbl_dyn.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px; font-weight: 800; padding-left: 12px; margin-top: 20px; margin-bottom: 10px;")
+                # Insert before the "+" button
+                idx = self.side_layout.indexOf(self.btn_new_tool)
+                self.side_layout.insertWidget(idx, lbl_dyn)
+
+            # Insert new nav button before the "+" button
+            idx = self.side_layout.indexOf(self.btn_new_tool)
+            # Create a localized version of add_nav or call it?
+            # add_nav is a local function in __init__, so we can't call it here.
+            # We recreate the logic:
+            btn = SidebarButton(name)
+            self.side_layout.insertWidget(idx, btn)
+            new_view = StudioToolView(name)
+            self.stack.addWidget(new_view)
+            s_idx = self.stack.count() - 1
+            def on_click():
+                self.stack.setCurrentIndex(s_idx)
+                self.page_title.setText(name)
+            btn.clicked.connect(on_click)
+            
+            QMessageBox.information(self, "Success", f"Tool '{name}' created.")
+
+    
+    def update_studio_visibility(self):
+        """Show/Hide Studio elements based on global state."""
+        self.btn_new_tool.setVisible(STUDIO_MODE)
+        
+        # Update all open tool views
+        for i in range(self.stack.count()):
+            w = self.stack.widget(i)
+            if isinstance(w, StudioToolView):
+                w.add_component_button.setVisible(STUDIO_MODE)
 
 if __name__ == "__main__":
     # Enable High DPI Scaling for Windows
@@ -2608,5 +3718,10 @@ if __name__ == "__main__":
     app.setFont(font)
     
     window = MainWindow()
+    
+    # Store reference to filter on the app to prevent GC
+    app.studio_filter = GlobalEditFilter(window)
+    app.installEventFilter(app.studio_filter)
+    
     window.showMaximized()
     sys.exit(app.exec())
