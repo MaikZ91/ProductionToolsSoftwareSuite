@@ -150,7 +150,38 @@ def parse_db_response(raw):
     return pd.DataFrame({"_raw": [str(raw)]})
 
 
-def fetch_test_data(testtype: str, limit: int = 50) -> tuple[pd.DataFrame, bool]:
+def _parse_gateway_payload(payload: dict | list | None) -> pd.DataFrame:
+    if not payload:
+        return pd.DataFrame()
+    if isinstance(payload, list):
+        df = pd.DataFrame(payload)
+    elif isinstance(payload, dict):
+        df = pd.DataFrame([payload])
+    else:
+        df = pd.DataFrame({"_raw": [str(payload)]})
+
+    if "barcodenummer" not in df.columns:
+        if "Device_GUID" in df.columns:
+            df["barcodenummer"] = df["Device_GUID"].astype(str)
+        else:
+            df["barcodenummer"] = pd.NA
+    if "user" not in df.columns:
+        if "Employee_ID" in df.columns:
+            df["user"] = df["Employee_ID"].astype(str)
+        else:
+            df["user"] = pd.NA
+
+    for col in ("StartTest", "EndTest"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
+
+
+def fetch_test_data(
+    testtype: str,
+    limit: int = 50,
+    barcode: str | None = None,
+) -> tuple[pd.DataFrame, bool]:
     """
     Fetch test data from the database and return as a pandas DataFrame.
     
@@ -182,7 +213,18 @@ def fetch_test_data(testtype: str, limit: int = 50) -> tuple[pd.DataFrame, bool]
         return df, True
 
     except Exception as e:
-        print(f"Error fetching test data: {e}")
+        print(f"Error fetching test data (DB): {e}")
+        try:
+            bc = str(barcode) if barcode else None
+            gw = get_data_from_gateway(testtype, bc, limit=limit)
+            if gw.get("status") == "OK":
+                df = _parse_gateway_payload(gw.get("data"))
+                if "ok" not in df.columns:
+                    df["ok"] = pd.NA
+                if not df.empty:
+                    return df, True
+        except Exception as gw_e:
+            print(f"Error fetching test data (Gateway): {gw_e}")
         return pd.DataFrame(), False
 
     finally:
@@ -202,8 +244,8 @@ def fetch_all_test_data(limit: int = 50) -> dict[str, pd.DataFrame]:
 
 def get_data_from_gateway(
     device_id: str,
-    barcode: str,
-    limit: int = 1
+    barcode: str | None = None,
+    limit: int = 50,
 ) -> dict:
     """
     Fragt den letzten Status eines Barcodes vom Gateway ab (GET).
@@ -211,9 +253,10 @@ def get_data_from_gateway(
     payload = {
         "mode": "QUERY",
         "device_id": device_id,
-        "barcodenummer": barcode,
-        "limit": limit
+        "limit": limit,
     }
+    if barcode:
+        payload["barcodenummer"] = barcode
     
     try:
         with gateway_connect() as conn:
@@ -238,16 +281,14 @@ __all__ = [
 ]
 
 if __name__ == "__main__":
-    for device_id, df in fetch_all_test_data(limit=5).items():
-        print(f"--- {device_id} ---")
-        print(df)
-
+    """
     # Beispiel: Dummy-Payload an Gateway fuer den Kleberoboter senden
     send_dummy_payload_gateway(
         device_id="kleberoboter",
         result="ok",
     )
 
+    """
     bc = "999911200301203102103142124"
     
     # DATEN ABFRAGEN (GET)
@@ -256,6 +297,20 @@ if __name__ == "__main__":
         print(f"Letztes Ergebnis in DB: {db_status['data'][0].get('ok')}")
     else:
         print("Keine Daten vorhanden oder Fehler.")
+    
+
+    for device_id, df in fetch_all_test_data(limit=5).items():
+        print(f"--- {device_id} ---")
+        print(df)
+    
+    """
+   
+
+   
+
+    
+
+    
 
     conn = dbConnector.connection()
     try:
@@ -304,3 +359,5 @@ if __name__ == "__main__":
             conn.disconnect()
         except Exception:
             pass
+            
+"""

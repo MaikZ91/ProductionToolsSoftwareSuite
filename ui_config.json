@@ -38,5 +38,15 @@
     "3": {
         "fixed_width": 243,
         "fixed_height": 25
+    },
+    "QLabel_127482085912320": {
+        "text": "Optikk\u00f6rper",
+        "fixed_width": 130,
+        "fixed_height": 60
+    },
+    "NavBtn_Optikkorper": {
+        "text": "Optikk\u00f6rper",
+        "fixed_width": 198,
+        "fixed_height": 42
     }
 }

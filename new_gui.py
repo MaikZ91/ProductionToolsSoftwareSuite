@@ -857,11 +857,11 @@ class DashboardView(QWidget):
         activity_card.add_widget(self.table)
         main_layout.addWidget(activity_card, 2)
 
-        # 4. Live Update Timer
+        # 4. Manual Refresh (no auto-timer)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_data)
-        self.timer.start(10000) # Update every 10 seconds
         
+        # Initial fetch only
         self.update_data()
 
     def setup_entry_ui_compact(self, layout):
@@ -907,6 +907,9 @@ class DashboardView(QWidget):
         self.btn_send = ModernButton("Send", "primary")
         self.btn_send.clicked.connect(self.send_current_entry)
         btn_row.addWidget(self.btn_send)
+        self.btn_send_gateway = ModernButton("Send via Gateway", "secondary")
+        self.btn_send_gateway.clicked.connect(self.send_current_entry_gateway)
+        btn_row.addWidget(self.btn_send_gateway)
         entry_layout.addLayout(btn_row)
         
         entry_card.add_layout(entry_layout)
@@ -1017,44 +1020,26 @@ class DashboardView(QWidget):
         elif last_result == "OK": color = COLORS['success']
         self.kpi_last.value_label.setStyleSheet(f"color: {color}; font-weight: 800; font-size: 18px; border:none;")
 
-        # Update Table
+        # Update Table (show all columns exactly as received)
+        columns = list(df.columns)
+        self.table.clear()
+        self.table.setColumnCount(len(columns))
+        self.table.setHorizontalHeaderLabels([str(c) for c in columns])
         self.table.setRowCount(len(df))
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+
         for i, row in df.iterrows():
-            # Time
-            ts = row.get("StartTest", "---")
-            ts_str = ts.strftime("%H:%M:%S") if pd.notna(ts) else "---"
-            self.table.setItem(i, 0, QTableWidgetItem(ts_str))
-            
-            # Barcode
-            barcode = str(row.get("barcodenummer", "---"))
-            self.table.setItem(i, 1, QTableWidgetItem(barcode))
-            
-            # User
-            user = str(row.get("user", "---"))
-            self.table.setItem(i, 2, QTableWidgetItem(user))
-            
-            # Status
-            status_val = "OK"
-            if "ok" in row and not pd.isna(row["ok"]):
-                status_val = "OK" if bool(row["ok"]) else "FAIL"
-            
-            badge = StatusBadge(status_val, "success" if status_val == "OK" else "danger")
-            # We wrap it for alignment if needed, but for simplicity:
-            self.table.setCellWidget(i, 3, badge)
-            
-            # Details
-            details = ""
-            if testtype == "gitterschieber_tool":
-                details = f"P:{row.get('particle_count', '?')} A:{row.get('justage_angle', '?')}°"
-            elif testtype == "stage_test":
-                details = f"Pos:{row.get('position', '?')}"
-            else:
-                details = "---"
-                
-            det_item = QTableWidgetItem(details)
-            det_item.setForeground(QBrush(QColor(COLORS['text_muted'])))
-            det_item.setFont(QFont(FONTS['mono'], 9))
-            self.table.setItem(i, 4, det_item)
+            for j, col in enumerate(columns):
+                val = row.get(col)
+                if pd.isna(val):
+                    text = ""
+                elif hasattr(val, "strftime"):
+                    text = val.strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    text = str(val)
+                item = QTableWidgetItem(text)
+                self.table.setItem(i, j, item)
             
         # Also sync entry stack index
         self.entry_stack.setCurrentIndex(self.combo_testtype.currentIndex())
@@ -1070,7 +1055,9 @@ class DashboardView(QWidget):
 
     def send_current_entry(self):
         testtype = self.combo_testtype.currentText()
-        barcode_str = self.le_barcode.text().strip() or "0"
+        barcode_str = self.le_barcode.text().strip()
+        if not barcode_str:
+            barcode_str = str(db.DUMMY_BARCODE)
         user_str = self.le_user.text().strip() or "unknown"
         
         payload = {}
@@ -1085,16 +1072,21 @@ class DashboardView(QWidget):
             
         try:
             barcode_obj = miltenyiBarcode.mBarcode(barcode_str)
+        except Exception as e:
+            QMessageBox.warning(self, "Barcode Fehler", f"Konnte Barcode nicht erzeugen:\n{e}")
+            return
+
+        conn = None
+        try:
             conn = dbConnector.connection()
             conn.connect()
-            
+
             now = datetime.datetime.now()
             conn.sendData(
                 now, now, 0,
                 testtype, payload,
                 barcode_obj, user_str
             )
-            conn.disconnect()
             
             # Show success and refresh
             self.status_indicator.setText("● SENT SUCCESS")
@@ -1103,7 +1095,55 @@ class DashboardView(QWidget):
             self.clear_entry_fields()
             
         except Exception as e:
+            self.status_indicator.setText("● SEND FAILED")
             QMessageBox.critical(self, "Database Error", f"Failed to send data:\n{e}")
+        finally:
+            if conn:
+                try:
+                    conn.disconnect()
+                except Exception:
+                    pass
+
+    def send_current_entry_gateway(self):
+        testtype = self.combo_testtype.currentText()
+        if testtype != "kleberoboter":
+            QMessageBox.information(
+                self,
+                "Gateway Hinweis",
+                "Gateway-Senden ist aktuell nur fuer 'kleberoboter' implementiert.",
+            )
+            return
+
+        barcode_str = self.le_barcode.text().strip()
+        if not barcode_str:
+            barcode_str = str(db.DUMMY_BARCODE)
+
+        result_val = bool(self.cb_ok.isChecked())
+        try:
+            payload, ack = db.send_dummy_payload_gateway(
+                device_id="kleberoboter",
+                barcode=int(barcode_str),
+                result=result_val,
+                start_time=datetime.datetime.now(datetime.timezone.utc),
+                end_time=datetime.datetime.now(datetime.timezone.utc),
+            )
+        except Exception as e:
+            self.status_indicator.setText("● GATEWAY FAILED")
+            QMessageBox.critical(self, "Gateway Error", f"Senden ueber Gateway fehlgeschlagen:\n{e}")
+            return
+
+        if ack == "OK":
+            self.status_indicator.setText("● GATEWAY SENT")
+            QTimer.singleShot(2000, lambda: self.status_indicator.setText("● LIVE"))
+            self.update_data()
+            self.clear_entry_fields()
+        else:
+            self.status_indicator.setText("● GATEWAY NO ACK")
+            QMessageBox.warning(
+                self,
+                "Gateway Antwort",
+                f"Unerwartete Gateway-Antwort: {ack!r}\nPayload: {payload}",
+            )
 
     def _safe_int(self, txt):
         try: return int(float(str(txt).replace(",", ".")))
@@ -2718,6 +2758,8 @@ class IPCView(QWidget):
         QTimer.singleShot(500, self.refresh_data)
 
     def refresh_data(self):
+        if not self.isVisible():
+            return
         source = self.combo_source.currentText()
         
         def fetch_task():
@@ -3514,6 +3556,23 @@ class MainWindow(QMainWindow):
         # Initialize views that need cross-referencing
         self.dashboard = DashboardView()
         self.ipc_view = IPCView()
+
+        # Keep device selection in sync between Dashboard and IPC views.
+        def _sync_combo(src, dst):
+            text = src.currentText()
+            idx = dst.findText(text)
+            if idx >= 0 and idx != dst.currentIndex():
+                dst.blockSignals(True)
+                dst.setCurrentIndex(idx)
+                dst.blockSignals(False)
+
+        self.dashboard.combo_testtype.currentIndexChanged.connect(
+            lambda: _sync_combo(self.dashboard.combo_testtype, self.ipc_view.combo_source)
+        )
+        self.ipc_view.combo_source.currentIndexChanged.connect(
+            lambda: _sync_combo(self.ipc_view.combo_source, self.dashboard.combo_testtype)
+        )
+        _sync_combo(self.dashboard.combo_testtype, self.ipc_view.combo_source)
 
         self.btn_dash = add_nav("Dashboard", self.dashboard)
         self.btn_ipc = add_nav("In Process Control", self.ipc_view)
