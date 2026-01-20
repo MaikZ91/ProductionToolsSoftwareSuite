@@ -68,22 +68,22 @@ DASHBOARD_WIDGET_CLS, _DASHBOARD_IMPORT_ERROR = (None, None)
 
 # --- THEME CONFIGURATION ---
 COLORS = {
-    "bg": "#000000",           # Main Background
-    "surface": "#0d0d0d",      # Card Background
-    "surface_light": "#1a1a1a",# Inputs / Hover
-    "border": "#262626",
-    "primary": "#ffffff",      # White accents
-    "primary_hover": "#cccccc",
-    "secondary": "#a0a0a0",    # Lighter Gray for highlights
-    "text": "#ffffff",
-    "text_muted": "#909090",
-    "danger": "#ef4444",
-    "success": "#10b981",
-    "warning": "#f59e0b",
+    "bg": "#050505",            # Main Background
+    "surface": "#0b0b0b",       # Card Background
+    "surface_light": "#141414", # Inputs / Hover
+    "border": "#1f1f1f",
+    "primary": "#f5f5f5",       # Paper-like white
+    "primary_hover": "#e6e6e6",
+    "secondary": "#bdbdbd",     # Soft gray
+    "text": "#f5f5f5",
+    "text_muted": "#9a9a9a",
+    "danger": "#ff5b5b",
+    "success": "#7ad39b",
+    "warning": "#f0b74a",
 }
 
 FONTS = {
-    "ui": "Segoe UI",
+    "ui": "Sofia Pro",
     "mono": "Consolas",
 }
 
@@ -484,23 +484,23 @@ QMainWindow {{ background-color: {COLORS['bg']}; }}
 QWidget {{ 
     background-color: {COLORS['bg']}; 
     color: {COLORS['text']}; 
-    font-family: "{FONTS['ui']}";
-    font-size: 13px;
+    font-family: "{FONTS['ui']}", "Segoe UI", "Arial";
+    font-size: 12px;
 }}
 
 /* SCROLLBARS */
 QScrollBar:vertical {{
     border: none;
     background: #050505;
-    width: 10px;
+    width: 8px;
     margin: 0px;
 }}
 QScrollBar::handle:vertical {{
-    background: #444444;
+    background: {COLORS['border']};
     min-height: 30px;
-    border-radius: 5px;
+    border-radius: 4px;
 }}
-QScrollBar::handle:vertical:hover {{ background: #666666; }}
+QScrollBar::handle:vertical:hover {{ background: {COLORS['text_muted']}; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
 
 QScrollBar:horizontal {{
@@ -518,10 +518,10 @@ QScrollBar::handle:horizontal {{
 QPushButton {{
     background-color: {COLORS['surface_light']};
     border: 1px solid {COLORS['border']};
-    border-radius: 6px;
-    padding: 8px 16px;
+    border-radius: 4px;
+    padding: 8px 14px;
     color: {COLORS['text']};
-    font-weight: 600;
+    font-weight: 500;
 }}
 QPushButton:hover {{
     background-color: {COLORS['surface']};
@@ -532,45 +532,75 @@ QPushButton:pressed {{
 }}
 
 QLineEdit, QTextEdit {{
-    background-color: {COLORS['surface_light']};
+    background-color: {COLORS['surface']};
     border: 1px solid {COLORS['border']};
-    border-radius: 6px;
-    padding: 10px 12px;
+    border-radius: 4px;
+    padding: 8px 10px;
     color: {COLORS['text']};
     selection-background-color: {COLORS['primary']};
     selection-color: {COLORS['bg']};
-    font-size: 13px;
+    font-size: 12px;
 }}
 QLineEdit:focus, QTextEdit:focus {{
     border: 1px solid {COLORS['text_muted']};
     background-color: {COLORS['surface']};
 }}
 
+QComboBox {{
+    background-color: {COLORS['surface']};
+    border: 1px solid {COLORS['border']};
+    border-radius: 4px;
+    padding: 6px 10px;
+    color: {COLORS['text']};
+}}
+QComboBox:focus {{
+    border-color: {COLORS['text_muted']};
+}}
+QComboBox::drop-down {{
+    border: none;
+    width: 24px;
+}}
+QComboBox::down-arrow {{
+    image: none;
+    border: none;
+}}
+
 /* TABLE WIDGET */
 QTableWidget {{
-    background-color: {COLORS['surface']};
-    gridline-color: {COLORS['border']};
+    background-color: {COLORS['bg']};
+    gridline-color: transparent;
     border: none;
-    border-radius: 8px;
+    border-radius: 6px;
     outline: none;
+    alternate-background-color: {COLORS['surface']};
 }}
 QTableWidget::item {{
-    padding: 8px;
+    padding: 10px 8px;
     border-bottom: 1px solid {COLORS['border']};
+    color: {COLORS['text']};
 }}
 QTableWidget::item:selected {{
-    background-color: {COLORS['surface_light']};
+    background-color: rgba(245, 245, 245, 0.08);
     color: {COLORS['primary']};
+    border-left: 2px solid {COLORS['primary']};
+}}
+QTableWidget::item:hover {{
+    background-color: rgba(245, 245, 245, 0.04);
 }}
 QHeaderView::section {{
-    background-color: {COLORS['surface_light']};
+    background-color: {COLORS['bg']};
     color: {COLORS['text_muted']};
-    padding: 8px;
+    padding: 10px;
     border: none;
-    font-weight: bold;
-    font-size: 12px;
+    font-weight: 600;
+    font-size: 10px;
     text-transform: uppercase;
-    border-bottom: 2px solid {COLORS['bg']};
+    letter-spacing: 0.8px;
+    border-bottom: 1px solid {COLORS['border']};
+}}
+QTableWidget QTableCornerButton::section {{
+    background-color: {COLORS['bg']};
+    border: none;
 }}
 
 /* SLIDER */
@@ -614,6 +644,22 @@ QSpinBox, QDoubleSpinBox {{
 QSpinBox:focus, QDoubleSpinBox:focus {{
     border-color: {COLORS['text_muted']};
 }}
+
+QCheckBox {{
+    color: {COLORS['text']};
+    spacing: 6px;
+}}
+QCheckBox::indicator {{
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border: 1px solid {COLORS['border']};
+    background: {COLORS['surface']};
+}}
+QCheckBox::indicator:checked {{
+    background: {COLORS['primary']};
+    border: 1px solid {COLORS['primary']};
+}}
 """
 
 # --- CUSTOM COMPONENTS ---
@@ -631,10 +677,12 @@ class ModernButton(QPushButton):
     def set_variant(self, variant):
         base_style = """
             QPushButton {
-                border-radius: 6px;
+                border-radius: 4px;
                 font-weight: 600;
-                font-size: 13px;
-                padding: 0 16px;
+                font-size: 11px;
+                letter-spacing: 0.8px;
+                text-transform: uppercase;
+                padding: 0 14px;
             }
         """
         if variant == "primary":
@@ -650,11 +698,11 @@ class ModernButton(QPushButton):
         elif variant == "secondary":
             self.setStyleSheet(base_style + f"""
                 QPushButton {{
-                    background-color: {COLORS['surface_light']};
+                    background-color: transparent;
                     color: {COLORS['text']};
                     border: 1px solid {COLORS['border']};
                 }}
-                QPushButton:hover {{ border: 1px solid {COLORS['text_muted']}; background-color: {COLORS['border']}; }}
+                QPushButton:hover {{ border: 1px solid {COLORS['text_muted']}; background-color: {COLORS['surface_light']}; }}
             """)
         elif variant == "ghost":
             self.setStyleSheet(base_style + f"""
@@ -681,11 +729,13 @@ class Card(QFrame):
     def __init__(self, title=None, parent=None):
         super().__init__(parent)
         self.title_label = None
+        self.header_frame = None
+        self.header_layout = None
         self.setStyleSheet(f"""
             QFrame {{
                 background-color: {COLORS['surface']};
                 border: 1px solid {COLORS['border']};
-                border-radius: 8px;
+                border-radius: 6px;
             }}
         """)
         
@@ -694,17 +744,17 @@ class Card(QFrame):
         self.main_layout.setSpacing(0)
 
         if title:
-            header_frame = QFrame()
-            header_frame.setStyleSheet("background-color: transparent; border: none; border-bottom: 1px solid " + COLORS['border'] + ";")
-            header_layout = QHBoxLayout(header_frame)
-            header_layout.setContentsMargins(16, 12, 16, 12)
-            header_layout.setSpacing(0)
+            self.header_frame = QFrame()
+            self.header_frame.setStyleSheet("background-color: transparent; border: none; border-bottom: 1px solid " + COLORS['border'] + ";")
+            self.header_layout = QHBoxLayout(self.header_frame)
+            self.header_layout.setContentsMargins(16, 12, 16, 12)
+            self.header_layout.setSpacing(0)
 
             self.title_label = QLabel(title)
             self.title_label.setObjectName(f"Title_{title.replace(' ', '_')}")
-            self.title_label.setStyleSheet("border: none; font-size: 13px; font-weight: 700; letter-spacing: 0.3px;")
-            header_layout.addWidget(self.title_label)
-            self.main_layout.addWidget(header_frame)
+            self.title_label.setStyleSheet("border: none; font-size: 11px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase;")
+            self.header_layout.addWidget(self.title_label)
+            self.main_layout.addWidget(self.header_frame)
             apply_saved_ui(self.title_label)
 
         self.content_widget = QWidget()
@@ -723,6 +773,12 @@ class Card(QFrame):
 
     def add_layout(self, layout):
         self.content_layout.addLayout(layout)
+
+    def set_compact(self, header_margins=(12, 8, 12, 8), content_margins=(12, 8, 12, 8), content_spacing=8):
+        if self.header_layout:
+            self.header_layout.setContentsMargins(*header_margins)
+        self.content_layout.setContentsMargins(*content_margins)
+        self.content_layout.setSpacing(content_spacing)
 
 
 class StatusBadge(QLabel):
@@ -786,27 +842,27 @@ class DashboardView(QWidget):
 
         # Main layout for the entire view (Horizontal split)
         main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(20)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(12)
 
         # --- LEFT SIDE: CONTROLS ---
         left_side = QVBoxLayout()
-        left_side.setSpacing(15)
+        left_side.setSpacing(10)
 
         # 0. Selection & Refresh
         controls_card = Card("Data Source")
+        controls_card.set_compact()
         cl = QVBoxLayout()
-        cl.setSpacing(8)
+        cl.setSpacing(6)
         self.combo_testtype = QComboBox()
         self.combo_testtype.addItems(["kleberoboter", "gitterschieber_tool", "stage_test"])
         self.combo_testtype.currentIndexChanged.connect(self.trigger_refresh)
-        self.combo_testtype.setFixedHeight(36)
+        self.combo_testtype.setFixedHeight(32)
         cl.addWidget(self.combo_testtype)
         self.status_indicator = QPushButton("● LIVE")
         self.status_indicator.setCursor(Qt.PointingHandCursor)
         self.status_indicator.clicked.connect(self.trigger_refresh)
         self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['success']}; font-weight: 800; font-size: 11px; text-align: left; padding-left: 5px; }}")
-        cl.addWidget(self.status_indicator)
         cl.addWidget(self.status_indicator)
         
         # IPC Shortcut Button
@@ -822,8 +878,9 @@ class DashboardView(QWidget):
 
         # 2. Key Metrics
         kpi_card = Card("Key Metrics")
+        kpi_card.set_compact()
         kl = QVBoxLayout()
-        kl.setSpacing(10)
+        kl.setSpacing(6)
         self.kpi_total = self.add_kpi_compact(kl, "Total", "0", COLORS['primary'])
         self.kpi_pass = self.add_kpi_compact(kl, "Pass", "0%", COLORS['secondary'])
         self.kpi_last = self.add_kpi_compact(kl, "Latest", "---", COLORS['success'])
@@ -835,6 +892,7 @@ class DashboardView(QWidget):
 
         # --- RIGHT SIDE: ACTIVITY TABLE ---
         activity_card = Card("Recent Activity")
+        activity_card.set_compact()
         al = QVBoxLayout()
         al.setContentsMargins(0, 0, 0, 0)
         
@@ -844,13 +902,43 @@ class DashboardView(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setShowGrid(False)
+        self.table.setAlternatingRowColors(True)
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.table.setFrameShape(QFrame.NoFrame)
         self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(30)
+        self.table.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: {COLORS['surface']};
+                alternate-background-color: {COLORS['surface_light']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 6px;
+                gridline-color: {COLORS['border']};
+            }}
+            QHeaderView::section {{
+                background-color: {COLORS['surface_light']};
+                color: {COLORS['text']};
+                padding: 8px 8px;
+                border: none;
+                border-bottom: 1px solid {COLORS['border']};
+                font-weight: 600;
+                text-transform: uppercase;
+            }}
+            QTableWidget::item {{
+                padding: 6px 6px;
+            }}
+            QTableWidget::item:selected {{
+                background-color: {hex_to_rgba(COLORS['primary'], 0.18)};
+            }}
+        """)
         
         # Style the header
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.setSortingEnabled(True)
         
         self.table.setObjectName("Dash_Table")
         
@@ -866,8 +954,9 @@ class DashboardView(QWidget):
 
     def setup_entry_ui_compact(self, layout):
         entry_card = Card("New Record")
+        entry_card.set_compact()
         entry_layout = QVBoxLayout()
-        entry_layout.setSpacing(8)
+        entry_layout.setSpacing(6)
         
         self.le_barcode = QLineEdit()
         self.le_barcode.setPlaceholderText("Barcode...")
@@ -877,6 +966,7 @@ class DashboardView(QWidget):
         self.le_user.setObjectName("Dash_Entry_User")
         
         row1 = QHBoxLayout()
+        row1.setSpacing(6)
         row1.addWidget(self.le_barcode)
         row1.addWidget(self.le_user)
         entry_layout.addLayout(row1)
@@ -1020,17 +1110,79 @@ class DashboardView(QWidget):
         elif last_result == "OK": color = COLORS['success']
         self.kpi_last.value_label.setStyleSheet(f"color: {color}; font-weight: 800; font-size: 18px; border:none;")
 
-        # Update Table (show all columns exactly as received)
+        # Update Table with prioritized ordering (Zeit -> Test-Parameter -> Meta)
         columns = list(df.columns)
+        self.table.setSortingEnabled(False)
+
+        # Identify time columns first, then test parameters, then meta fields
+        time_priority = ["starttest", "endtest", "timestamp", "time", "date", "datetime"]
+        meta_fields = {
+            "barcodenummer", "barcode", "user",
+            "device", "device_id", "testtype"
+        }
+
+        guid_cols = []
+        for col in columns:
+            normalized = col.lower().replace("_", "")
+            if "testguid" in normalized:
+                guid_cols.append(col)
+        time_cols = []
+        for name in time_priority:
+            for col in columns:
+                if name in col.lower() and col not in time_cols:
+                    time_cols.append(col)
+        # Pick up any datetime-typed columns not caught by the name heuristic
+        for col in columns:
+            try:
+                if pd.api.types.is_datetime64_any_dtype(df[col]) and col not in time_cols:
+                    time_cols.append(col)
+            except Exception:
+                pass
+
+        ok_cols = [c for c in columns if c.lower() in {"ok", "status", "result"}]
+        meta_cols = [c for c in columns if c.lower() in meta_fields]
+        # Remove GUID from other buckets so it can be forced to the end
+        meta_cols = [c for c in meta_cols if c not in guid_cols]
+        time_cols = [c for c in time_cols if c not in guid_cols]
+        ok_cols = [c for c in ok_cols if c not in guid_cols and c not in time_cols]
+        param_cols = [c for c in columns if c not in time_cols and c not in meta_cols and c not in guid_cols and c not in ok_cols]
+
+        ordered_columns = time_cols + param_cols + ok_cols + [c for c in meta_cols if c not in time_cols] + guid_cols
+        if time_cols and ok_cols:
+            try:
+                start_idx = next(i for i, c in enumerate(time_cols) if "starttest" in c.lower())
+                ordered_columns = (
+                    time_cols[: start_idx + 1]
+                    + ok_cols
+                    + time_cols[start_idx + 1 :]
+                    + param_cols
+                    + [c for c in meta_cols if c not in time_cols]
+                    + guid_cols
+                )
+            except StopIteration:
+                pass
+        if not ordered_columns:
+            ordered_columns = columns
+
+        # Sort data by time (desc) then parameters (asc) to rank newest first
+        sort_cols = time_cols[:1] + param_cols
+        display_df = df
+        if sort_cols:
+            try:
+                ascending = [False] + [True] * (len(sort_cols) - 1)
+                display_df = df.sort_values(by=sort_cols, ascending=ascending, na_position="last")
+            except Exception as e:
+                print(f"DashboardView sort fallback: {e}")
+
         self.table.clear()
-        self.table.setColumnCount(len(columns))
-        self.table.setHorizontalHeaderLabels([str(c) for c in columns])
-        self.table.setRowCount(len(df))
+        self.table.setColumnCount(len(ordered_columns))
+        self.table.setHorizontalHeaderLabels([str(c) for c in ordered_columns])
+        self.table.setRowCount(len(display_df))
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
 
-        for i, row in df.iterrows():
-            for j, col in enumerate(columns):
+        for i, (_, row) in enumerate(display_df.iterrows()):
+            for j, col in enumerate(ordered_columns):
                 val = row.get(col)
                 if pd.isna(val):
                     text = ""
@@ -1040,6 +1192,14 @@ class DashboardView(QWidget):
                     text = str(val)
                 item = QTableWidgetItem(text)
                 self.table.setItem(i, j, item)
+
+        # Default sort indicator on time column if available
+        if time_cols:
+            time_index = ordered_columns.index(time_cols[0])
+            self.table.setSortingEnabled(True)
+            self.table.sortItems(time_index, Qt.DescendingOrder)
+        else:
+            self.table.setSortingEnabled(True)
             
         # Also sync entry stack index
         self.entry_stack.setCurrentIndex(self.combo_testtype.currentIndex())
@@ -1914,17 +2074,18 @@ class StageControlView(QWidget):
 
     def setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(15)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
 
         # Left Column
         left_col = QVBoxLayout()
-        left_col.setSpacing(15)
+        left_col.setSpacing(10)
         
         setup_card = Card("Test-Setup")
+        setup_card.set_compact()
         
         form_layout = QVBoxLayout()
-        form_layout.setSpacing(15)
+        form_layout.setSpacing(10)
         
         self.inputs = {}
         self.inputs["operator"] = self.add_input(form_layout, "Bediener", "M. Zschach")
@@ -1936,11 +2097,11 @@ class StageControlView(QWidget):
         
         self.inputs["notes"] = QTextEdit()
         self.inputs["notes"].setPlaceholderText("Kommentare hier eingeben...")
-        self.inputs["notes"].setFixedHeight(70)
+        self.inputs["notes"].setFixedHeight(60)
         form_layout.addWidget(self.inputs["notes"])
         
         btn_layout = QVBoxLayout()
-        btn_layout.setSpacing(10)
+        btn_layout.setSpacing(8)
         
         self.btn_start = ModernButton("Kalibriermessung starten", "primary")
         self.btn_start.clicked.connect(self.toggle_precision_test)
@@ -1953,7 +2114,7 @@ class StageControlView(QWidget):
         row_btn = QHBoxLayout()
         self.btn_open = ModernButton("Ordner öffnen", "ghost")
         self.btn_open.clicked.connect(self._open_folder)
-        self.btn_open.setEnabled(False)
+        self.btn_open.setEnabled(True)
         row_btn.addWidget(self.btn_open)
         
         row_btn.addWidget(ModernButton("DB Sync", "ghost"))
@@ -1962,7 +2123,7 @@ class StageControlView(QWidget):
         # Progress Area
         self.progress_container = QWidget()
         pl = QVBoxLayout(self.progress_container)
-        pl.setContentsMargins(0, 10, 0, 0)
+        pl.setContentsMargins(0, 6, 0, 0)
         
         self.lbl_phase = QLabel("BEREIT")
         self.lbl_phase.setStyleSheet(f"font-size: 11px; font-weight: 800; color: {COLORS['primary']}; border: none;")
@@ -1993,6 +2154,7 @@ class StageControlView(QWidget):
         
         # Status Card
         status_card = Card("QA-Status")
+        status_card.set_compact()
         sl = QVBoxLayout()
         
         row1 = QHBoxLayout()
@@ -2037,28 +2199,31 @@ class StageControlView(QWidget):
         # Right Column (Chart)
         right_col = QVBoxLayout()
         chart_card = Card("Live-Positionsfehler")
+        chart_card.set_compact()
         
         # Header inside chart
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Echtzeit-Abweichung (X vs Y)"))
         top_row.addStretch()
         self.timer_lbl = QLabel("15:00:00")
-        self.timer_lbl.setStyleSheet(f"font-family: {FONTS['mono']}; font-size: 20px; font-weight: bold; color: {COLORS['primary']};")
+        self.timer_lbl.setStyleSheet(f"font-family: {FONTS['mono']}; font-size: 16px; font-weight: bold; color: {COLORS['primary']};")
         top_row.addWidget(self.timer_lbl)
         chart_card.add_layout(top_row)
         
         self.chart = ModernChart(height=5)
+        self.chart.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.line_x, = self.chart.ax.plot([], [], color=COLORS['primary'], linewidth=2, label="Fehler X")
         self.line_y, = self.chart.ax.plot([], [], color=COLORS['secondary'], linewidth=2, label="Fehler Y")
         
         # Chart Legend
         leg = self.chart.ax.legend(loc='upper right', facecolor=COLORS['surface'], edgecolor=COLORS['border'], labelcolor=COLORS['text'])
         leg.get_frame().set_linewidth(1)
+        self.chart.fig.subplots_adjust(left=0.08, right=0.98, top=0.92, bottom=0.12)
         
         chart_card.add_widget(self.chart)
         right_col.addWidget(chart_card)
         
-        layout.addLayout(right_col, 2)
+        layout.addLayout(right_col, 3)
 
     def add_input(self, layout, label, placeholder):
         lbl = QLabel(label.upper())
@@ -3475,11 +3640,13 @@ class SidebarButton(QPushButton):
                 background-color: transparent;
                 color: {COLORS['text_muted']};
                 text-align: left;
-                padding-left: 20px;
+                padding-left: 16px;
                 border: none;
-                border-radius: 12px;
+                border-radius: 8px;
                 font-weight: 600;
-                font-size: 14px;
+                font-size: 11px;
+                letter-spacing: 1px;
+                text-transform: uppercase;
                 margin-bottom: 4px;
             }}
             QPushButton:hover {{
@@ -3487,9 +3654,9 @@ class SidebarButton(QPushButton):
                 color: {COLORS['text']};
             }}
             QPushButton:checked {{
-                background-color: {hex_to_rgba(COLORS['primary'], 0.15)};
+                background-color: {hex_to_rgba(COLORS['primary'], 0.08)};
                 color: {COLORS['primary']};
-                border: 1px solid {hex_to_rgba(COLORS['primary'], 0.3)};
+                border: 1px solid {hex_to_rgba(COLORS['primary'], 0.2)};
             }}
         """)
 
@@ -3522,14 +3689,14 @@ class MainWindow(QMainWindow):
         # 1. Sidebar
         self.sidebar = QFrame()
         self.sidebar.setFixedWidth(230)
-        self.sidebar.setStyleSheet(f"background-color: {COLORS['surface']}; border-right: 1px solid {COLORS['border']};")
+        self.sidebar.setStyleSheet(f"background-color: {COLORS['bg']}; border-right: 1px solid {COLORS['border']};")
         
         self.side_layout = QVBoxLayout(self.sidebar) # Made self.side_layout for access in _filter_navigation
         self.side_layout.setContentsMargins(16, 24, 16, 24)
         
         # Brand
         brand = QLabel("Resolve Production Tool")
-        brand.setStyleSheet(f"font-size: 16px; font-weight: 800; color: {COLORS['primary']}; padding-left: 12px; margin-bottom: 15px;")
+        brand.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {COLORS['primary']}; letter-spacing: 1.5px; text-transform: uppercase; padding-left: 12px; margin-bottom: 12px;")
         self.side_layout.addWidget(brand)
         
         # Nav Items
@@ -3581,7 +3748,7 @@ class MainWindow(QMainWindow):
         self.dashboard.btn_goto_ipc.clicked.connect(lambda: self.btn_ipc.click())
         
         lbl_wf = QLabel("WORKFLOWS")
-        lbl_wf.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px; font-weight: 800; padding-left: 12px; margin-top: 20px; margin-bottom: 10px;")
+        lbl_wf.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px; font-weight: 600; letter-spacing: 1px; padding-left: 12px; margin-top: 18px; margin-bottom: 8px;")
         self.side_layout.addWidget(lbl_wf)
         
         self.btn_ztrieb = add_nav("Z-Trieb", ZTriebView())
@@ -3596,7 +3763,7 @@ class MainWindow(QMainWindow):
         dynamic_tools = UI_CONFIG.get("dynamic_tools", {})
         if dynamic_tools:
             lbl_dyn = QLabel("CUSTOM TOOLS")
-            lbl_dyn.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px; font-weight: 800; padding-left: 12px; margin-top: 20px; margin-bottom: 10px;")
+            lbl_dyn.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px; font-weight: 600; letter-spacing: 1px; padding-left: 12px; margin-top: 18px; margin-bottom: 8px;")
             self.side_layout.addWidget(lbl_dyn)
             for tool_name in dynamic_tools:
                 add_nav(tool_name, StudioToolView(tool_name))
@@ -3616,16 +3783,16 @@ class MainWindow(QMainWindow):
         avatar = QLabel("MZ")
         avatar.setFixedSize(36, 36)
         avatar.setAlignment(Qt.AlignCenter)
-        avatar.setStyleSheet(f"background-color: {COLORS['primary']}; color: {COLORS['bg']}; border-radius: 18px; font-weight: bold;")
+        avatar.setStyleSheet(f"background-color: {COLORS['primary']}; color: {COLORS['bg']}; border-radius: 18px; font-weight: 600; letter-spacing: 0.5px;")
         user_label = QLabel("M. Zschach\nOperator")
-        user_label.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {COLORS['text']}; margin-left: 8px;")
+        user_label.setStyleSheet(f"font-size: 11px; font-weight: 500; color: {COLORS['text']}; margin-left: 8px;")
         
         user_row.addWidget(avatar)
         user_row.addWidget(user_label)
         user_row.addStretch()
         
         user_frame = QFrame()
-        user_frame.setStyleSheet(f"background-color: {COLORS['surface_light']}; border-radius: 12px; padding: 8px;")
+        user_frame.setStyleSheet(f"background-color: {COLORS['surface']}; border: 1px solid {COLORS['border']}; border-radius: 8px; padding: 8px;")
         user_frame.setLayout(user_row)
         self.side_layout.addWidget(user_frame)
         
@@ -3644,15 +3811,15 @@ class MainWindow(QMainWindow):
         hl.setContentsMargins(30, 0, 30, 0)
         
         self.page_title = QLabel("Dashboard")
-        self.page_title.setStyleSheet("font-size: 20px; font-weight: 700; letter-spacing: -0.5px;")
+        self.page_title.setStyleSheet("font-size: 18px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase;")
         
         self.search_bar = QLineEdit()
         self.search_bar.setPlaceholderText("Search Serial Number...")
         self.search_bar.setFixedWidth(280)
         self.search_bar.setStyleSheet(f"""
-            border-radius: 20px; 
+            border-radius: 16px; 
             background-color: {COLORS['surface']};
-            padding-left: 16px;
+            padding-left: 14px;
         """)
         
         hl.addWidget(self.page_title)
@@ -3727,7 +3894,7 @@ class MainWindow(QMainWindow):
             
             if not has_label:
                 lbl_dyn = QLabel("CUSTOM TOOLS")
-                lbl_dyn.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px; font-weight: 800; padding-left: 12px; margin-top: 20px; margin-bottom: 10px;")
+                lbl_dyn.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px; font-weight: 600; letter-spacing: 1px; padding-left: 12px; margin-top: 18px; margin-bottom: 8px;")
                 # Insert before the "+" button
                 idx = self.side_layout.indexOf(self.btn_new_tool)
                 self.side_layout.insertWidget(idx, lbl_dyn)
@@ -3773,7 +3940,7 @@ if __name__ == "__main__":
     
     # Set app font
     font = QFont(FONTS['ui'])
-    font.setPixelSize(13)
+    font.setPixelSize(12)
     app.setFont(font)
     
     window = MainWindow()
