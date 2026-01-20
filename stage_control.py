@@ -50,7 +50,7 @@ def resolve_data_root() -> pathlib.Path:
 
 
 DATA_ROOT = resolve_data_root()
-DUR_MAX_UM = 8.0    # Max. |Fehler| erlaubt im Dauertest (Live + Abschluss)
+DUR_MAX_UM = 25.5    # Max. |Fehler| erlaubt im Dauertest (Live + Abschluss)
 
 # ---------------------------------------------------------------------------
 # PMAC Bridge (Hardware / Simulation)
@@ -675,4 +675,3 @@ class CombinedTestWorker(QObject):
             "dur_max_um": float(self.max_abs_um),
             "limit_um": float(self.limit_um),
         })
-

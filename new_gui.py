@@ -2099,6 +2099,35 @@ class StageControlView(QWidget):
         self.inputs["notes"].setPlaceholderText("Kommentare hier eingeben...")
         self.inputs["notes"].setFixedHeight(60)
         form_layout.addWidget(self.inputs["notes"])
+
+        dur_row = QHBoxLayout()
+        dur_lbl = QLabel("DAUERTEST-DAUER (H)")
+        dur_lbl.setStyleSheet(f"font-size: 11px; font-weight: 700; color: {COLORS['text_muted']}; border: none;")
+        self.duration_hours = QComboBox()
+        self.duration_hours.addItems(["1", "2", "4", "6", "8", "10", "12", "15", "18", "24", "36", "48"])
+        self.duration_hours.setCurrentText("8")
+        self.duration_hours.setFixedHeight(28)
+        self.duration_hours.setCursor(Qt.PointingHandCursor)
+        self.duration_hours.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {COLORS['surface']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 4px;
+                padding: 6px 10px;
+                color: {COLORS['text']};
+            }}
+            QComboBox::drop-down {{
+                border-left: 1px solid {COLORS['border']};
+                width: 28px;
+            }}
+            QComboBox::down-arrow {{
+                image: url(:/qt-project.org/styles/commonstyle/images/arrowdown-16.png);
+            }}
+        """)
+        dur_row.addWidget(dur_lbl)
+        dur_row.addStretch()
+        dur_row.addWidget(self.duration_hours)
+        form_layout.addLayout(dur_row)
         
         btn_layout = QVBoxLayout()
         btn_layout.setSpacing(8)
@@ -2176,7 +2205,7 @@ class StageControlView(QWidget):
         qa_info = QVBoxLayout()
         qa_lbl = QLabel("Dauertest QA")
         qa_lbl.setStyleSheet(f"color: {COLORS['success']}; font-weight: bold; font-size: 12px; border:none; background:transparent;")
-        qa_lim = QLabel("Limit: 8.0 µm")
+        qa_lim = QLabel(f"Limit: {resolve_stage.DUR_MAX_UM:.1f} µm")
         qa_lim.setStyleSheet(f"color: {COLORS['success']}; opacity: 0.8; font-size: 11px; border:none; background:transparent;")
         qa_info.addWidget(qa_lbl)
         qa_info.addWidget(qa_lim)
@@ -2356,6 +2385,8 @@ class StageControlView(QWidget):
         if self.running:
             QMessageBox.warning(self, "Test läuft", "Die Kalibriermessung läuft bereits.")
             return
+        if hasattr(self, "duration_hours"):
+            self._duration_sec = int(float(self.duration_hours.currentText()) * 3600)
         self._acquire_metadata()
         out_dir = self._ensure_run_dir()
         
