@@ -1131,10 +1131,7 @@ class DashboardView(QWidget):
         self.btn_send.setFixedHeight(28)
         self.btn_send.clicked.connect(self.send_current_entry)
         btn_row.addWidget(self.btn_send)
-        self.btn_send_gateway = ModernButton("Send via Gateway", "secondary")
-        self.btn_send_gateway.setFixedHeight(28)
-        self.btn_send_gateway.clicked.connect(self.send_current_entry_gateway)
-        btn_row.addWidget(self.btn_send_gateway)
+        # Gateway send is automatic when connected to raspi-webgui.
         entry_layout.addLayout(btn_row)
         
         entry_card.add_layout(entry_layout)
@@ -1191,9 +1188,10 @@ class DashboardView(QWidget):
             
         testtype = self.combo_testtype.currentText()
         self._is_fetching = True
+        source_label = "GW" if db.is_on_gateway_wifi() else "DB"
         
         # UI Feedback
-        self.status_indicator.setText("● FETCHING...")
+        self.status_indicator.setText(f"● FETCHING ({source_label})")
         self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['text_muted']}; font-weight: 800; font-size: 11px; margin-left: 10px; }}")
 
         def task():
@@ -1210,10 +1208,11 @@ class DashboardView(QWidget):
         """Processes the background result on the main thread."""
         self._is_fetching = False
         testtype = self.combo_testtype.currentText()
+        source_label = "GW" if db.is_on_gateway_wifi() else "DB"
         
         # Update Connection Status UI
         if not connected:
-            self.status_indicator.setText("● OFFLINE (Click to Retry)")
+            self.status_indicator.setText(f"● OFFLINE {source_label} (Click to Retry)")
             self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['danger']}; font-weight: 800; font-size: 11px; margin-left: 10px; }}")
             
             # Stop automatic retries as requested
@@ -1236,7 +1235,7 @@ class DashboardView(QWidget):
             self.table.setSpan(0, 0, 1, 5) # Span across all columns
             return
         else:
-            self.status_indicator.setText("● LIVE")
+            self.status_indicator.setText(f"● LIVE ({source_label})")
             self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['success']}; font-weight: 800; font-size: 11px; text-align: left; padding-left: 5px; }}")
             # Clear potential spans from error state
             self.table.clearSpans()
@@ -1383,7 +1382,36 @@ class DashboardView(QWidget):
         elif testtype == "stage_test":
             payload["position"] = self.le_pos_name.text().strip()
             payload["field_of_view"] = self._safe_float(self.le_fov.text())
-            
+
+        if db.is_on_gateway_wifi():
+            try:
+                payload, ack = db.send_payload_gateway(
+                    device_id=testtype,
+                    barcode=barcode_str,
+                    payload=payload,
+                    user=user_str,
+                    start_time=datetime.datetime.now(datetime.timezone.utc),
+                    end_time=datetime.datetime.now(datetime.timezone.utc),
+                )
+            except Exception as e:
+                self.status_indicator.setText("● GATEWAY FAILED")
+                QMessageBox.critical(self, "Gateway Error", f"Senden ueber Gateway fehlgeschlagen:\n{e}")
+                return
+
+            if ack == "OK":
+                self.status_indicator.setText("● GATEWAY SENT")
+                QTimer.singleShot(2000, lambda: self.status_indicator.setText("● LIVE"))
+                self.update_data()
+                self.clear_entry_fields()
+            else:
+                self.status_indicator.setText("● GATEWAY NO ACK")
+                QMessageBox.warning(
+                    self,
+                    "Gateway Antwort",
+                    f"Unerwartete Gateway-Antwort: {ack!r}\nPayload: {payload}",
+                )
+            return
+
         try:
             barcode_obj = miltenyiBarcode.mBarcode(barcode_str)
         except Exception as e:
@@ -2451,19 +2479,29 @@ class StageControlView(QWidget):
         def _task():
             conn = None
             try:
-                conn = dbConnector.connection()
-                conn.connect()
                 now = datetime.datetime.now()
-                barcode_obj = miltenyiBarcode.mBarcode(str(db.DUMMY_BARCODE))
-                conn.sendData(
-                    now,
-                    now,
-                    0,
-                    "kleberoboter",
-                    {"ok": True},
-                    barcode_obj,
-                    str(user_id),
-                )
+                if db.is_on_gateway_wifi():
+                    db.send_payload_gateway(
+                        device_id="kleberoboter",
+                        barcode=str(db.DUMMY_BARCODE),
+                        payload={"ok": True, "event": event_label},
+                        user=str(user_id),
+                        start_time=now,
+                        end_time=now,
+                    )
+                else:
+                    conn = dbConnector.connection()
+                    conn.connect()
+                    barcode_obj = miltenyiBarcode.mBarcode(str(db.DUMMY_BARCODE))
+                    conn.sendData(
+                        now,
+                        now,
+                        0,
+                        "kleberoboter",
+                        {"ok": True, "event": event_label},
+                        barcode_obj,
+                        str(user_id),
+                    )
                 print(f"[StageControl] DB event sent: {event_label} (user {user_id})")
             except Exception as e:
                 print(f"[StageControl] DB event failed ({event_label}): {e}")
@@ -2481,23 +2519,33 @@ class StageControlView(QWidget):
         def _task():
             conn = None
             try:
-                conn = dbConnector.connection()
-                conn.connect()
                 now = datetime.datetime.now()
-                barcode_obj = miltenyiBarcode.mBarcode(str(db.DUMMY_BARCODE))
                 payload = {
                     "particle_count": int(round(abs(err_x_um))),
                     "justage_angle": round(float(err_y_um), 3),
                 }
-                conn.sendData(
-                    now,
-                    now,
-                    0,
-                    "gitterschieber_tool",
-                    payload,
-                    barcode_obj,
-                    "stage_sync",
-                )
+                if db.is_on_gateway_wifi():
+                    db.send_payload_gateway(
+                        device_id="gitterschieber_tool",
+                        barcode=str(db.DUMMY_BARCODE),
+                        payload=payload,
+                        user="stage_sync",
+                        start_time=now,
+                        end_time=now,
+                    )
+                else:
+                    conn = dbConnector.connection()
+                    conn.connect()
+                    barcode_obj = miltenyiBarcode.mBarcode(str(db.DUMMY_BARCODE))
+                    conn.sendData(
+                        now,
+                        now,
+                        0,
+                        "gitterschieber_tool",
+                        payload,
+                        barcode_obj,
+                        "stage_sync",
+                    )
             except Exception as e:
                 print(f"[StageControl] DB sync failed: {e}")
             finally:
@@ -2510,8 +2558,9 @@ class StageControlView(QWidget):
         threading.Thread(target=_task, daemon=True).start()
 
     def _on_db_sync_toggled(self, checked: bool):
-        if self.dauer_running:
-            LIVE_STAGE_BUS.set_active(bool(checked))
+        LIVE_STAGE_BUS.set_active(bool(checked))
+        if checked:
+            LIVE_STAGE_BUS.push({"event": "stage_test_start", "ts": datetime.datetime.now()})
 
     # --- Precision Test ---
     def toggle_precision_test(self):
@@ -2662,6 +2711,8 @@ class StageControlView(QWidget):
         
         self.dauer_thr.start()
         LIVE_STAGE_BUS.set_active(bool(self.chk_db_sync.isChecked()))
+        if self.chk_db_sync.isChecked():
+            LIVE_STAGE_BUS.push({"event": "stage_test_start", "ts": datetime.datetime.now()})
 
     def _on_endurance_update(self, data):
         self.tick += 1
@@ -3172,6 +3223,10 @@ class IPCView(QWidget):
         tl.addWidget(self.combo_source)
         
         tl.addStretch()
+
+        self.lbl_ipc_source = QLabel("Source: DB")
+        self.lbl_ipc_source.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
+        tl.addWidget(self.lbl_ipc_source)
         
         btn_refresh = ModernButton("Refresh Data", "primary")
         btn_refresh.clicked.connect(self.refresh_data)
@@ -3209,7 +3264,9 @@ class IPCView(QWidget):
 
         # Live StageTest wiring (DB-backed)
         self._stage_live_active = False
+        self._stage_test_start_dt = None
         LIVE_STAGE_BUS.active_changed.connect(self._on_live_stage_active)
+        LIVE_STAGE_BUS.data_updated.connect(self._on_live_stage_event)
         
         # Initial Fetch
         QTimer.singleShot(500, self.refresh_data)
@@ -3217,18 +3274,29 @@ class IPCView(QWidget):
     def refresh_data(self):
         if not self.isVisible():
             return
+        source_label = "GW" if db.is_on_gateway_wifi() else "DB"
+        self.lbl_ipc_source.setText(f"Source: {source_label}")
         source = self.combo_source.currentText()
         if source == "stage_test" and self._stage_live_active:
-            df, ok = db.fetch_test_data("gitterschieber_tool", limit=200)
-            if ok and df is not None and not df.empty:
+            df, ok = db.fetch_test_data(
+                "gitterschieber_tool",
+                limit=200,
+                prefer_gateway=db.is_on_gateway_wifi(),
+            )
+            if ok and df is not None:
+                df = self._filter_stage_df(df)
                 self._plot_stage_live_from_db(df)
             return
         
         def fetch_task():
             try:
                 # Fetch more data for statistics (e.g. 100)
-                df, ok = db.fetch_test_data(source, limit=100)
-                if ok and not df.empty:
+                df, ok = db.fetch_test_data(
+                    source,
+                    limit=100,
+                    prefer_gateway=db.is_on_gateway_wifi(),
+                )
+                if ok:
                     return df
             except: pass
             return None
@@ -3239,6 +3307,8 @@ class IPCView(QWidget):
         # But previous Dashboard used a thread. Let's do simple safely here for now.
         df = fetch_task()
         if df is not None:
+            if source == "stage_test" and self._stage_live_active:
+                df = self._filter_stage_df(df)
             self._update_charts(df, source)
         else:
             print("[IPC] No data or fetch error.")
@@ -3314,8 +3384,32 @@ class IPCView(QWidget):
 
     def _on_live_stage_active(self, active: bool):
         self._stage_live_active = active
+        if not active:
+            self._stage_test_start_dt = None
         if self.isVisible() and self.combo_source.currentText() == "stage_test":
             self.refresh_data()
+
+    def _on_live_stage_event(self, payload: dict):
+        if payload.get("event") == "stage_test_start":
+            self._stage_test_start_dt = payload.get("ts")
+            if self.isVisible() and self.combo_source.currentText() == "stage_test":
+                self.refresh_data()
+
+    def _filter_stage_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        if not self._stage_test_start_dt or df is None or df.empty:
+            return df
+        time_col = "StartTest" if "StartTest" in df.columns else None
+        if not time_col and "EndTest" in df.columns:
+            time_col = "EndTest"
+        if not time_col:
+            return df
+        ts = pd.to_datetime(df[time_col], errors="coerce")
+        start_ts = pd.Timestamp(self._stage_test_start_dt)
+        if getattr(ts.dt, "tz", None) is not None:
+            ts = ts.dt.tz_localize(None)
+        if start_ts.tzinfo is not None:
+            start_ts = start_ts.tz_localize(None)
+        return df.loc[ts >= start_ts].copy()
 
     def _plot_stage_live_from_db(self, df):
         self.chart1.ax.cla()

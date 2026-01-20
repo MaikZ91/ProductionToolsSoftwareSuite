@@ -18,12 +18,40 @@ GATEWAY_SERVER_IP = "10.3.141.1"
 GATEWAY_PORT = 5000
 RASPI_WIFI_SSID = "raspi-webgui"
 DUMMY_BARCODE = 999911200301203102103142124
+PREFER_GATEWAY = os.environ.get("PREFER_GATEWAY", "1").lower() in ("1", "true", "yes")
+GATEWAY_CONNECT_RETRIES = int(os.environ.get("GATEWAY_CONNECT_RETRIES", "2"))
+GATEWAY_RETRY_DELAY = float(os.environ.get("GATEWAY_RETRY_DELAY", "0.4"))
+GATEWAY_SOCKET_TIMEOUT = float(os.environ.get("GATEWAY_SOCKET_TIMEOUT", "2.0"))
+GATEWAY_READ_TIMEOUT = float(os.environ.get("GATEWAY_READ_TIMEOUT", "3.0"))
 
 TESTTYPE_DB_MAP = {
     "kleberoboter": "kleberoboter",
     "gitterschieber_tool": "gitterschieber_tool",
     "stage_test": "stage_test",
 }
+
+
+def current_ssid() -> str | None:
+    nmcli = shutil.which("nmcli")
+    if nmcli:
+        res = subprocess.run(
+            [nmcli, "-t", "-f", "ACTIVE,SSID", "dev", "wifi"],
+            capture_output=True,
+            text=True,
+        )
+        for line in res.stdout.splitlines():
+            if line.startswith("yes:"):
+                return line.split(":", 1)[1] or None
+    iwgetid = shutil.which("iwgetid")
+    if iwgetid:
+        res = subprocess.run([iwgetid, "-r"], capture_output=True, text=True)
+        ssid = res.stdout.strip()
+        return ssid or None
+    return None
+
+
+def is_on_gateway_wifi(target_ssid: str = RASPI_WIFI_SSID) -> bool:
+    return current_ssid() == target_ssid
 
 
 def gateway_connect(
@@ -37,24 +65,6 @@ def gateway_connect(
     Stellt (best-effort) die WLAN-Verbindung sicher und liefert eine Socket-Verbindung zum Gateway.
     """
     if target_ssid:
-        def current_ssid() -> str | None:
-            nmcli = shutil.which("nmcli")
-            if nmcli:
-                res = subprocess.run(
-                    [nmcli, "-t", "-f", "ACTIVE,SSID", "dev", "wifi"],
-                    capture_output=True,
-                    text=True,
-                )
-                for line in res.stdout.splitlines():
-                    if line.startswith("yes:"):
-                        return line.split(":", 1)[1] or None
-            iwgetid = shutil.which("iwgetid")
-            if iwgetid:
-                res = subprocess.run([iwgetid, "-r"], capture_output=True, text=True)
-                ssid = res.stdout.strip()
-                return ssid or None
-            return None
-
         if current_ssid() != target_ssid:
             nmcli = shutil.which("nmcli")
             if nmcli:
@@ -69,7 +79,33 @@ def gateway_connect(
                 if current_ssid() == target_ssid:
                     break
 
-    return socket.create_connection((GATEWAY_SERVER_IP, GATEWAY_PORT), timeout=socket_timeout)
+    target_ip = server_ip or GATEWAY_SERVER_IP
+    target_port = port or GATEWAY_PORT
+    return socket.create_connection((target_ip, target_port), timeout=socket_timeout)
+
+
+def _read_gateway_line(conn: socket.socket, timeout: float) -> str:
+    conn.settimeout(timeout)
+    f = conn.makefile("r")
+    line = f.readline()
+    return line.strip() if line else ""
+
+
+def _gateway_request(payload: dict) -> dict:
+    last_err: Exception | None = None
+    for attempt in range(GATEWAY_CONNECT_RETRIES + 1):
+        try:
+            with gateway_connect(socket_timeout=GATEWAY_SOCKET_TIMEOUT) as conn:
+                conn.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+                raw = _read_gateway_line(conn, GATEWAY_READ_TIMEOUT)
+                if not raw:
+                    raise RuntimeError("empty gateway response")
+                return json.loads(raw)
+        except Exception as e:
+            last_err = e
+            if attempt < GATEWAY_CONNECT_RETRIES:
+                time.sleep(GATEWAY_RETRY_DELAY)
+    return {"status": "ERR", "message": str(last_err) if last_err else "gateway error"}
 
 
 def send_dummy_payload_gateway(
@@ -102,14 +138,55 @@ def send_dummy_payload_gateway(
         conn.sendall(message)
         conn.settimeout(1.0)
         try:
-
-            data = conn.recv(256)
-            ack = data.decode().strip() if data else None
+            data = _read_gateway_line(conn, 1.0)
+            ack = data if data else None
             if ack == "":
                 ack = None
         except socket.timeout:
             ack = None
     return payload, ack
+
+
+def send_payload_gateway(
+    device_id: str,
+    payload: dict,
+    server_ip: str | None = None,
+    port: int | None = None,
+    barcode: str | int | None = None,
+    user: str | None = None,
+    start_time: datetime.datetime | None = None,
+    end_time: datetime.datetime | None = None,
+) -> tuple[dict, str | None]:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    start_iso = (start_time or now).isoformat().replace("+00:00", "Z")
+    end_iso = (end_time or now).isoformat().replace("+00:00", "Z")
+    message_payload = {
+        "mode": "INGEST",
+        "device_id": device_id,
+        "barcodenummer": barcode,
+        "startTime": start_iso,
+        "endTime": end_iso,
+        "payload": payload,
+        "user": user,
+    }
+    if "ok" in payload:
+        message_payload["result"] = payload.get("ok")
+    elif "result" in payload:
+        message_payload["result"] = payload.get("result")
+
+    message = (json.dumps(message_payload) + "\n").encode("utf-8")
+    ack: str | None = None
+    with gateway_connect(server_ip, port) as conn:
+        conn.sendall(message)
+        conn.settimeout(1.0)
+        try:
+            data = _read_gateway_line(conn, 1.0)
+            ack = data if data else None
+            if ack == "":
+                ack = None
+        except socket.timeout:
+            ack = None
+    return message_payload, ack
 
 
 # =============================================================================
@@ -181,6 +258,7 @@ def fetch_test_data(
     testtype: str,
     limit: int = 50,
     barcode: str | None = None,
+    prefer_gateway: bool | None = None,
 ) -> tuple[pd.DataFrame, bool]:
     """
     Fetch test data from the database and return as a pandas DataFrame.
@@ -195,6 +273,30 @@ def fetch_test_data(
         - bool: True if connection was successful, False otherwise
     """
     
+    if prefer_gateway is None:
+        prefer_gateway = PREFER_GATEWAY and is_on_gateway_wifi()
+
+    def _finalize_df(df: pd.DataFrame) -> pd.DataFrame:
+        if "ok" not in df.columns:
+            df["ok"] = pd.NA
+        for col in ("StartTest", "EndTest"):
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+        return df
+
+    def _try_gateway() -> tuple[pd.DataFrame, bool]:
+        bc = str(barcode) if barcode else None
+        gw = get_data_from_gateway(testtype, bc, limit=limit)
+        if gw.get("status") == "OK":
+            df = _parse_gateway_payload(gw.get("data"))
+            return _finalize_df(df), True
+        return pd.DataFrame(), False
+
+    if prefer_gateway:
+        df, ok = _try_gateway()
+        if ok:
+            return df, True
+
     conn = None
     try:
         conn = dbConnector.connection()
@@ -202,29 +304,17 @@ def fetch_test_data(
 
         raw = conn.getLastTests(limit, testtype)
         df = parse_db_response(raw)
-
-        if "ok" not in df.columns:
-            df["ok"] = pd.NA
-
-        for col in ("StartTest", "EndTest"):
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors="coerce")
-
-        return df, True
+        return _finalize_df(df), True
 
     except Exception as e:
         print(f"Error fetching test data (DB): {e}")
-        try:
-            bc = str(barcode) if barcode else None
-            gw = get_data_from_gateway(testtype, bc, limit=limit)
-            if gw.get("status") == "OK":
-                df = _parse_gateway_payload(gw.get("data"))
-                if "ok" not in df.columns:
-                    df["ok"] = pd.NA
-                if not df.empty:
+        if not prefer_gateway and is_on_gateway_wifi():
+            try:
+                df, ok = _try_gateway()
+                if ok:
                     return df, True
-        except Exception as gw_e:
-            print(f"Error fetching test data (Gateway): {gw_e}")
+            except Exception as gw_e:
+                print(f"Error fetching test data (Gateway): {gw_e}")
         return pd.DataFrame(), False
 
     finally:
@@ -258,13 +348,7 @@ def get_data_from_gateway(
     if barcode:
         payload["barcodenummer"] = barcode
     
-    try:
-        with gateway_connect() as conn:
-            conn.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-            data = conn.recv(8192)
-            return json.loads(data.decode())
-    except Exception as e:
-        return {"status": "ERR", "message": str(e)}
+    return _gateway_request(payload)
 
 
 __all__ = [
@@ -275,6 +359,7 @@ __all__ = [
     "TESTTYPE_DB_MAP",
     "gateway_connect",
     "send_dummy_payload_gateway",
+    "send_payload_gateway",
     "parse_db_response",
     "fetch_test_data",
     "fetch_all_test_data",
