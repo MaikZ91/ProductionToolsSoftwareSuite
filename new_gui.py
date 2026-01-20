@@ -3767,9 +3767,8 @@ class MainWindow(QMainWindow):
         # Connect Dashboard Button to IPC View
         self.dashboard.btn_goto_ipc.clicked.connect(lambda: self.btn_ipc.click())
         
-        lbl_wf = QLabel("WORKFLOWS")
-        lbl_wf.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px; font-weight: 600; letter-spacing: 1px; padding-left: 12px; margin-top: 18px; margin-bottom: 8px;")
-        self.side_layout.addWidget(lbl_wf)
+        wf_header = self._make_nav_section("WORKFLOWS")
+        self.side_layout.addWidget(wf_header)
         
         self.btn_ztrieb = add_nav("Z-Trieb", ZTriebView())
         self.btn_af = add_nav("Autofocus", AutofocusView())
@@ -3782,9 +3781,8 @@ class MainWindow(QMainWindow):
         # Load Dynamic Tools
         dynamic_tools = UI_CONFIG.get("dynamic_tools", {})
         if dynamic_tools:
-            lbl_dyn = QLabel("CUSTOM TOOLS")
-            lbl_dyn.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px; font-weight: 600; letter-spacing: 1px; padding-left: 12px; margin-top: 18px; margin-bottom: 8px;")
-            self.side_layout.addWidget(lbl_dyn)
+            dyn_header = self._make_nav_section("CUSTOM TOOLS")
+            self.side_layout.addWidget(dyn_header)
             for tool_name in dynamic_tools:
                 add_nav(tool_name, StudioToolView(tool_name))
         
@@ -3913,11 +3911,10 @@ class MainWindow(QMainWindow):
                     break
             
             if not has_label:
-                lbl_dyn = QLabel("CUSTOM TOOLS")
-                lbl_dyn.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px; font-weight: 600; letter-spacing: 1px; padding-left: 12px; margin-top: 18px; margin-bottom: 8px;")
+                dyn_header = self._make_nav_section("CUSTOM TOOLS")
                 # Insert before the "+" button
                 idx = self.side_layout.indexOf(self.btn_new_tool)
-                self.side_layout.insertWidget(idx, lbl_dyn)
+                self.side_layout.insertWidget(idx, dyn_header)
 
             # Insert new nav button before the "+" button
             idx = self.side_layout.indexOf(self.btn_new_tool)
@@ -3946,6 +3943,29 @@ class MainWindow(QMainWindow):
             w = self.stack.widget(i)
             if isinstance(w, StudioToolView):
                 w.add_component_button.setVisible(STUDIO_MODE)
+
+    def _make_nav_section(self, title: str) -> QWidget:
+        """Create a clear non-clickable section divider for the sidebar."""
+        wrapper = QWidget()
+        wrapper.setObjectName(f"NavSection_{title.replace(' ', '_')}")
+        wl = QVBoxLayout(wrapper)
+        wl.setContentsMargins(12, 12, 12, 8)
+        wl.setSpacing(6)
+        lbl = QLabel(title)
+        lbl.setStyleSheet(
+            f"color: {COLORS['text_muted']}; font-size: 9px; font-weight: 600; "
+            f"letter-spacing: 1.2px; text-transform: uppercase;"
+        )
+
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Plain)
+        line.setStyleSheet(f"color: {COLORS['border']}; background-color: {COLORS['border']};")
+        line.setFixedHeight(1)
+
+        wl.addWidget(lbl)
+        wl.addWidget(line)
+        return wrapper
 
 if __name__ == "__main__":
     # Enable High DPI Scaling for Windows
