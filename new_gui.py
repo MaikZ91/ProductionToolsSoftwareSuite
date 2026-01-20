@@ -30,14 +30,16 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor, QPalette, QFont, QPainter, QPen, QBrush, QLinearGradient, QGradient, QIcon,
-    QPainterPath, QPixmap, QShortcut, QKeySequence, QRegularExpressionValidator, QImage
+    QPainterPath, QPixmap, QShortcut, QKeySequence, QRegularExpressionValidator, QImage,
+    QFontMetrics
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QStackedWidget, QLineEdit, QTextEdit, QTableWidget, QTableWidgetItem, QHeaderView,
     QGridLayout, QSlider, QSizePolicy, QScrollArea, QGraphicsDropShadowEffect, QAbstractItemView,
     QProgressBar, QMessageBox, QSpacerItem, QComboBox, QToolButton, QTableView, QDoubleSpinBox, QSpinBox,
-    QDialog, QListWidget, QCheckBox, QFormLayout, QGroupBox, QDial, QInputDialog
+    QDialog, QListWidget, QCheckBox, QFormLayout, QGroupBox, QDial, QInputDialog, QStyledItemDelegate,
+    QStyle
 )
 
 # Matplotlib integration
@@ -187,6 +189,25 @@ class GlobalCameraRegistry:
         return ids_provider
 
 CAMERA_REGISTRY = GlobalCameraRegistry()
+
+# Live StageTest bus for cross-view updates (IPC)
+class LiveStageBus(QObject):
+    data_updated = Signal(dict)
+    active_changed = Signal(bool)
+
+    def __init__(self):
+        super().__init__()
+        self.active = False
+
+    def set_active(self, is_active: bool):
+        if self.active != is_active:
+            self.active = is_active
+            self.active_changed.emit(is_active)
+
+    def push(self, payload: dict):
+        self.data_updated.emit(payload)
+
+LIVE_STAGE_BUS = LiveStageBus()
 class PropertyEditor(QDialog):
     def __init__(self, target_widget, parent=None):
         super().__init__(parent)
@@ -826,6 +847,87 @@ class ModernChart(FigureCanvasQTAgg):
         self.ax.tick_params(axis='y', colors=COLORS['text_muted'], labelsize=9)
         self.fig.tight_layout(pad=2)
 
+# --- TABLE DELEGATE ---
+
+class DashboardTableDelegate(QStyledItemDelegate):
+    def __init__(self, table, parent=None):
+        super().__init__(parent)
+        self.table = table
+        self.radius = 8
+        self.hpad = 10
+        self.vpad = 6
+
+    def paint(self, painter, option, index):
+        painter.save()
+
+        row = index.row()
+        col = index.column()
+        row_count = self.table.rowCount()
+        col_count = self.table.columnCount()
+
+        rect = option.rect.adjusted(0, 0, -1, -1)
+        is_alt = bool(row % 2)
+        base_bg = COLORS['surface_light'] if is_alt else COLORS['surface']
+        border = hex_to_rgba(COLORS['border'], 0.5)
+
+        # Row card effect: rounded corners only on first/last columns
+        path = QPainterPath()
+        if col == 0:
+            path.addRoundedRect(rect, self.radius, self.radius)
+        elif col == col_count - 1:
+            path.addRoundedRect(rect, self.radius, self.radius)
+        else:
+            path.addRect(rect)
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(base_bg))
+        painter.drawPath(path)
+
+        # Selected row highlight
+        if option.state & QStyle.State_Selected:
+            painter.setBrush(QColor(hex_to_rgba(COLORS['primary'], 0.06)))
+            painter.drawPath(path)
+            if col == 0:
+                accent = QRect(rect.left(), rect.top(), 3, rect.height())
+                painter.setBrush(QColor(COLORS['primary']))
+                painter.drawRect(accent)
+
+        # Bottom separator
+        painter.setPen(QColor(border))
+        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+
+        # Cell content
+        text = index.data() or ""
+        col_name = ""
+        header_item = self.table.horizontalHeaderItem(col)
+        if header_item:
+            col_name = header_item.text().lower()
+
+        # Status pill
+        if col_name in {"ok", "status", "result"}:
+            is_ok = str(text).strip().lower() in {"true", "ok", "pass", "1", "yes"}
+            bg = hex_to_rgba(COLORS['success'], 0.18) if is_ok else hex_to_rgba(COLORS['danger'], 0.18)
+            fg = COLORS['success'] if is_ok else COLORS['danger']
+            pill_text = "OK" if is_ok else "FAIL"
+            fm = QFontMetrics(option.font)
+            pw = fm.horizontalAdvance(pill_text) + 16
+            ph = fm.height() + 6
+            px = rect.center().x() - pw // 2
+            py = rect.center().y() - ph // 2
+            pill = QRect(px, py, pw, ph)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(bg))
+            painter.drawRoundedRect(pill, ph // 2, ph // 2)
+            painter.setPen(QColor(fg))
+            painter.drawText(pill, Qt.AlignCenter, pill_text)
+        else:
+            color = COLORS['text_muted'] if "guid" in col_name else COLORS['text']
+            painter.setPen(QColor(color))
+            text_rect = rect.adjusted(self.hpad, self.vpad, -self.hpad, -self.vpad)
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, str(text))
+
+        painter.restore()
+
 # --- VIEWS ---
 
 class DashboardView(QWidget):
@@ -840,61 +942,82 @@ class DashboardView(QWidget):
         self._is_fetching = False
         self.data_updated.connect(self._on_data_received)
 
-        # Main layout for the entire view (Horizontal split)
-        main_layout = QHBoxLayout(self)
+        # Main layout for the entire view (Vertical stack)
+        main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(12, 12, 12, 12)
         main_layout.setSpacing(12)
 
-        # --- LEFT SIDE: CONTROLS ---
-        left_side = QVBoxLayout()
-        left_side.setSpacing(10)
+        # --- TOP: KPI ROW ---
+        kpi_strip = QWidget()
+        kpi_row = QHBoxLayout(kpi_strip)
+        kpi_row.setContentsMargins(0, 0, 0, 0)
+        kpi_row.setSpacing(14)
+        self.kpi_total = self.add_kpi_compact(kpi_row, "Total", "0", COLORS['primary'])
+        self.kpi_pass = self.add_kpi_compact(kpi_row, "Pass", "0%", COLORS['secondary'])
+        self.kpi_last = self.add_kpi_compact(kpi_row, "Latest", "---", COLORS['success'])
+        kpi_row.addStretch()
+        main_layout.addWidget(kpi_strip)
 
-        # 0. Selection & Refresh
-        controls_card = Card("Data Source")
-        controls_card.set_compact()
-        cl = QVBoxLayout()
-        cl.setSpacing(6)
-        self.combo_testtype = QComboBox()
-        self.combo_testtype.addItems(["kleberoboter", "gitterschieber_tool", "stage_test"])
-        self.combo_testtype.currentIndexChanged.connect(self.trigger_refresh)
-        self.combo_testtype.setFixedHeight(32)
-        cl.addWidget(self.combo_testtype)
-        self.status_indicator = QPushButton("● LIVE")
-        self.status_indicator.setCursor(Qt.PointingHandCursor)
-        self.status_indicator.clicked.connect(self.trigger_refresh)
-        self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['success']}; font-weight: 800; font-size: 11px; text-align: left; padding-left: 5px; }}")
-        cl.addWidget(self.status_indicator)
-        
-        # IPC Shortcut Button
-        self.btn_goto_ipc = ModernButton("In Process Control (IPC)", "secondary")
-        self.btn_goto_ipc.setObjectName("Dash_Btn_IPC")
-        cl.addWidget(self.btn_goto_ipc)
-        
-        controls_card.add_layout(cl)
-        left_side.addWidget(controls_card)
-
-        # 1. New Record (Moved UP to ensure visibility)
-        self.setup_entry_ui_compact(left_side)
-
-        # 2. Key Metrics
-        kpi_card = Card("Key Metrics")
-        kpi_card.set_compact()
-        kl = QVBoxLayout()
-        kl.setSpacing(6)
-        self.kpi_total = self.add_kpi_compact(kl, "Total", "0", COLORS['primary'])
-        self.kpi_pass = self.add_kpi_compact(kl, "Pass", "0%", COLORS['secondary'])
-        self.kpi_last = self.add_kpi_compact(kl, "Latest", "---", COLORS['success'])
-        kpi_card.add_layout(kl)
-        left_side.addWidget(kpi_card)
-        
-        left_side.addStretch()
-        main_layout.addLayout(left_side, 1)
-
-        # --- RIGHT SIDE: ACTIVITY TABLE ---
+        # --- ACTIVITY TABLE + CONTROLS ---
         activity_card = Card("Recent Activity")
         activity_card.set_compact()
         al = QVBoxLayout()
-        al.setContentsMargins(0, 0, 0, 0)
+        al.setContentsMargins(10, 6, 10, 12)
+        al.setSpacing(12)
+        if activity_card.title_label:
+            activity_card.title_label.setStyleSheet(
+                "border: none; font-size: 13px; font-weight: 700; letter-spacing: 0.4px;"
+            )
+
+        controls_strip = QWidget()
+        controls_layout = QHBoxLayout(controls_strip)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(10)
+
+        self.combo_testtype = QComboBox()
+        self.combo_testtype.addItems(["kleberoboter", "gitterschieber_tool", "stage_test"])
+        self.combo_testtype.currentIndexChanged.connect(self.trigger_refresh)
+        self.combo_testtype.setFixedHeight(28)
+        self.combo_testtype.setFixedWidth(190)
+
+        self.status_indicator = QPushButton("● LIVE")
+        self.status_indicator.setCursor(Qt.PointingHandCursor)
+        self.status_indicator.clicked.connect(self.trigger_refresh)
+        self.status_indicator.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: none; color: {COLORS['success']}; "
+            f"font-weight: 700; font-size: 10px; padding: 0 4px; }}"
+        )
+
+        self.btn_goto_ipc = ModernButton("IPC", "secondary")
+        self.btn_goto_ipc.setObjectName("Dash_Btn_IPC")
+        self.btn_goto_ipc.setFixedHeight(28)
+
+        self.btn_toggle_entry = ModernButton("New Record", "ghost")
+        self.btn_toggle_entry.setFixedHeight(28)
+
+        controls_layout.addStretch()
+        controls_layout.addWidget(self.combo_testtype)
+        controls_layout.addWidget(self.status_indicator)
+        controls_layout.addWidget(self.btn_goto_ipc)
+        controls_layout.addWidget(self.btn_toggle_entry)
+        al.addWidget(controls_strip)
+
+        entry_card = self.setup_entry_ui_compact()
+        self.entry_container = QWidget()
+        self.entry_container.setMaximumWidth(520)
+        self.entry_container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        entry_layout = QVBoxLayout(self.entry_container)
+        entry_layout.setContentsMargins(0, 0, 0, 0)
+        entry_layout.addWidget(entry_card)
+        self.entry_container.setVisible(False)
+        self.btn_toggle_entry.clicked.connect(
+            lambda: self.entry_container.setVisible(not self.entry_container.isVisible())
+        )
+        entry_row = QHBoxLayout()
+        entry_row.setContentsMargins(0, 0, 0, 0)
+        entry_row.addWidget(self.entry_container)
+        entry_row.addStretch()
+        al.addLayout(entry_row)
         
         self.table = QTableWidget()
         self.table.setColumnCount(5)
@@ -912,26 +1035,20 @@ class DashboardView(QWidget):
         self.table.verticalHeader().setDefaultSectionSize(30)
         self.table.setStyleSheet(f"""
             QTableWidget {{
-                background-color: {COLORS['surface']};
-                alternate-background-color: {COLORS['surface_light']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 6px;
+                background-color: {COLORS['surface_light']};
+                border: 1px solid {hex_to_rgba(COLORS['border'], 0.6)};
+                border-radius: 12px;
                 gridline-color: {COLORS['border']};
             }}
             QHeaderView::section {{
-                background-color: {COLORS['surface_light']};
-                color: {COLORS['text']};
-                padding: 8px 8px;
+                background-color: {COLORS['surface']};
+                color: {COLORS['text_muted']};
+                padding: 12px 12px;
                 border: none;
-                border-bottom: 1px solid {COLORS['border']};
+                border-bottom: 1px solid {hex_to_rgba(COLORS['border'], 0.7)};
                 font-weight: 600;
                 text-transform: uppercase;
-            }}
-            QTableWidget::item {{
-                padding: 6px 6px;
-            }}
-            QTableWidget::item:selected {{
-                background-color: {hex_to_rgba(COLORS['primary'], 0.18)};
+                letter-spacing: 1px;
             }}
         """)
         
@@ -939,10 +1056,12 @@ class DashboardView(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.setSortingEnabled(True)
+        self.table.setItemDelegate(DashboardTableDelegate(self.table))
         
         self.table.setObjectName("Dash_Table")
         
-        activity_card.add_widget(self.table)
+        al.addWidget(self.table)
+        activity_card.add_layout(al)
         main_layout.addWidget(activity_card, 2)
 
         # 4. Manual Refresh (no auto-timer)
@@ -952,21 +1071,26 @@ class DashboardView(QWidget):
         # Initial fetch only
         self.update_data()
 
-    def setup_entry_ui_compact(self, layout):
+    def setup_entry_ui_compact(self, layout=None):
         entry_card = Card("New Record")
         entry_card.set_compact()
+        entry_card.setMaximumWidth(520)
         entry_layout = QVBoxLayout()
-        entry_layout.setSpacing(6)
+        entry_layout.setSpacing(4)
         
         self.le_barcode = QLineEdit()
         self.le_barcode.setPlaceholderText("Barcode...")
         self.le_barcode.setObjectName("Dash_Entry_Barcode")
+        self.le_barcode.setFixedHeight(28)
+        self.le_barcode.setMaximumWidth(240)
         self.le_user = QLineEdit()
         self.le_user.setPlaceholderText("User...")
         self.le_user.setObjectName("Dash_Entry_User")
+        self.le_user.setFixedHeight(28)
+        self.le_user.setMaximumWidth(220)
         
         row1 = QHBoxLayout()
-        row1.setSpacing(6)
+        row1.setSpacing(4)
         row1.addWidget(self.le_barcode)
         row1.addWidget(self.le_user)
         entry_layout.addLayout(row1)
@@ -974,53 +1098,82 @@ class DashboardView(QWidget):
         self.entry_stack = QStackedWidget()
         # Same widgets as before but more compact if needed
         w_kleber = QWidget()
-        l_kleber = QHBoxLayout(w_kleber); l_kleber.setContentsMargins(0,0,0,0)
-        self.cb_ok = QCheckBox("Test OK?"); self.cb_ok.setStyleSheet("font-weight: bold; color: " + COLORS['primary'] + ";")
+        l_kleber = QHBoxLayout(w_kleber); l_kleber.setContentsMargins(0,0,0,0); l_kleber.setSpacing(4)
+        self.cb_ok = QCheckBox("Test OK?"); self.cb_ok.setStyleSheet("font-weight: 600; color: " + COLORS['primary'] + "; font-size: 11px;")
         l_kleber.addWidget(self.cb_ok); l_kleber.addStretch()
         
         w_git = QWidget()
-        l_git = QHBoxLayout(w_git); l_git.setContentsMargins(0,0,0,0); l_git.setSpacing(5)
+        l_git = QHBoxLayout(w_git); l_git.setContentsMargins(0,0,0,0); l_git.setSpacing(4)
         self.le_particles = QLineEdit(); self.le_particles.setPlaceholderText("P-Count")
         self.le_angle = QLineEdit(); self.le_angle.setPlaceholderText("Angle")
+        self.le_particles.setFixedHeight(28)
+        self.le_angle.setFixedHeight(28)
+        self.le_particles.setMaximumWidth(200)
+        self.le_angle.setMaximumWidth(200)
         l_git.addWidget(self.le_particles); l_git.addWidget(self.le_angle)
         
         w_stage = QWidget()
-        l_stage = QHBoxLayout(w_stage); l_stage.setContentsMargins(0,0,0,0); l_stage.setSpacing(5)
+        l_stage = QHBoxLayout(w_stage); l_stage.setContentsMargins(0,0,0,0); l_stage.setSpacing(4)
         self.le_pos_name = QLineEdit(); self.le_pos_name.setPlaceholderText("Pos")
         self.le_fov = QLineEdit(); self.le_fov.setPlaceholderText("FOV")
+        self.le_pos_name.setFixedHeight(28)
+        self.le_fov.setFixedHeight(28)
+        self.le_pos_name.setMaximumWidth(200)
+        self.le_fov.setMaximumWidth(200)
         l_stage.addWidget(self.le_pos_name); l_stage.addWidget(self.le_fov)
         
         self.entry_stack.addWidget(w_kleber); self.entry_stack.addWidget(w_git); self.entry_stack.addWidget(w_stage)
         entry_layout.addWidget(self.entry_stack)
         
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
         self.btn_send = ModernButton("Send", "primary")
+        self.btn_send.setFixedHeight(28)
         self.btn_send.clicked.connect(self.send_current_entry)
         btn_row.addWidget(self.btn_send)
         self.btn_send_gateway = ModernButton("Send via Gateway", "secondary")
+        self.btn_send_gateway.setFixedHeight(28)
         self.btn_send_gateway.clicked.connect(self.send_current_entry_gateway)
         btn_row.addWidget(self.btn_send_gateway)
         entry_layout.addLayout(btn_row)
         
         entry_card.add_layout(entry_layout)
-        layout.addWidget(entry_card)
+        if layout is not None:
+            layout.addWidget(entry_card)
+        return entry_card
 
     def add_kpi_compact(self, layout, title, value, color):
         container = QFrame()
-        container.setStyleSheet(f"background-color: {COLORS['surface_light']}; border-radius: 8px; padding: 10px;")
+        container.setMinimumHeight(92)
+        container.setStyleSheet(
+            f"background-color: {COLORS['surface']}; border: 1px solid {hex_to_rgba(COLORS['border'], 0.8)}; "
+            f"border-radius: 12px;"
+        )
         l = QHBoxLayout(container)
-        l.setContentsMargins(10, 5, 10, 5)
-        
+        l.setContentsMargins(14, 12, 14, 12)
+        l.setSpacing(10)
+
+        accent = QFrame()
+        accent.setFixedWidth(4)
+        accent.setStyleSheet(f"background-color: {color}; border-radius: 2px;")
+
+        body = QVBoxLayout()
+        body.setSpacing(4)
         t_lbl = QLabel(title.upper())
-        t_lbl.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 700; font-size: 10px; border:none;")
-        
+        t_lbl.setStyleSheet(
+            f"color: {COLORS['text_muted']}; font-weight: 600; font-size: 9px; letter-spacing: 1px; border:none;"
+        )
         v_lbl = QLabel(value)
-        v_lbl.setStyleSheet(f"color: {COLORS['text']}; font-weight: 800; font-size: 18px; border:none;")
-        
-        l.addWidget(t_lbl)
+        v_lbl.setStyleSheet(f"color: {COLORS['text']}; font-weight: 800; font-size: 22px; border:none;")
+
+        body.addWidget(t_lbl)
+        body.addWidget(v_lbl)
+        body.addStretch()
+
+        l.addWidget(accent)
+        l.addLayout(body)
         l.addStretch()
-        l.addWidget(v_lbl)
-        
+
         layout.addWidget(container)
         container.value_label = v_lbl
         return container
@@ -1191,6 +1344,7 @@ class DashboardView(QWidget):
                 else:
                     text = str(val)
                 item = QTableWidgetItem(text)
+                item.setFont(QFont(FONTS['ui'], 10))
                 self.table.setItem(i, j, item)
 
         # Default sort indicator on time column if available
@@ -2056,6 +2210,7 @@ class StageControlView(QWidget):
         self._meas_max_um = None
         self._dur_max_um = None
         self.MEAS_MAX_UM = 10.0
+        self._last_db_sync_ts = 0.0
         
         # Threading/Workers
         self.thr = None
@@ -2117,7 +2272,11 @@ class StageControlView(QWidget):
         self.btn_open.setEnabled(True)
         row_btn.addWidget(self.btn_open)
         
-        row_btn.addWidget(ModernButton("DB Sync", "ghost"))
+        self.chk_db_sync = QCheckBox("DB Sync")
+        self.chk_db_sync.setChecked(False)
+        self.chk_db_sync.setStyleSheet(f"font-weight: 600; color: {COLORS['text_muted']};")
+        self.chk_db_sync.toggled.connect(self._on_db_sync_toggled)
+        row_btn.addWidget(self.chk_db_sync)
         btn_layout.addLayout(row_btn)
         
         # Progress Area
@@ -2258,6 +2417,73 @@ class StageControlView(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "Ordner öffnen", f"Konnte Ordner nicht öffnen:\n{e}")
 
+    def _send_stage_db_event(self, user_id: str, event_label: str):
+        """Log stage test starts into the kleberoboter DB without blocking the UI."""
+        def _task():
+            conn = None
+            try:
+                conn = dbConnector.connection()
+                conn.connect()
+                now = datetime.datetime.now()
+                barcode_obj = miltenyiBarcode.mBarcode(str(db.DUMMY_BARCODE))
+                conn.sendData(
+                    now,
+                    now,
+                    0,
+                    "kleberoboter",
+                    {"ok": True},
+                    barcode_obj,
+                    str(user_id),
+                )
+                print(f"[StageControl] DB event sent: {event_label} (user {user_id})")
+            except Exception as e:
+                print(f"[StageControl] DB event failed ({event_label}): {e}")
+            finally:
+                if conn:
+                    try:
+                        conn.disconnect()
+                    except Exception:
+                        pass
+
+        threading.Thread(target=_task, daemon=True).start()
+
+    def _send_gitterschieber_measurement(self, err_x_um: float, err_y_um: float):
+        """Send live endurance measurements into gitterschieber_tool (particle_count + justage_angle)."""
+        def _task():
+            conn = None
+            try:
+                conn = dbConnector.connection()
+                conn.connect()
+                now = datetime.datetime.now()
+                barcode_obj = miltenyiBarcode.mBarcode(str(db.DUMMY_BARCODE))
+                payload = {
+                    "particle_count": int(round(abs(err_x_um))),
+                    "justage_angle": round(float(err_y_um), 3),
+                }
+                conn.sendData(
+                    now,
+                    now,
+                    0,
+                    "gitterschieber_tool",
+                    payload,
+                    barcode_obj,
+                    "stage_sync",
+                )
+            except Exception as e:
+                print(f"[StageControl] DB sync failed: {e}")
+            finally:
+                if conn:
+                    try:
+                        conn.disconnect()
+                    except Exception:
+                        pass
+
+        threading.Thread(target=_task, daemon=True).start()
+
+    def _on_db_sync_toggled(self, checked: bool):
+        if self.dauer_running:
+            LIVE_STAGE_BUS.set_active(bool(checked))
+
     # --- Precision Test ---
     def toggle_precision_test(self):
         if self.running:
@@ -2273,6 +2499,7 @@ class StageControlView(QWidget):
             return
         self._acquire_metadata()
         out_dir = self._ensure_run_dir()
+        self._send_stage_db_event(user_id="100", event_label="Kalibrierung")
         
         self.running = True
         self.btn_start.setText("Test stoppen")
@@ -2358,6 +2585,7 @@ class StageControlView(QWidget):
             return
         self._acquire_metadata()
         out_dir = self._ensure_run_dir()
+        self._send_stage_db_event(user_id="200", event_label="Dauertest")
         
         try:
             x_center, y_center, _ = resolve_stage.get_current_pos()
@@ -2402,6 +2630,7 @@ class StageControlView(QWidget):
         self.dauer_thr.finished.connect(self._on_thr_finished)
         
         self.dauer_thr.start()
+        LIVE_STAGE_BUS.set_active(bool(self.chk_db_sync.isChecked()))
 
     def _on_endurance_update(self, data):
         self.tick += 1
@@ -2458,18 +2687,26 @@ class StageControlView(QWidget):
         self.progress.setMaximum(self._duration_sec)
         self.progress.setValue(int(elapsed))
 
+        if self.chk_db_sync.isChecked():
+            now = time.time()
+            if now - self._last_db_sync_ts >= 1.5:
+                self._last_db_sync_ts = now
+                self._send_gitterschieber_measurement(err_x, err_y)
+
     def _stop_endurance_test(self):
         if self.dauer_wrk:
             self.dauer_wrk.stop()
         self.dauer_running = False
         self.btn_dauer.setText("Start Endurance Test")
         self.btn_dauer.set_variant("secondary")
+        LIVE_STAGE_BUS.set_active(False)
 
     def _on_endurance_finished(self, data):
         self.dauer_running = False
         self.btn_dauer.setText("Dauertest starten")
         self.btn_dauer.set_variant("secondary")
         self.lbl_phase.setText("BEENDET")
+        LIVE_STAGE_BUS.set_active(False)
         
         outdir = self._ensure_run_dir()
         batch = self._batch
@@ -2938,6 +3175,10 @@ class IPCView(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_data)
         self.timer.start(10000) # 10s
+
+        # Live StageTest wiring (DB-backed)
+        self._stage_live_active = False
+        LIVE_STAGE_BUS.active_changed.connect(self._on_live_stage_active)
         
         # Initial Fetch
         QTimer.singleShot(500, self.refresh_data)
@@ -2946,6 +3187,11 @@ class IPCView(QWidget):
         if not self.isVisible():
             return
         source = self.combo_source.currentText()
+        if source == "stage_test" and self._stage_live_active:
+            df, ok = db.fetch_test_data("gitterschieber_tool", limit=200)
+            if ok and df is not None and not df.empty:
+                self._plot_stage_live_from_db(df)
+            return
         
         def fetch_task():
             try:
@@ -3032,6 +3278,70 @@ class IPCView(QWidget):
         except Exception as e:
             print(f"[IPC] Plotting error: {e}")
             
+        self.chart1.draw_idle()
+        self.chart2.draw_idle()
+
+    def _on_live_stage_active(self, active: bool):
+        self._stage_live_active = active
+        if self.isVisible() and self.combo_source.currentText() == "stage_test":
+            self.refresh_data()
+
+    def _plot_stage_live_from_db(self, df):
+        self.chart1.ax.cla()
+        self.chart2.ax.cla()
+
+        x_vals = pd.to_numeric(df.get("particle_count", pd.Series(dtype=float)), errors='coerce').fillna(0)
+        y_vals = pd.to_numeric(df.get("justage_angle", pd.Series(dtype=float)), errors='coerce').fillna(0)
+
+        # Order oldest->newest and build real time axis (minutes from first)
+        time_col = None
+        for c in ("StartTest", "EndTest"):
+            if c in df.columns:
+                time_col = c
+                break
+        if time_col:
+            df_sorted = df.copy()
+            df_sorted[time_col] = pd.to_datetime(df_sorted[time_col], errors="coerce")
+            df_sorted = df_sorted.sort_values(by=time_col, ascending=True)
+            x_vals = pd.to_numeric(df_sorted.get("particle_count", pd.Series(dtype=float)), errors='coerce').fillna(0)
+            y_vals = pd.to_numeric(df_sorted.get("justage_angle", pd.Series(dtype=float)), errors='coerce').fillna(0)
+            times = df_sorted[time_col].fillna(method="ffill")
+            if not times.empty and pd.notna(times.iloc[0]):
+                t0 = times.iloc[0]
+                t = (times - t0).dt.total_seconds().fillna(0) / 60.0
+            else:
+                t = pd.Series(np.arange(len(x_vals)), dtype=float)
+        else:
+            t = pd.Series(np.arange(len(x_vals)), dtype=float)
+
+        def style(ax, title, xl, yl):
+            ax.set_title(title, color=COLORS['text'])
+            ax.set_xlabel(xl, color=COLORS['text_muted'])
+            ax.set_ylabel(yl, color=COLORS['text_muted'])
+            ax.grid(True, linestyle='--', alpha=0.3, color=COLORS['border'])
+
+        style(self.chart1.ax, "Echtzeit-Abweichung (X vs Y)", "Time [min]", "Error [µm]")
+        self.chart1.ax.plot(list(t), list(x_vals), color=COLORS['primary'], linewidth=2, label="Fehler X")
+        self.chart1.ax.plot(list(t), list(y_vals), color=COLORS['secondary'], linewidth=2, label="Fehler Y")
+        self.chart1.ax.legend(loc='upper right', facecolor=COLORS['surface'], edgecolor=COLORS['border'], labelcolor=COLORS['text'])
+
+        y_max = max(
+            0.5,
+            max(abs(min(x_vals, default=0.0)), abs(max(x_vals, default=0.0))),
+            max(abs(min(y_vals, default=0.0)), abs(max(y_vals, default=0.0))),
+        )
+        y_pad = max(0.2, y_max * 0.15)
+        self.chart1.ax.set_ylim(-y_max - y_pad, y_max + y_pad)
+        if len(t) > 0:
+            t_min = float(t.iloc[0]) if hasattr(t, "iloc") else float(t[0])
+            t_max = float(t.iloc[-1]) if hasattr(t, "iloc") else float(t[-1])
+            if t_min == t_max:
+                t_max = t_min + 1.0
+            self.chart1.ax.set_xlim(t_min, t_max)
+
+        self.chart2.ax.set_title("Live Stage Control (DB Sync)", color=COLORS['text_muted'])
+        self.chart2.ax.set_axis_off()
+
         self.chart1.draw_idle()
         self.chart2.draw_idle()
 
