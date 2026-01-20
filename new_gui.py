@@ -2214,6 +2214,8 @@ class StageControlView(QWidget):
         self.chart.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.line_x, = self.chart.ax.plot([], [], color=COLORS['primary'], linewidth=2, label="Fehler X")
         self.line_y, = self.chart.ax.plot([], [], color=COLORS['secondary'], linewidth=2, label="Fehler Y")
+        self.chart.ax.set_xlabel("Zeit [min]", color=COLORS['text_muted'])
+        self.chart.ax.set_ylabel("Abweichung [µm]", color=COLORS['text_muted'])
         
         # Chart Legend
         leg = self.chart.ax.legend(loc='upper right', facecolor=COLORS['surface'], edgecolor=COLORS['border'], labelcolor=COLORS['text'])
@@ -2403,19 +2405,37 @@ class StageControlView(QWidget):
 
     def _on_endurance_update(self, data):
         self.tick += 1
-        err_x = data.get("err_x_um", 0.0)
-        err_y = data.get("err_y_um", 0.0)
+        err_x = data.get("err_x_um")
+        err_y = data.get("err_y_um")
+        if err_x is None:
+            err_x = float(data.get("ex", 0.0)) * 1e6
+        if err_y is None:
+            err_y = float(data.get("ey", 0.0)) * 1e6
         max_err = data.get("max_abs_um", 0.0)
-        
-        self.x_data.append(self.tick)
+
+        t_val = data.get("t")
+        x_val = float(t_val) if t_val is not None else self.tick
+        self.x_data.append(x_val)
         self.y1_data.append(err_x)
         self.y2_data.append(err_y)
         
         self.line_x.set_data(list(self.x_data), list(self.y1_data))
         self.line_y.set_data(list(self.x_data), list(self.y2_data))
-        
-        self.chart.ax.relim()
-        self.chart.ax.autoscale_view()
+
+        if self.x_data:
+            xmin = self.x_data[0]
+            xmax = self.x_data[-1]
+            if xmin == xmax:
+                xmax = xmin + 1.0
+            self.chart.ax.set_xlim(xmin, xmax)
+
+        y_max = max(
+            0.5,
+            max(abs(min(self.y1_data, default=0.0)), abs(max(self.y1_data, default=0.0))),
+            max(abs(min(self.y2_data, default=0.0)), abs(max(self.y2_data, default=0.0))),
+        )
+        y_pad = max(0.2, y_max * 0.15)
+        self.chart.ax.set_ylim(-y_max - y_pad, y_max + y_pad)
         self.chart.draw_idle()
         
         self.qa_val.setText(f"{max_err:.2f} µm")
