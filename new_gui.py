@@ -89,6 +89,44 @@ FONTS = {
     "mono": "Consolas",
 }
 
+def _latest_stage_outdir() -> pathlib.Path:
+    root = resolve_stage.DATA_ROOT
+    newest = None
+    newest_ts = -1.0
+    try:
+        for batch_dir in root.iterdir():
+            if not batch_dir.is_dir():
+                continue
+            for run_dir in batch_dir.glob("Run_*"):
+                if not run_dir.is_dir():
+                    continue
+                try:
+                    ts = run_dir.stat().st_mtime
+                except OSError:
+                    continue
+                if ts > newest_ts:
+                    newest = run_dir
+                    newest_ts = ts
+    except Exception:
+        return root
+    return newest if newest is not None else root
+
+def _make_folder_icon(color: str, size: int = 16) -> QIcon:
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(QColor(color))
+    pen.setWidth(2)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+    tab_h = int(size * 0.35)
+    body_top = int(size * 0.35)
+    painter.drawRoundedRect(2, body_top, size - 4, size - body_top - 2, 2, 2)
+    painter.drawRoundedRect(2, 2, int(size * 0.6), tab_h, 2, 2)
+    painter.end()
+    return QIcon(pm)
+
 # --- STUDIO MODE / CONFIG MANAGER ---
 class ConfigManager:
     _instance = None
@@ -1668,6 +1706,7 @@ class AutofocusView(QWidget):
         self._laser = None
         self._last_center = None
         self._last_frame_size = None
+        self._last_qimage = None
         self._pending_cam_idx = None
         self._switch_timer = QTimer(self)
         self._switch_timer.setSingleShot(True)
@@ -1751,6 +1790,11 @@ class AutofocusView(QWidget):
         self.btn_toggle_ref.setMinimumHeight(30)
         self.btn_toggle_ref.clicked.connect(self._toggle_reference)
         al.addWidget(self.btn_toggle_ref)
+
+        self.btn_save_align_pdf = ModernButton("Save PDF", "ghost")
+        self.btn_save_align_pdf.setMinimumHeight(30)
+        self.btn_save_align_pdf.clicked.connect(self._save_alignment_pdf)
+        al.addWidget(self.btn_save_align_pdf)
 
         self.lbl_ref = QLabel("Ref: —")
         self.lbl_dx = QLabel("dx: —")
@@ -1907,6 +1951,7 @@ class AutofocusView(QWidget):
 
     def _on_laser_frame(self, qimg: QImage):
         try:
+            self._last_qimage = qimg
             self._last_frame_size = (qimg.width(), qimg.height())
             pm = QPixmap.fromImage(qimg)
             pm = pm.scaled(self.cam_embed.label.width(), self.cam_embed.label.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -1983,6 +2028,81 @@ class AutofocusView(QWidget):
             f"background: {COLORS['surface_light']}; border: 1px solid {COLORS['border']}; "
             f"border-radius: 6px; padding: 4px 6px; font-size: 11px; color: {color};"
         )
+
+    def _save_alignment_pdf(self):
+        if self._last_qimage is None:
+            QMessageBox.warning(self, "PDF speichern", "Kein Bild verfuegbar.")
+            return
+        if self._last_center is None or not self._last_frame_size:
+            QMessageBox.warning(self, "PDF speichern", "Keine Alignment-Daten verfuegbar.")
+            return
+
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_dir = _latest_stage_outdir()
+        default_dir.mkdir(parents=True, exist_ok=True)
+        path_str = str(default_dir / f"autofocus_alignment_{ts}.pdf")
+
+        w, h = self._last_frame_size
+        cx, cy = self._last_center
+        ref = self._laser.get_reference_point() if self._laser is not None else None
+        if ref is not None:
+            rx, ry = ref
+            dx = int(cx - rx)
+            dy = int(cy - ry)
+            ref_text = f"{rx}, {ry}"
+        else:
+            dx = int(cx - w // 2)
+            dy = int(cy - h // 2)
+            ref_text = "center"
+        dist = float(np.hypot(dx, dy))
+        px_um = None
+        if self._laser is not None:
+            px_um = self._laser.get_pixel_size_um()
+
+        tol_px = 5.0
+        ok = (dist <= tol_px)
+
+        with PdfPages(path_str) as pdf:
+            fig = Figure(figsize=(11.69, 8.27), dpi=110, facecolor=COLORS['surface'])
+            ax_text = fig.add_subplot(121)
+            ax_text.axis("off")
+            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            text_lines = [
+                "Autofocus Alignment Report",
+                "",
+                f"Zeitpunkt: {now}",
+                f"Bildgroesse: {w} x {h} px",
+                f"Center: {cx}, {cy} px",
+                f"Referenz: {ref_text}",
+                f"dx/dy: {dx:+d} px / {dy:+d} px",
+                f"dist: {dist:.2f} px",
+                f"Toleranz: +/- {tol_px:.1f} px -> {'OK' if ok else 'ALIGN'}",
+            ]
+            if px_um:
+                dx_um = dx * px_um
+                dy_um = dy * px_um
+                dist_um = dist * px_um
+                dist_mm = dist_um / 1000.0
+                text_lines += [
+                    f"dx/dy: {dx_um:+.1f} um / {dy_um:+.1f} um",
+                    f"dist: {dist_um:.1f} um ({dist_mm:.3f} mm)",
+                ]
+            text = "\n".join(text_lines)
+            ax_text.text(0.05, 0.95, text, va="top", ha="left", fontsize=12, color=COLORS['text'], family='monospace')
+
+            qimg = self._last_qimage.convertToFormat(QImage.Format_RGB888)
+            h, w = qimg.height(), qimg.width()
+            stride = qimg.bytesPerLine()
+            buf = qimg.constBits()
+            arr = np.frombuffer(buf, np.uint8, count=qimg.sizeInBytes())
+            arr = arr.reshape((h, stride // 3, 3))[:, :w, :]
+            ax_img = fig.add_subplot(122)
+            ax_img.imshow(arr)
+            ax_img.axis("off")
+            fig.tight_layout()
+            pdf.savefig(fig)
+
+        QMessageBox.information(self, "PDF gespeichert", f"Report gespeichert:\\n{path_str}")
 
 class ZTriebVisualizer(QWidget):
     """Circular gauge for the Z-Trieb motor position."""
@@ -4208,8 +4328,9 @@ class MainWindow(QMainWindow):
         self.btn_ztrieb = add_nav("Z-Trieb", ZTriebView())
         self.btn_af = add_nav("Autofocus", AutofocusView())
         add_nav("Optikkorper", OptikkoerperView())
-        
-        add_nav("Stage Control", StageControlView())
+
+        self.stage_view = StageControlView()
+        add_nav("Stage Control", self.stage_view)
         add_nav("Gitterschieber", GitterschieberView())
         add_nav("Laserscan", LaserscanView())
         
@@ -4274,10 +4395,24 @@ class MainWindow(QMainWindow):
             background-color: {COLORS['surface']};
             padding-left: 14px;
         """)
-        
+
+        self.btn_open_stage_folder = QToolButton()
+        self.btn_open_stage_folder.setIcon(_make_folder_icon(COLORS['text_muted'], 16))
+        self.btn_open_stage_folder.setToolTip("Stage-Ordner oeffnen")
+        self.btn_open_stage_folder.setCursor(Qt.PointingHandCursor)
+        self.btn_open_stage_folder.setFixedSize(28, 28)
+        self.btn_open_stage_folder.setStyleSheet(
+            f"QToolButton {{ border: 1px solid transparent; border-radius: 6px; "
+            f"background: transparent; color: {COLORS['text']}; }}"
+            f"QToolButton:hover {{ background: {COLORS['surface_light']}; "
+            f"border: 1px solid {COLORS['border']}; }}"
+        )
+        self.btn_open_stage_folder.clicked.connect(self._open_stage_data_folder)
+
         hl.addWidget(self.page_title)
         hl.addStretch()
         hl.addWidget(self.search_bar)
+        hl.addWidget(self.btn_open_stage_folder)
         self.search_bar.textChanged.connect(self._filter_navigation)
         
         content_col.addWidget(header)
@@ -4324,6 +4459,19 @@ class MainWindow(QMainWindow):
                 else:
                     # For other widgets like brand, user profile, etc., keep them visible
                     widget.setVisible(True)
+
+    def _open_stage_data_folder(self):
+        if hasattr(self, "stage_view") and self.stage_view is not None:
+            path = self.stage_view._last_outdir if self.stage_view._last_outdir else _latest_stage_outdir()
+        else:
+            path = _latest_stage_outdir()
+        try:
+            if sys.platform == 'win32':
+                os.startfile(str(path.resolve()))
+            else:
+                subprocess.run(['xdg-open', str(path.resolve())])
+        except Exception as e:
+            QMessageBox.warning(self, "Ordner oeffnen", f"Konnte Ordner nicht oeffnen:\n{e}")
 
 
     def create_tool(self):
