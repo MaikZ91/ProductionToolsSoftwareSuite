@@ -173,10 +173,10 @@ class GlobalCameraRegistry:
         # Name, Index/ID
         self.cams = [
             ("PCO Panda", -1),
-            ("IDS Camera 1 (Idx 0)", 0),
-            ("IDS Camera 2 (Idx 1)", 1),
-            ("IDS Camera 3 (Idx 2)", 2),
-            ("IDS Camera 4 (Idx 3)", 3),
+            ("MACS Resolve 20x", 0),
+            ("AUTOFOKUS", 1),
+            ("MACSeq", 2),
+            ("MACS Resolve 40x", 3),
         ]
         self._instances = {} # Map idx -> camera_instance
 
@@ -1720,12 +1720,12 @@ class AutofocusView(QWidget):
 
         # --- TOP: LIVE MONITOR (STABLE HEIGHT) ---
         # Card without title to save vertical space
-        monitor_card = Card() 
+        monitor_card = Card()
         monitor_card.setStyleSheet(monitor_card.styleSheet() + "border-color: #333;")
-        monitor_card.setFixedHeight(360) # Standard height for camera cards (Reduced from 410)
+        monitor_card.setMinimumHeight(520)  # Larger live view
         self.cam_embed = LiveCamEmbed(lambda: None, start_immediately=False)
         monitor_card.add_widget(self.cam_embed)
-        layout.addWidget(monitor_card)
+        layout.addWidget(monitor_card, 3)
         
         # --- BOTTOM: CONTROLS (HORIZONTAL & COMPACT) ---
         controls_row = QHBoxLayout()
@@ -1736,7 +1736,7 @@ class AutofocusView(QWidget):
         cam_layout = QGridLayout()
         cam_layout.setSpacing(6)
         
-        cams = CAMERA_REGISTRY.cams # Use the global registry
+        cams = [cam for cam in CAMERA_REGISTRY.cams if cam[1] != -1]  # Exclude PCO Panda in autofocus
         self._cams = list(cams)
         try:
             print(f"[INFO] Kamera-Buttons (Name -> Index): {self._cams}")
@@ -1811,8 +1811,7 @@ class AutofocusView(QWidget):
         align_card.add_layout(al)
         controls_row.addWidget(align_card, 1)
 
-        layout.addLayout(controls_row)
-        layout.addStretch() # Push everything up to keep it tight
+        layout.addLayout(controls_row, 1)
         
         self._update_button_styles()
         # Start controller lazily when the view is shown.
