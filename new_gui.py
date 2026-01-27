@@ -3404,53 +3404,60 @@ class OptikkoerperView(QWidget):
         self._cam_indices = [4, 5]
         self._primary_cam_idx = self._cam_indices[0] if self._cam_indices else 0
         self._cam_titles = ["Optikkorper Cam A", "Optikkorper Cam B"]
-        self._cam_embeds = {}
         self.cam_embed = None
-        self._expo_controls = {}
+        self._cam_buttons = {}
+        self._current_cam_idx = self._primary_cam_idx
+        self._no_frame_counts = {}
+        self._last_log_ts = {}
+        self._last_log_msg = {}
+        self._cam_timeouts = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
-        cam_grid = QGridLayout()
-        cam_grid.setSpacing(10)
+        monitor_card = Card("Optikkorper Live")
+        monitor_card.setStyleSheet(monitor_card.styleSheet() + "border-color: #333;")
+        monitor_card.setMinimumHeight(320)
+        # Lock height to prevent layout jumping when frames/status change.
+        monitor_card.setFixedHeight(520)
+        monitor_card.setMinimumWidth(420)
+        self.cam_embed = CameraWidget(self._get_frame, start_immediately=False)
+        monitor_card.add_widget(self.cam_embed)
+        layout.addWidget(monitor_card)
+        controls_row = QHBoxLayout()
+        controls_row.setSpacing(10)
+        cam_card = Card("KAMERAS")
+        cam_layout = QGridLayout()
+        cam_layout.setSpacing(6)
         for i, cam_idx in enumerate(self._cam_indices):
             title = self._cam_titles[i] if i < len(self._cam_titles) else f"Optikkorper CAM {i + 1}"
-            monitor_card = Card(title)
-            monitor_card.setStyleSheet(monitor_card.styleSheet() + "border-color: #333;")
-            monitor_card.setMinimumHeight(240)
-            # Lock height to prevent layout jumping when frames/status change.
-            monitor_card.setFixedHeight(360)
-            embed = CameraWidget(lambda idx=cam_idx: self._get_frame(idx), start_immediately=False)
-            monitor_card.add_widget(embed)
-            cam_grid.addWidget(monitor_card, i // 2, i % 2)
-            self._cam_embeds[cam_idx] = embed
-            if cam_idx == self._primary_cam_idx:
-                self.cam_embed = embed
-        layout.addLayout(cam_grid)
-        expo_row = QHBoxLayout()
-        expo_row.setSpacing(10)
-        for i, cam_idx in enumerate(self._cam_indices):
-            title = f"EXPOSURE CAM {chr(65 + i)}"
-            expo_card = Card(title)
-            sl = QVBoxLayout()
-            sl.setSpacing(8)
-            spin = QDoubleSpinBox()
-            spin.setRange(0.01, 500.0)
-            spin.setValue(20.0)
-            spin.setSuffix(" ms")
-            spin.setFixedHeight(30)
-            spin.setStyleSheet(f"background: {COLORS['surface_light']}; border-radius: 4px; padding: 2px;")
-            sl.addWidget(spin)
-            slider = QSlider(Qt.Horizontal)
-            slider.setRange(1, 5000)
-            slider.setValue(200)
-            sl.addWidget(slider)
-            spin.valueChanged.connect(lambda v, s=slider: s.setValue(int(v * 10)))
-            slider.valueChanged.connect(lambda v, s=spin: s.setValue(v / 10.0))
-            spin.valueChanged.connect(lambda v, idx=cam_idx: self._set_exposure(idx, v))
-            expo_card.add_layout(sl)
-            expo_row.addWidget(expo_card, 1)
-            self._expo_controls[cam_idx] = {"spin": spin, "slider": slider}
-        layout.addLayout(expo_row)
+            btn = ModernButton(title, "secondary")
+            btn.setMinimumHeight(34)
+            btn.setFont(QFont(FONTS['ui'], 11, QFont.Bold))
+            btn.clicked.connect(lambda _, idx=cam_idx: self._select_camera(idx))
+            cam_layout.addWidget(btn, i // 2, i % 2)
+            self._cam_buttons[cam_idx] = btn
+        cam_card.add_layout(cam_layout)
+        controls_row.addWidget(cam_card, 2)
+        expo_card = Card("EXPOSURE")
+        sl = QVBoxLayout()
+        sl.setSpacing(8)
+        self.spin_expo = QDoubleSpinBox()
+        self.spin_expo.setRange(0.01, 500.0)
+        self.spin_expo.setValue(20.0)
+        self.spin_expo.setSuffix(" ms")
+        self.spin_expo.setFixedHeight(30)
+        self.spin_expo.setStyleSheet(f"background: {COLORS['surface_light']}; border-radius: 4px; padding: 2px;")
+        sl.addWidget(self.spin_expo)
+        self.slider_expo = QSlider(Qt.Horizontal)
+        self.slider_expo.setRange(1, 5000)
+        self.slider_expo.setValue(200)
+        sl.addWidget(self.slider_expo)
+        self.spin_expo.valueChanged.connect(lambda v: self.slider_expo.setValue(int(v * 10)))
+        self.slider_expo.valueChanged.connect(lambda v: self.spin_expo.setValue(v / 10.0))
+        self.spin_expo.valueChanged.connect(self._set_exposure)
+        expo_card.add_layout(sl)
+        controls_row.addWidget(expo_card, 1)
+        layout.addLayout(controls_row)
         save_row = QHBoxLayout()
         save_row.setSpacing(10)
         save_card = Card("SAVE")
@@ -3465,6 +3472,7 @@ class OptikkoerperView(QWidget):
         save_row.addStretch()
         layout.addLayout(save_row)
         layout.addStretch()
+        self._update_button_styles()
     def _ensure_cam(self, idx):
         cam = self._cams.get(idx)
         if cam is None:
@@ -3473,20 +3481,60 @@ class OptikkoerperView(QWidget):
         try:
             self._last_error[idx] = None
             if not self._expo_initialized:
-                self._init_exposure_controls(idx, cam)
+                self._init_exposure_controls(cam)
+            if idx not in self._cam_timeouts:
+                try:
+                    curr_us, _mn, _mx = cam.get_exposure_limits_us()
+                    self._cam_timeouts[idx] = max(200, int(curr_us / 1000.0) + 200)
+                except Exception:
+                    self._cam_timeouts[idx] = 250
             return True
         except Exception as exc:
             self._last_error[idx] = str(exc)
             return False
-    def _get_frame(self, idx):
+    def _log_cam_status(self, idx: int, msg: str):
+        now = time.monotonic()
+        last_ts = self._last_log_ts.get(idx, 0.0)
+        last_msg = self._last_log_msg.get(idx)
+        if msg != last_msg or (now - last_ts) > 2.0:
+            print(f"[Optikkoerper] Cam {idx}: {msg}")
+            self._last_log_ts[idx] = now
+            self._last_log_msg[idx] = msg
+    def _get_frame(self):
+        idx = self._current_cam_idx
         if not self._ensure_cam(idx):
-            return None
+            err = self._last_error.get(idx)
+            msg = f"Kamera-Fehler: {err}" if err else f"Keine Kamera (Index {idx})"
+            self._log_cam_status(idx, msg)
+            return None, msg
         try:
-            frame = self._cams[idx].aquise_frame()
+            timeout_ms = self._cam_timeouts.get(idx, 250)
+            frame = self._cams[idx].aquise_frame(timeout_ms=timeout_ms)
         except Exception as exc:
             self._last_error[idx] = str(exc)
-            return None
-        return self._normalize_frame(frame)
+            msg = str(exc)
+            if "GC_ERR_TIMEOUT" in msg or "PEAK_RETURN_CODE_TIMEOUT" in msg:
+                self._cam_timeouts[idx] = min(2000, self._cam_timeouts.get(idx, 250) + 200)
+            try:
+                self._cams[idx].shutdown()
+            except Exception:
+                pass
+            self._cams.pop(idx, None)
+            msg = f"Kamera-Fehler: {exc}"
+            self._log_cam_status(idx, msg)
+            return None, msg
+        if frame is None:
+            count = self._no_frame_counts.get(idx, 0) + 1
+            self._no_frame_counts[idx] = count
+            msg = f"Kein Bild (Cam {idx})"
+            self._log_cam_status(idx, msg)
+            return None, msg
+        self._no_frame_counts[idx] = 0
+        if idx in self._cam_timeouts:
+            self._cam_timeouts[idx] = max(200, self._cam_timeouts[idx] - 100)
+        msg = f"Cam {idx}"
+        self._log_cam_status(idx, msg)
+        return self._normalize_frame(frame), msg
     def _normalize_frame(self, frame):
         if frame is None:
             return None
@@ -3500,9 +3548,8 @@ class OptikkoerperView(QWidget):
                 else:
                     frame = np.zeros_like(frame, dtype=np.uint8)
         return frame
-    def _init_exposure_controls(self, idx, cam):
-        controls = self._expo_controls.get(idx)
-        if cam is None or controls is None:
+    def _init_exposure_controls(self, cam):
+        if cam is None:
             return
         try:
             curr_us, min_us, max_us = cam.get_exposure_limits_us()
@@ -3512,35 +3559,32 @@ class OptikkoerperView(QWidget):
         max_ms = max(min_ms + 0.01, float(max_us) / 1000.0)
         max_ms = min(max_ms, 10000.0)
         self._updating_expo = True
-        controls["spin"].setRange(min_ms, max_ms)
-        controls["slider"].setRange(int(min_ms * 10), int(max_ms * 10))
+        self.spin_expo.setRange(min_ms, max_ms)
+        self.slider_expo.setRange(int(min_ms * 10), int(max_ms * 10))
         curr_ms = max(min_ms, min(max_ms, float(curr_us) / 1000.0))
-        controls["spin"].setValue(curr_ms)
-        controls["slider"].setValue(int(curr_ms * 10))
+        self.spin_expo.setValue(curr_ms)
+        self.slider_expo.setValue(int(curr_ms * 10))
         self._updating_expo = False
-        # Mark initialized only when all controls were attempted
-        if all(c in self._expo_controls for c in self._cam_indices):
-            self._expo_initialized = True
-    def _set_exposure(self, idx, val_ms):
+        self._expo_initialized = True
+    def _set_exposure(self, val_ms):
         if self._updating_expo:
             return
-        cam = self._cams.get(idx)
+        cam = self._cams.get(self._current_cam_idx)
         if cam is None:
             return
         try:
             cam.set_exposure_us(float(val_ms) * 1000.0)
         except Exception as exc:
-            self._last_error[idx] = str(exc)
-            embed = self._cam_embeds.get(idx)
-            if embed is not None:
-                embed.status.setText(f"EXPOSURE-Fehler: {exc}")
+            self._last_error[self._current_cam_idx] = str(exc)
+            if self.cam_embed is not None:
+                self.cam_embed.status.setText(f"EXPOSURE-Fehler: {exc}")
     def showEvent(self, event):
         super().showEvent(event)
-        for embed in self._cam_embeds.values():
-            embed.start()
+        if self.cam_embed is not None:
+            self.cam_embed.start()
     def hideEvent(self, event):
-        for embed in self._cam_embeds.values():
-            embed.stop()
+        if self.cam_embed is not None:
+            self.cam_embed.stop()
         for cam in self._cams.values():
             try:
                 cam.shutdown()
@@ -3569,12 +3613,8 @@ class OptikkoerperView(QWidget):
                 return cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
         return None
     def _save_optikkorper_pdf(self):
-        frames = []
-        for i, cam_idx in enumerate(self._cam_indices):
-            embed = self._cam_embeds.get(cam_idx)
-            frame = embed._last_frame if embed is not None else None
-            frames.append((i, cam_idx, frame))
-        if all(f is None for _, _, f in frames):
+        frame = self.cam_embed._last_frame if self.cam_embed is not None else None
+        if frame is None:
             QMessageBox.warning(self, "PDF speichern", "Kein Bild verfuegbar.")
             return
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -3586,21 +3626,41 @@ class OptikkoerperView(QWidget):
             fig.text(0.02, 0.98, "Optikkoerper Capture", va="top", ha="left", fontsize=14, color=COLORS['text'])
             fig.text(0.02, 0.94, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                      va="top", ha="left", fontsize=10, color=COLORS['text_muted'])
-            cols = 2 if len(frames) > 1 else 1
-            rows = 1 if len(frames) <= 2 else 2
-            for idx, (i, cam_idx, frame) in enumerate(frames):
-                ax = fig.add_subplot(rows, cols, idx + 1)
-                title = self._cam_titles[i] if i < len(self._cam_titles) else f"Cam {cam_idx}"
-                ax.set_title(title, fontsize=10, color=COLORS['text'])
-                rgb = self._frame_to_rgb(frame)
-                if rgb is not None:
-                    ax.imshow(rgb)
-                else:
-                    ax.text(0.5, 0.5, "Kein Bild", ha="center", va="center", color=COLORS['text_muted'])
-                ax.axis("off")
+            ax = fig.add_subplot(1, 1, 1)
+            try:
+                i = self._cam_indices.index(self._current_cam_idx)
+                title = self._cam_titles[i]
+            except Exception:
+                title = f"Cam {self._current_cam_idx}"
+            ax.set_title(title, fontsize=10, color=COLORS['text'])
+            rgb = self._frame_to_rgb(frame)
+            if rgb is not None:
+                ax.imshow(rgb)
+            else:
+                ax.text(0.5, 0.5, "Kein Bild", ha="center", va="center", color=COLORS['text_muted'])
+            ax.axis("off")
             fig.tight_layout(rect=[0, 0, 1, 0.9])
             pdf.savefig(fig)
         QMessageBox.information(self, "PDF gespeichert", f"Report gespeichert:\n{path_str}")
+    def _select_camera(self, idx: int):
+        if idx == self._current_cam_idx:
+            return
+        try:
+            cam = self._cams.get(idx)
+            if cam is not None and bool(getattr(cam, "_dummy", False)):
+                cam.shutdown()
+                self._cams.pop(idx, None)
+        except Exception:
+            pass
+        self._current_cam_idx = idx
+        self._expo_initialized = False
+        self._update_button_styles()
+    def _update_button_styles(self):
+        for idx, btn in self._cam_buttons.items():
+            if idx == self._current_cam_idx:
+                btn.set_variant("primary")
+            else:
+                btn.set_variant("secondary")
 class IPCView(QWidget):
     """Graphical In Process Control View (connected to DB)."""
     def __init__(self, parent=None):

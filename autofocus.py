@@ -16,9 +16,9 @@ from PySide6.QtCore import QObject, QTimer, Signal, Qt
 from PySide6.QtGui import QImage, QColor, QPainter, QPen
 
 _ROOT = Path(__file__).resolve().parent
-_FW_PATH = _ROOT / "Framework" / "ie_framework"
-if _FW_PATH.is_dir():
-    fw_path = str(_FW_PATH)
+_FW_PACKAGE = _ROOT / "Framework" / "ie_Framework"
+if _FW_PACKAGE.is_dir():
+    fw_path = str(_FW_PACKAGE)
     if fw_path not in sys.path:
         sys.path.insert(0, fw_path)
 
@@ -38,7 +38,10 @@ def _patch_ids_cam_aquise_frame() -> None:
         buf = self.ds.WaitForFinishedBuffer(timeout_ms)
         w, h = buf.Width(), buf.Height()
 
-        if _ids_cam_mod.IDS_PEAK_IPL_AVAILABLE and _ids_cam_mod.BufferToImage is not None:
+        if (
+            getattr(_ids_cam_mod, "IDS_PEAK_IPL_AVAILABLE", False)
+            and getattr(_ids_cam_mod, "BufferToImage", None) is not None
+        ):
             try:
                 img = _ids_cam_mod.BufferToImage(buf)
                 out = np.empty((h, w), dtype=np.uint8)
@@ -239,6 +242,7 @@ class LiveLaserController(QObject):
         self._sim_tick = 0
         self._ref_point: tuple[int, int] | None = None
         self._timeout_ms = 250
+        self._timeout_failures = 0
         self._last_init_attempt = 0.0
         self._retry_interval_s = 1.0
         self._last_init_error: str | None = None
@@ -253,6 +257,12 @@ class LiveLaserController(QObject):
             self.is_dummy = bool(getattr(self.cam, "_dummy", False))
             self._using_fallback = False
             self._last_init_error = None
+            if not self.is_dummy:
+                try:
+                    cur, _mn, _mx = self.cam.get_exposure_limits_us()
+                    self._timeout_ms = max(200, int(cur / 1000.0) + 200)
+                except Exception:
+                    pass
         except Exception as exc:
             self.cam = _FallbackDummyCam()
             self.is_dummy = True
@@ -300,7 +310,19 @@ class LiveLaserController(QObject):
             )
             self.frameReady.emit(qimg)
             self.centerChanged.emit(int(cx), int(cy))
+            self._timeout_failures = 0
         except Exception as exc:
+            msg = str(exc)
+            if "GC_ERR_TIMEOUT" in msg or "PEAK_RETURN_CODE_TIMEOUT" in msg:
+                self._timeout_failures += 1
+                self._timeout_ms = min(2000, int(self._timeout_ms + 200))
+                if self._timeout_failures >= 5:
+                    try:
+                        if self.cam is not None:
+                            self.cam.shutdown()
+                    except Exception:
+                        pass
+                    self.cam = None
             print(f"[WARN] Live-Frame fehlgeschlagen: {exc}")
 
     # ---- Camera controls -------------------------------------------------

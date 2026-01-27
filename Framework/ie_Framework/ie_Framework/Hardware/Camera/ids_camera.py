@@ -50,7 +50,7 @@ class IdsCam:
         self.dev = None
         self.remote = None
         self.ds = None
-        self.buf = None
+        self._buffers: list = []
         self.width = 0
         self.height = 0
         self.pixel_size_um = None
@@ -78,7 +78,12 @@ class IdsCam:
             self.remote = self.dev.RemoteDevice().NodeMaps()[0]
 
             self.pixel_format = self._select_pixel_format()
-            self.remote.FindNode("PixelFormat").SetCurrentEntry(self.pixel_format)
+            try:
+                pf_node = self.remote.FindNode("PixelFormat")
+                pf_node.SetCurrentEntry(self.pixel_format)
+            except Exception:
+                # Some devices lock PixelFormat; continue with current setting.
+                pass
             self.remote.FindNode("AcquisitionMode").SetCurrentEntry("Continuous")
             self.remote.FindNode("TriggerMode").SetCurrentEntry("Off")
 
@@ -102,8 +107,11 @@ class IdsCam:
 
             self.ds = self.dev.DataStreams()[0].OpenDataStream()
             payload = self.remote.FindNode("PayloadSize").Value()
-            self.buf = self.ds.AllocAndAnnounceBuffer(payload)
-            self.ds.QueueBuffer(self.buf)
+            self._buffers = []
+            for _ in range(4):
+                buf = self.ds.AllocAndAnnounceBuffer(payload)
+                self.ds.QueueBuffer(buf)
+                self._buffers.append(buf)
 
             self.ds.StartAcquisition()
             self.remote.FindNode("AcquisitionStart").Execute()
@@ -120,7 +128,7 @@ class IdsCam:
         self.dev = None
         self.remote = None
         self.ds = None
-        self.buf = None
+        self._buffers = []
         self.width = 640
         self.height = 480
         self.pixel_size_um = 2.2
@@ -314,8 +322,12 @@ class IdsCam:
                 self.remote.FindNode("AcquisitionStop").Execute()
             if self.ds is not None:
                 self.ds.StopAcquisition()
-                if self.buf is not None:
-                    self.ds.RevokeBuffer(self.buf)
+                for buf in self._buffers:
+                    try:
+                        self.ds.RevokeBuffer(buf)
+                    except Exception:
+                        pass
+                self._buffers = []
             if self.dev is not None:
                 self.dev.Close()
             if _ids_peak is not None:
