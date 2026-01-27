@@ -5,13 +5,20 @@ from pco import defs
 class PcoCameraBackend:
     """Minimal PCO camera backend for GUI usage."""
 
-    def __init__(self):
+    def __init__(self, cam_index: int | None = None):
         self._cam = None
         self._recording = False
+        self._cam_index = cam_index
 
     def start(self):
         if self._cam is None:
-            self._cam = pco.Camera()
+            if self._cam_index is None:
+                self._cam = pco.Camera()
+            else:
+                try:
+                    self._cam = pco.Camera(self._cam_index)
+                except Exception:
+                    self._cam = pco.Camera()
             try:
                 self._cam.configuration = {
                     "trigger": "auto sequence",
