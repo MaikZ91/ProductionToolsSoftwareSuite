@@ -3,14 +3,6 @@
         "Maiks Super tool": {
             "widgets": [
                 {
-                    "type": "LiveCamEmbed",
-                    "id": "1",
-                    "text": "Wareneingangcontrol",
-                    "cam_idx": 0,
-                    "fixed_width": 1167,
-                    "fixed_height": 401
-                },
-                {
                     "type": "ModernButton",
                     "id": "2",
                     "text": "Exposure Time",
@@ -20,9 +12,17 @@
                 {
                     "type": "ModernButton",
                     "id": "3",
-                    "text": "On/Off",
+                    "text": "On/Off/On Off",
                     "fixed_width": 243,
                     "fixed_height": 25
+                },
+                {
+                    "type": "LiveCamEmbed",
+                    "id": "1",
+                    "text": "Wareneingangcontrol",
+                    "cam_idx": 0,
+                    "fixed_width": 1167,
+                    "fixed_height": 401
                 }
             ]
         }
@@ -36,6 +36,7 @@
         "fixed_height": 31
     },
     "3": {
+        "text": "On/Off/On Off",
         "fixed_width": 243,
         "fixed_height": 25
     },

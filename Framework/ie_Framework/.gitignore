@@ -1,2 +1,4 @@
 /dist/
 /commonIE-1.0.2.tar.gz
+*.pyc
+__pycache__/

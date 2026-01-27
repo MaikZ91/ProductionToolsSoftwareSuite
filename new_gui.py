@@ -1,3 +1,4 @@
+from __future__ import annotations
 # --- Snap/GIO Modul-Konflikte entschärfen (vor allen anderen Imports) ---
 import os as _os
 _os.environ.pop("GIO_MODULE_DIR", None)
@@ -61,7 +62,9 @@ from z_trieb import ZTriebController
 import gitterschieber as gs
 from z_trieb import ZTriebWidget
 import stage_control as resolve_stage
+import stage_test as blaze_stage_test
 from ie_Framework.Hardware.Camera.panda import PcoCameraBackend
+from ie_Framework.Algorithm.laser_spot_detection import LaserSpotDetector as StageLaserSpotDetector
 
 
 # ========================== DATENBANK / INFRA ==========================
@@ -246,6 +249,51 @@ class LiveStageBus(QObject):
         self.data_updated.emit(payload)
 
 LIVE_STAGE_BUS = LiveStageBus()
+
+
+class LazyView(QWidget):
+    """Create heavy views on demand so the main window can show quickly."""
+    def __init__(self, factory, title: str | None = None, parent=None):
+        super().__init__(parent)
+        self._factory = factory
+        self._title = title or "View"
+        self._built = False
+        self._child = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._placeholder = QLabel(f"{self._title} wird geladen...")
+        self._placeholder.setAlignment(Qt.AlignCenter)
+        self._placeholder.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 12px;")
+        layout.addWidget(self._placeholder)
+
+    @property
+    def view(self):
+        return self._child
+
+    def _build(self):
+        if self._built:
+            return
+        self._built = True
+        try:
+            try:
+                self._child = self._factory(parent=self)
+            except TypeError:
+                self._child = self._factory()
+        except Exception as exc:
+            self._placeholder.setText(f"{self._title} konnte nicht geladen werden:\n{exc}")
+            return
+        layout = self.layout()
+        layout.removeWidget(self._placeholder)
+        self._placeholder.deleteLater()
+        layout.addWidget(self._child)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._built:
+            QTimer.singleShot(0, self._build)
 class PropertyEditor(QDialog):
     def __init__(self, target_widget, parent=None):
         super().__init__(parent)
@@ -1695,6 +1743,40 @@ def open_camera_window(frame_provider, title="Camera Feed"):
     return win
 
 
+class StageTestLaserProvider:
+    def __init__(self, backend, axis: str):
+        self.backend = backend
+        self.axis = axis
+        self._last_center = None
+
+    def __call__(self):
+        if self.backend is None:
+            return None
+        frame = self.backend.capture_frame(self.axis)
+        if frame is None:
+            return None
+        try:
+            if frame.ndim == 3:
+                gray = frame[..., 1]
+            else:
+                gray = frame
+            x, y, _ = StageLaserSpotDetector.detect_laser_spot_otsu(gray)
+            self._last_center = (int(x), int(y))
+        except Exception:
+            x, y = None, None
+        overlay = frame.copy()
+        if overlay.ndim == 2:
+            overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2BGR)
+        if x is not None and y is not None:
+            cv2.circle(overlay, (int(x), int(y)), 6, (0, 255, 0), 1)
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        if x is not None and y is not None:
+            status = f"{self.axis} | {ts} | {x}, {y}"
+        else:
+            status = f"{self.axis} | {ts}"
+        return overlay, status
+
+
 class AutofocusView(QWidget):
     """Modern UI for Autofocus / Kollimator Tool."""
     def __init__(self, parent=None):
@@ -3027,6 +3109,507 @@ class StageControlView(QWidget):
         self.btn_dauer.setText("Start Endurance Test")
         self.btn_dauer.set_variant("secondary")
 
+class BlazeStageTestWorker(QObject):
+    progress = Signal(int, int)
+    finished = Signal()
+    error = Signal(str)
+
+    def __init__(self, backend, mode, steps, cycles, sleep_s):
+        super().__init__()
+        self.backend = backend
+        self.mode = mode
+        self.steps = steps
+        self.cycles = cycles
+        self.sleep_s = sleep_s
+
+    def run(self):
+        try:
+            def _progress(cur, max_steps):
+                self.progress.emit(int(cur), int(max_steps))
+
+            if self.mode == "Y":
+                self.backend.measure_axis("Y", self.steps, self.cycles, self.sleep_s, progress_cb=_progress)
+            elif self.mode == "Z":
+                self.backend.measure_axis("Z", self.steps, self.cycles, self.sleep_s, progress_cb=_progress)
+            else:
+                self.backend.measure_all_axis(self.steps, self.cycles, self.sleep_s, progress_cb=_progress)
+            self.finished.emit()
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class BlazeStageTestView(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(f"background-color: {COLORS['bg']};")
+        self.backend = None
+        self.backend_future = None
+        self.backend_timer = QTimer(self)
+        self.backend_timer.timeout.connect(self._poll_backend_ready)
+        self.worker = None
+        self.worker_thread = None
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self._live_cam_windows = []
+        self._live_cam_providers = []
+        self._preview_embeds = {}
+        self._preview_providers = {}
+        self._live_chart_timer = QTimer(self)
+        self._live_chart_timer.timeout.connect(self._update_live_tracking)
+        self._live_chart_max = 250
+        self._build_ui()
+        self._init_backend_async()
+
+    def _build_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(12)
+
+        left_col = QVBoxLayout()
+        left_col.setSpacing(10)
+
+        setup_card = Card("Blaze Stage Test")
+        setup_card.set_compact()
+        form = QGridLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(6)
+        row = 0
+
+        self.steps_spin = QSpinBox()
+        self.steps_spin.setRange(1, 50000)
+        self.steps_spin.setValue(1000)
+        self.steps_spin.setFixedHeight(28)
+        form.addWidget(self._label("ANZAHL STEPS"), row, 0)
+        form.addWidget(self.steps_spin, row, 1)
+        row += 1
+
+        self.cycles_spin = QSpinBox()
+        self.cycles_spin.setRange(1, 20)
+        self.cycles_spin.setValue(3)
+        self.cycles_spin.setFixedHeight(28)
+        form.addWidget(self._label("ANZAHL DURCHLAEUFE"), row, 0)
+        form.addWidget(self.cycles_spin, row, 1)
+        row += 1
+
+        self.serial_input = QLineEdit()
+        self.serial_input.setPlaceholderText("Seriennummer")
+        self.serial_input.setFixedHeight(28)
+        form.addWidget(self._label("SERIENNUMMER"), row, 0)
+        form.addWidget(self.serial_input, row, 1)
+        row += 1
+
+        form.addWidget(self._section_label("MESSUNG"), row, 0, 1, 2)
+        row += 1
+
+        btn_row = QVBoxLayout()
+        btn_row.setSpacing(6)
+        self.btn_start_y = ModernButton("Messung starten Y", "primary")
+        self.btn_start_z = ModernButton("Messung starten Z", "secondary")
+        self.btn_start_yz = ModernButton("Messung starten YZ", "ghost")
+        btn_row.addWidget(self.btn_start_y, alignment=Qt.AlignLeft)
+        btn_row.addWidget(self.btn_start_z, alignment=Qt.AlignLeft)
+        btn_row.addWidget(self.btn_start_yz, alignment=Qt.AlignLeft)
+        form.addLayout(btn_row, row, 0, 1, 2)
+        row += 1
+
+        self.lbl_progress = QLabel("Fortschritt: 0/0")
+        self.lbl_progress.setStyleSheet(f"color: {COLORS['text_muted']};")
+        form.addWidget(self.lbl_progress, row, 0, 1, 2)
+        row += 1
+
+        self.progress = QProgressBar()
+        self.progress.setFixedHeight(8)
+        self.progress.setTextVisible(False)
+        self.progress.setStyleSheet(f"""
+            QProgressBar {{
+                background-color: {COLORS['surface_light']};
+                border: none;
+                border-radius: 4px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {COLORS['primary']};
+                border-radius: 4px;
+            }}
+        """)
+        form.addWidget(self.progress, row, 0, 1, 2)
+        form.setColumnStretch(0, 0)
+        form.setColumnStretch(1, 1)
+
+        setup_card.add_layout(form)
+        left_col.addWidget(setup_card)
+
+        stage_card = Card("Positionierung")
+        stage_card.set_compact()
+        stl = QVBoxLayout()
+        stl.setSpacing(6)
+        self.btn_setup = ModernButton("Einrichtung Laseraufsatz", "secondary")
+        self.btn_pos = ModernButton("Mess Positionierung", "ghost")
+        self.btn_test_y = ModernButton("Test Y", "ghost")
+        self.btn_test_z = ModernButton("Test Z", "ghost")
+        stl.addWidget(self.btn_setup, alignment=Qt.AlignLeft)
+        stl.addWidget(self.btn_pos, alignment=Qt.AlignLeft)
+        stl.addWidget(self.btn_test_y, alignment=Qt.AlignLeft)
+        stl.addWidget(self.btn_test_z, alignment=Qt.AlignLeft)
+
+        stage_card.add_layout(stl)
+        left_col.addWidget(stage_card)
+
+        cam_card = Card("Kamera Setup")
+        cam_card.set_compact()
+        cam_layout = QVBoxLayout()
+        cam_layout.setSpacing(6)
+        self.btn_cam_y1 = ModernButton("CAM Y1", "ghost")
+        self.btn_cam_y2 = ModernButton("CAM Y2", "ghost")
+        self.btn_cam_z1 = ModernButton("CAM Z1", "ghost")
+        self.btn_cam_z2 = ModernButton("CAM Z2", "ghost")
+        cam_layout.addWidget(self.btn_cam_y1, alignment=Qt.AlignLeft)
+        cam_layout.addWidget(self.btn_cam_y2, alignment=Qt.AlignLeft)
+        cam_layout.addWidget(self.btn_cam_z1, alignment=Qt.AlignLeft)
+        cam_layout.addWidget(self.btn_cam_z2, alignment=Qt.AlignLeft)
+        cam_card.add_layout(cam_layout)
+        left_col.addWidget(cam_card)
+        left_col.addStretch()
+
+        layout.addLayout(left_col, 1)
+
+        right_col = QVBoxLayout()
+        right_col.setSpacing(10)
+        status_card = Card("Status")
+        status_card.set_compact()
+        sl = QVBoxLayout()
+        self.lbl_status = QLabel("Bereit")
+        self.lbl_status.setStyleSheet(f"font-weight: 700; color: {COLORS['primary']};")
+        sl.addWidget(self.lbl_status)
+        status_card.add_layout(sl)
+        right_col.addWidget(status_card)
+
+        cam_preview_card = Card("Kamera Live")
+        cam_preview_card.set_compact()
+        cam_preview_layout = QGridLayout()
+        cam_preview_layout.setSpacing(8)
+        preview_axes = ["Y", "Y1", "Z", "Z1"]
+        for i, axis in enumerate(preview_axes):
+            preview = LiveCamEmbed(lambda: None, interval_ms=200, start_immediately=False)
+            preview.label.setMinimumHeight(120)
+            preview.status.setText(f"{axis} | warte auf Hardware")
+            cam_preview_layout.addWidget(preview, i // 2, i % 2)
+            self._preview_embeds[axis] = preview
+        cam_preview_card.add_layout(cam_preview_layout)
+        right_col.addWidget(cam_preview_card, 2)
+        
+        live_card = Card("Live Tracking")
+        live_card.set_compact()
+        live_layout = QVBoxLayout()
+        live_header = QHBoxLayout()
+        self.lbl_live_state = QLabel("Live: aus")
+        self.lbl_live_state.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
+        live_header.addWidget(self.lbl_live_state)
+        live_header.addStretch()
+        self.lbl_live_last = QLabel("---")
+        self.lbl_live_last.setStyleSheet(f"font-family: {FONTS['mono']}; font-size: 11px; color: {COLORS['text']};")
+        live_header.addWidget(self.lbl_live_last)
+        live_layout.addLayout(live_header)
+
+        self.live_chart = ModernChart(height=4)
+        self.live_chart.ax.set_xlabel("Position / Index", color=COLORS['text_muted'])
+        self.live_chart.ax.set_ylabel("Pixel", color=COLORS['text_muted'])
+        self.line_x1, = self.live_chart.ax.plot([], [], color=COLORS['primary'], linewidth=2, label="Cam1 X")
+        self.line_x2, = self.live_chart.ax.plot([], [], color=COLORS['secondary'], linewidth=2, label="Cam2 X")
+        self.line_y1, = self.live_chart.ax.plot([], [], color=COLORS['success'], linewidth=2, label="Cam1 Y")
+        self.line_y2, = self.live_chart.ax.plot([], [], color=COLORS['warning'], linewidth=2, label="Cam2 Y")
+        leg = self.live_chart.ax.legend(loc='upper right', facecolor=COLORS['surface'], edgecolor=COLORS['border'], labelcolor=COLORS['text'])
+        leg.get_frame().set_linewidth(1)
+        live_layout.addWidget(self.live_chart)
+        live_card.add_layout(live_layout)
+        right_col.addWidget(live_card, 2)
+        right_col.addStretch()
+        layout.addLayout(right_col, 2)
+
+        self.btn_start_y.clicked.connect(lambda: self._start_measurement("Y"))
+        self.btn_start_z.clicked.connect(lambda: self._start_measurement("Z"))
+        self.btn_start_yz.clicked.connect(lambda: self._start_measurement("YZ"))
+
+        self.btn_setup.clicked.connect(lambda: self._submit_backend("endposition"))
+        self.btn_pos.clicked.connect(lambda: self._submit_backend("position_y"))
+        self.btn_test_y.clicked.connect(lambda: self._submit_backend("test_y"))
+        self.btn_test_z.clicked.connect(lambda: self._submit_backend("test_z"))
+
+        self.btn_cam_y1.clicked.connect(lambda: self._submit_backend("test_camera", "Y"))
+        self.btn_cam_y2.clicked.connect(lambda: self._submit_backend("test_camera", "Y1"))
+        self.btn_cam_z1.clicked.connect(lambda: self._submit_backend("test_camera", "Z"))
+        self.btn_cam_z2.clicked.connect(lambda: self._submit_backend("test_camera", "Z1"))
+
+        for btn in [
+            self.btn_start_y,
+            self.btn_start_z,
+            self.btn_start_yz,
+            self.btn_setup,
+            self.btn_pos,
+            self.btn_test_y,
+            self.btn_test_z,
+            self.btn_cam_y1,
+            self.btn_cam_y2,
+            self.btn_cam_z1,
+            self.btn_cam_z2,
+        ]:
+            self._compact_button(btn)
+
+        self._controls = [
+            self.steps_spin,
+            self.cycles_spin,
+            self.serial_input,
+            self.btn_start_y,
+            self.btn_start_z,
+            self.btn_start_yz,
+            self.btn_setup,
+            self.btn_pos,
+            self.btn_test_y,
+            self.btn_test_z,
+            self.btn_cam_y1,
+            self.btn_cam_y2,
+            self.btn_cam_z1,
+            self.btn_cam_z2,
+        ]
+
+    def _label(self, text):
+        lbl = QLabel(text)
+        lbl.setStyleSheet(f"font-size: 11px; font-weight: 700; color: {COLORS['text_muted']}; border: none;")
+        return lbl
+
+    def _section_label(self, text):
+        lbl = QLabel(text)
+        lbl.setStyleSheet(
+            f"font-size: 10px; font-weight: 700; color: {COLORS['text_muted']}; "
+            "letter-spacing: 1px; border: none;"
+        )
+        return lbl
+
+    def _compact_button(self, button, height=24):
+        button.setFixedHeight(height)
+        button.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+
+    def _init_backend_async(self):
+        if self.backend_future:
+            return
+        self.lbl_status.setText("Initialisiere Hardware...")
+        self.backend_future = self.executor.submit(blaze_stage_test.StageTestBackend)
+        self.backend_timer.start(200)
+
+    def _poll_backend_ready(self):
+        if not self.backend_future:
+            return
+        if not self.backend_future.done():
+            return
+        self.backend_timer.stop()
+        try:
+            self.backend = self.backend_future.result()
+        except Exception as exc:
+            self.backend_future = None
+            self.lbl_status.setText("Hardware Fehler")
+            QMessageBox.critical(self, "Blaze Stage Test", f"Initialisierung fehlgeschlagen:\n{exc}")
+            return
+        self.backend_future = None
+        cam_error = getattr(self.backend, "camera_error", None)
+        if cam_error:
+            self.lbl_status.setText("Bereit (ohne Kamera)")
+            QMessageBox.warning(
+                self,
+                "Blaze Stage Test",
+                f"Kamera nicht verfuegbar:\n{cam_error}\nDu kannst die Buehne ohne Kamera nutzen.",
+            )
+        else:
+            self.lbl_status.setText("Bereit")
+        self._set_controls_enabled(True)
+        self._init_previews()
+
+    def _init_previews(self):
+        if not self._preview_embeds or self.backend is None:
+            return
+        self._preview_providers.clear()
+        for axis, embed in self._preview_embeds.items():
+            provider = StageTestLaserProvider(self.backend, axis)
+            self._preview_providers[axis] = provider
+            embed._frame_provider = provider
+            embed.status.setText(f"{axis} | bereit (manuell starten)")
+
+    def _ensure_backend(self):
+        if self.backend is None:
+            QMessageBox.warning(self, "Blaze Stage Test", "Hardware ist noch nicht bereit.")
+            return False
+        return True
+
+    def _submit_backend(self, method_name, *args):
+        if not self._ensure_backend():
+            return
+        method = getattr(self.backend, method_name, None)
+        if method is None:
+            QMessageBox.critical(self, "Blaze Stage Test", f"Backend-Methode fehlt: {method_name}")
+            return
+        if method_name == "test_camera":
+            method(*args)
+            if args:
+                axis = args[0]
+                embed = self._preview_embeds.get(axis)
+                if embed is not None:
+                    embed.start()
+            return
+        self.executor.submit(method, *args)
+
+    def _start_measurement(self, mode):
+        if self.worker_thread:
+            return
+        if not self._ensure_backend():
+            return
+        serial = self.serial_input.text().strip()
+        if serial:
+            self.backend.set_serial_number(serial)
+        self.backend.clear_list()
+
+        steps = self.steps_spin.value()
+        cycles = self.cycles_spin.value()
+
+        self.progress.setMaximum(self.backend.max_steps)
+        self.progress.setValue(0)
+        self.lbl_progress.setText(f"Fortschritt: 0/{self.backend.max_steps}")
+        self.lbl_status.setText(f"Messung startet ({mode})")
+
+        self._set_running_state(True)
+        self._open_live_cameras(mode)
+        self._start_live_tracking()
+
+        self.worker = BlazeStageTestWorker(self.backend, mode, steps, cycles, 1)
+        self.worker_thread = QThread()
+        self.worker.moveToThread(self.worker_thread)
+        self.worker_thread.started.connect(self.worker.run)
+        self.worker.progress.connect(self._on_progress)
+        self.worker.finished.connect(self._on_finished)
+        self.worker.error.connect(self._on_error)
+        self.worker.finished.connect(self.worker_thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.worker.error.connect(self.worker_thread.quit)
+        self.worker.error.connect(self.worker.deleteLater)
+        self.worker_thread.finished.connect(self.worker_thread.deleteLater)
+        self.worker_thread.start()
+
+    def _set_controls_enabled(self, enabled):
+        for ctrl in getattr(self, "_controls", []):
+            ctrl.setEnabled(enabled)
+
+    def _set_running_state(self, running):
+        enabled = not running
+        self.btn_start_y.setEnabled(enabled)
+        self.btn_start_z.setEnabled(enabled)
+        self.btn_start_yz.setEnabled(enabled)
+
+    def _open_live_cameras(self, mode):
+        self._close_live_cameras()
+        if self.backend is None:
+            return
+        axis_map = {
+            "Y": ["Y", "Y1"],
+            "Z": ["Z", "Z1"],
+            "YZ": ["Y", "Y1", "Z", "Z1"],
+        }
+        axes = axis_map.get(mode, [])
+        for axis in axes:
+            provider = StageTestLaserProvider(self.backend, axis)
+            title = f"CAM {axis} | Laser Spot"
+            win = open_camera_window(provider, title=title)
+            self._live_cam_providers.append(provider)
+            self._live_cam_windows.append(win)
+
+    def _close_live_cameras(self):
+        for win in self._live_cam_windows:
+            try:
+                win.close()
+            except Exception:
+                pass
+        self._live_cam_windows.clear()
+        self._live_cam_providers.clear()
+
+    def _start_live_tracking(self):
+        if not self._live_chart_timer.isActive():
+            self._live_chart_timer.start(400)
+        self.lbl_live_state.setText("Live: an")
+
+    def _stop_live_tracking(self):
+        if self._live_chart_timer.isActive():
+            self._live_chart_timer.stop()
+        self.lbl_live_state.setText("Live: aus")
+
+    def _update_live_tracking(self):
+        if self.backend is None:
+            return
+        try:
+            snap = self.backend.get_live_snapshot()
+        except Exception:
+            return
+        if not snap:
+            return
+        pos = snap.get("pos", [])
+        x1 = snap.get("x_coord", [])
+        y1 = snap.get("y_coord", [])
+        x2 = snap.get("x_coord2", [])
+        y2 = snap.get("y_coord2", [])
+        n = min(len(pos), len(x1), len(y1), len(x2), len(y2))
+        if n <= 0:
+            return
+        if n > self._live_chart_max:
+            pos = pos[-self._live_chart_max:]
+            x1 = x1[-self._live_chart_max:]
+            y1 = y1[-self._live_chart_max:]
+            x2 = x2[-self._live_chart_max:]
+            y2 = y2[-self._live_chart_max:]
+            n = len(pos)
+        x_axis = pos if len(pos) == n else list(range(n))
+
+        self.line_x1.set_data(x_axis, x1)
+        self.line_x2.set_data(x_axis, x2)
+        self.line_y1.set_data(x_axis, y1)
+        self.line_y2.set_data(x_axis, y2)
+
+        if x_axis:
+            xmin = x_axis[0]
+            xmax = x_axis[-1] if x_axis[-1] != x_axis[0] else x_axis[0] + 1
+            self.live_chart.ax.set_xlim(xmin, xmax)
+        y_min = min(min(x1, default=0), min(x2, default=0), min(y1, default=0), min(y2, default=0))
+        y_max = max(max(x1, default=0), max(x2, default=0), max(y1, default=0), max(y2, default=0))
+        if y_min == y_max:
+            y_min -= 1
+            y_max += 1
+        pad = max(1.0, (y_max - y_min) * 0.1)
+        self.live_chart.ax.set_ylim(y_min - pad, y_max + pad)
+        self.live_chart.draw_idle()
+
+        self.lbl_live_last.setText(f"X1:{x1[-1]:.1f} Y1:{y1[-1]:.1f} X2:{x2[-1]:.1f} Y2:{y2[-1]:.1f}")
+
+    def _on_progress(self, cur, max_steps):
+        self.progress.setMaximum(int(max_steps))
+        self.progress.setValue(int(cur))
+        self.lbl_progress.setText(f"Fortschritt: {cur}/{max_steps}")
+
+    def _on_finished(self):
+        self.lbl_status.setText("Fertig")
+        self._set_running_state(False)
+        self.worker_thread = None
+        self.worker = None
+        self._stop_live_tracking()
+        self._close_live_cameras()
+
+    def _on_error(self, msg):
+        self.lbl_status.setText("Fehler")
+        self._set_running_state(False)
+        self.worker_thread = None
+        self.worker = None
+        self._stop_live_tracking()
+        self._close_live_cameras()
+        QMessageBox.critical(self, "Stage Test Fehler", msg)
+
+    def hideEvent(self, event):
+        self._stop_live_tracking()
+        self._close_live_cameras()
+        super().hideEvent(event)
+
 class GitterschieberView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -4328,8 +4911,10 @@ class MainWindow(QMainWindow):
         self.btn_af = add_nav("Autofocus", AutofocusView())
         add_nav("Optikkorper", OptikkoerperView())
 
-        self.stage_view = StageControlView()
+        self.stage_view = LazyView(StageControlView, "Stage Control")
         add_nav("Stage Control", self.stage_view)
+        self.blaze_stage_view = LazyView(BlazeStageTestView, "Blaze Stage Test")
+        add_nav("Blaze Stage Test", self.blaze_stage_view)
         add_nav("Gitterschieber", GitterschieberView())
         add_nav("Laserscan", LaserscanView())
         
@@ -4461,7 +5046,11 @@ class MainWindow(QMainWindow):
 
     def _open_stage_data_folder(self):
         if hasattr(self, "stage_view") and self.stage_view is not None:
-            path = self.stage_view._last_outdir if self.stage_view._last_outdir else _latest_stage_outdir()
+            view = self.stage_view.view if hasattr(self.stage_view, "view") else self.stage_view
+            if view is not None and hasattr(view, "_last_outdir"):
+                path = view._last_outdir if view._last_outdir else _latest_stage_outdir()
+            else:
+                path = _latest_stage_outdir()
         else:
             path = _latest_stage_outdir()
         try:

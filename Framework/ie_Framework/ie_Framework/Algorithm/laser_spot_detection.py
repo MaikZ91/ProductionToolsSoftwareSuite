@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
+import scipy
+from skimage import filters
 
 
 class LaserSpotDetector:
@@ -63,3 +66,33 @@ class LaserSpotDetector:
             # Fallback: return image center when no contrast is found.
             cx, cy = width // 2, height // 2
         return cx, cy
+
+    @staticmethod
+    def detect_laser_spot_otsu(
+        frame: np.ndarray,
+    ) -> tuple[int, int, np.ndarray | None]:
+        """
+        Detect laser spot using Otsu thresholding and return centroid and contour.
+        """
+        if frame.ndim != 2:
+            raise ValueError("detect_laser_spot_otsu expects a 2D grayscale array")
+
+        height, width = frame.shape
+        otsu_threshold = filters.threshold_otsu(frame)
+        norm = 127 / otsu_threshold if otsu_threshold else 1
+        _, binary_image = cv2.threshold((frame * norm).astype('uint8'), 127, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(binary_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return width // 2, height // 2, None
+
+        largest_contour = max(contours, key=cv2.contourArea)
+        (cx, cy), radius = cv2.minEnclosingCircle(largest_contour)
+        cx, cy = int(cx), int(cy)
+        radius = int(radius)
+        mask = np.zeros_like(binary_image)
+        cv2.circle(mask, (cx, cy), radius, 255, -1)
+        cy, cx = scipy.ndimage.center_of_mass(frame, mask)
+        cv2.circle(mask, (int(cx), int(cy)), radius, 255, -1)
+        cy, cx = scipy.ndimage.center_of_mass(frame, mask)
+
+        return int(cx), int(cy), largest_contour

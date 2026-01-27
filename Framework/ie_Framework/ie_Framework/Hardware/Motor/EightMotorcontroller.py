@@ -123,6 +123,7 @@ class MotorController(object):
         # Send command to the motor controller via the serial port
         self.ser.write(data)
 
+
     def current_pos(self, addr: int) -> int:
         """Query and return the current position of a motor in steps.
         Parameters
@@ -293,4 +294,40 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def startposition(
+    controller: MotorController,
+    addr_a: int,
+    addr_b: int,
+    addr_c: int,
+    pos_a: int,
+    pos_b: int,
+    pos_c: int,
+    *,
+    wait: bool = True,
+) -> bool:
+    """Move three axes to start positions defined by the caller."""
+    controller.move_to_pos(addr_a, pos_a)
+    controller.move_to_pos(addr_b, pos_b)
+    controller.move_to_pos(addr_c, pos_c)
+    if wait:
+        while controller.current_pos(addr_b) != pos_b or controller.current_pos(addr_c) != pos_c:
+            pass
+    return True
+
+
+def endposition(
+    controller: MotorController,
+    addr_a: int,
+    addr_b: int,
+    addr_c: int,
+    pos_a: int,
+    pos_b: int,
+    pos_c: int,
+) -> None:
+    """Move three axes to end positions defined by the caller."""
+    controller.move_to_pos(addr_a, pos_a)
+    controller.move_to_pos(addr_b, pos_b)
+    controller.move_to_pos(addr_c, pos_c)
 

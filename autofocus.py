@@ -6,12 +6,21 @@ from __future__ import annotations
 
 import atexit
 from typing import Dict, Tuple
+from pathlib import Path
+import sys
 import time
 
 import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QTimer, Signal, Qt
 from PySide6.QtGui import QImage, QColor, QPainter, QPen
+
+_ROOT = Path(__file__).resolve().parent
+_FW_PATH = _ROOT / "Framework" / "ie_framework"
+if _FW_PATH.is_dir():
+    fw_path = str(_FW_PATH)
+    if fw_path not in sys.path:
+        sys.path.insert(0, fw_path)
 
 from ie_Framework.Hardware.Camera import ids_camera as _ids_cam_mod
 IdsCam = _ids_cam_mod.IdsCam

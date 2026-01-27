@@ -16,6 +16,7 @@ Stage-Toolbox (Dark Minimal Theme) – Pro UI (Report & QA) + Workflow-Kacheln
 - NEU: Autofocus-Reiter mit Exposure-Regler (µs/ms) je Zielkamera
 - NEU: Alignment zeigt dx, dy, dist zusätzlich in physikalischen Einheiten (µm / mm)
 """
+from __future__ import annotations
 
 # --- Snap/GIO Modul-Konflikte entschärfen (vor allen anderen Imports) ---
 import os as _os

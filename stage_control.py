@@ -4,6 +4,7 @@
 Stage-spezifische Logik ohne GUI-Elemente.
 Enthält PMAC-Bridge, Bewegungs-Helper und Dauertest-Worker.
 """
+from __future__ import annotations
 
 import csv
 import datetime
