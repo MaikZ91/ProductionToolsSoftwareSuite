@@ -213,8 +213,76 @@ def get_stage_encoders():
     pmac.getStagePosInfo(st)
     return st["xPos_encoderSteps"], st["yPos_encoderSteps"]
 
+def _safe_last(values, default=0.0):
+    try:
+        return float(values[-1]) if values else default
+    except Exception:
+        return default
 
-def save_stage_test(savefile_name, pos_infodict, batch: str = "NoBatch"):
+def _max_abs_um_from_errors(pos_infodict: dict) -> float:
+    max_abs = 0.0
+    for key in ("pos_error_x [m]", "pos_error_y [m]"):
+        vals = pos_infodict.get(key, [])
+        for val in vals:
+            try:
+                max_abs = max(max_abs, abs(float(val)))
+            except Exception:
+                continue
+    return max_abs * 1e6
+
+def _build_stage_test_report_text(batch: str, csv_name: str, pos_infodict: dict) -> str:
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    n_points = len(pos_infodict.get("Time [min]", []))
+    last_time = _safe_last(pos_infodict.get("Time [min]", []), 0.0)
+    last_x = _safe_last(pos_infodict.get("x_position [m]", []), 0.0)
+    last_y = _safe_last(pos_infodict.get("y_position [m]", []), 0.0)
+    last_ex = _safe_last(pos_infodict.get("pos_error_x [m]", []), 0.0)
+    last_ey = _safe_last(pos_infodict.get("pos_error_y [m]", []), 0.0)
+    max_abs_um = _max_abs_um_from_errors(pos_infodict)
+    return (
+        "Stage Test Report (PMAC)\n\n"
+        f"Zeitpunkt: {now}\n"
+        f"Charge: {batch}\n"
+        f"CSV: {csv_name}\n"
+        f"Messpunkte: {n_points}\n\n"
+        "Letzte Werte:\n"
+        f"  Zeit [min]: {last_time:.2f}\n"
+        f"  X Position [m]: {last_x:.6f}\n"
+        f"  Y Position [m]: {last_y:.6f}\n"
+        f"  Fehler X [um]: {last_ex * 1e6:.2f}\n"
+        f"  Fehler Y [um]: {last_ey * 1e6:.2f}\n\n"
+        f"Max |Fehler| [um]: {max_abs_um:.2f}\n"
+    )
+
+
+def _build_stage_test_report_plot(pos_infodict: dict) -> Figure | None:
+    time_vals = pos_infodict.get("Time [min]", [])
+    err_x = pos_infodict.get("pos_error_x [m]", [])
+    err_y = pos_infodict.get("pos_error_y [m]", [])
+    if not time_vals or (not err_x and not err_y):
+        return None
+    try:
+        t = np.asarray(time_vals, dtype=float)
+    except Exception:
+        return None
+    fig = Figure(figsize=(11.0, 6.2), dpi=110, facecolor=BG_ELEV)
+    ax = fig.add_subplot(111)
+    _style_ax(ax)
+    if err_x:
+        ax.plot(t, np.asarray(err_x, dtype=float) * 1e6, label="Fehler X")
+    if err_y:
+        ax.plot(t, np.asarray(err_y, dtype=float) * 1e6, label="Fehler Y")
+    ax.axhline(DUR_MAX_UM, color="#ff5b5b", linestyle="--", linewidth=1, label=f"Limit {DUR_MAX_UM:.1f} µm")
+    ax.axhline(-DUR_MAX_UM, color="#ff5b5b", linestyle="--", linewidth=1)
+    ax.set_title("Positionsfehler über Zeit")
+    ax.set_xlabel("Zeit [min]")
+    ax.set_ylabel("Abweichung [µm]")
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
+
+def save_stage_test(savefile_name, pos_infodict, batch: str = "NoBatch", write_pdf: bool = True):
     now = datetime.datetime.now()
     dt_string = now.strftime("%Y-%m-%d_%H-%M-%S")
     pth = pathlib.Path(savefile_name)
@@ -235,6 +303,19 @@ def save_stage_test(savefile_name, pos_infodict, batch: str = "NoBatch"):
                 pos_infodict["pos_error_x [m]"][i], pos_infodict["pos_error_y [m]"][i]
             ])
     print(f"Saved {savename}")
+    if write_pdf:
+        try:
+            from pdf_module import PdfModule
+            pdf_path = savename.with_suffix(".pdf")
+            text = _build_stage_test_report_text(batch, savename.name, pos_infodict)
+            pages = [{"type": "text", "title": "Stage Test Report", "text": text}]
+            fig = _build_stage_test_report_plot(pos_infodict)
+            if fig is not None:
+                pages.append(fig)
+            PdfModule.write_pdf(pdf_path, pages)
+            print(f"Saved {pdf_path}")
+        except Exception as exc:
+            print(f"[WARN] PDF export failed: {exc}")
 
 
 def moveXinsteps(motorsteps):

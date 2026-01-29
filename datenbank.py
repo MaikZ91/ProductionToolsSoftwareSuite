@@ -9,6 +9,8 @@ import socket
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
+
 import pandas as pd
 from commonIE import dbConnector
 from commonIE import miltenyiBarcode
@@ -29,6 +31,27 @@ TESTTYPE_DB_MAP = {
     "gitterschieber_tool": "gitterschieber_tool",
     "stage_test": "stage_test",
 }
+
+TIME_PRIORITY = ["starttest", "endtest", "timestamp", "time", "date", "datetime"]
+META_FIELDS = {
+    "barcodenummer",
+    "barcode",
+    "user",
+    "device",
+    "device_id",
+    "testtype",
+}
+
+
+@dataclass
+class DashboardViewModel:
+    total: int
+    ok_ratio: int
+    last_result: str
+    result_type: str
+    ordered_columns: list[str]
+    time_column: str | None
+    display_df: pd.DataFrame
 
 
 def current_ssid() -> str | None:
@@ -254,6 +277,98 @@ def _parse_gateway_payload(payload: dict | list | None) -> pd.DataFrame:
     return df
 
 
+def build_dashboard_view_model(df: pd.DataFrame) -> DashboardViewModel:
+    """
+    Prepare the dashboard data model: KPI values, ordered columns, and sorted DataFrame.
+    """
+    df = df.copy()
+    columns = list(df.columns)
+    guid_cols = []
+    for col in columns:
+        if "testguid" in col.lower():
+            guid_cols.append(col)
+
+    time_cols: list[str] = []
+    for name in TIME_PRIORITY:
+        for col in columns:
+            if name in col.lower() and col not in time_cols:
+                time_cols.append(col)
+
+    for col in columns:
+        try:
+            if (
+                pd.api.types.is_datetime64_any_dtype(df[col])
+                and col not in time_cols
+            ):
+                time_cols.append(col)
+        except Exception:
+            pass
+
+    ok_cols = [c for c in columns if c.lower() in {"ok", "status", "result"}]
+    meta_cols = [c for c in columns if c.lower() in META_FIELDS]
+    meta_cols = [c for c in meta_cols if c not in guid_cols]
+    time_cols = [c for c in time_cols if c not in guid_cols]
+    ok_cols = [c for c in ok_cols if c not in guid_cols and c not in time_cols]
+
+    param_cols = [
+        c
+        for c in columns
+        if c not in time_cols and c not in meta_cols and c not in guid_cols and c not in ok_cols
+    ]
+
+    ordered_columns = (
+        time_cols
+        + param_cols
+        + ok_cols
+        + [c for c in meta_cols if c not in time_cols]
+        + guid_cols
+    )
+
+    if not ordered_columns:
+        ordered_columns = columns
+
+    sort_cols = time_cols[:1] + param_cols
+    display_df = df
+    if sort_cols:
+        try:
+            ascending = [False] + [True] * (len(sort_cols) - 1)
+            display_df = df.sort_values(
+                by=sort_cols, ascending=ascending, na_position="last"
+            )
+        except Exception as e:
+            print(f"DashboardView sort fallback: {e}")
+
+    display_df = display_df.reindex(columns=ordered_columns)
+
+    total = len(df)
+    ok_ratio = 0
+    last_result = "N/A"
+    if total > 0 and "ok" in df.columns:
+        ok_bool = df["ok"].fillna(False).astype(bool)
+        ok_count = ok_bool.sum()
+        ok_ratio = int((ok_count / total) * 100)
+        last_result = "OK" if bool(ok_bool.iloc[0]) else "FAIL"
+
+    if last_result == "FAIL":
+        result_type = "fail"
+    elif last_result == "OK":
+        result_type = "ok"
+    else:
+        result_type = "neutral"
+
+    time_column = time_cols[0] if time_cols else None
+
+    return DashboardViewModel(
+        total=total,
+        ok_ratio=ok_ratio,
+        last_result=last_result,
+        result_type=result_type,
+        ordered_columns=ordered_columns,
+        time_column=time_column,
+        display_df=display_df,
+    )
+
+
 def fetch_test_data(
     testtype: str,
     limit: int = 50,
@@ -363,6 +478,7 @@ __all__ = [
     "parse_db_response",
     "fetch_test_data",
     "fetch_all_test_data",
+    "build_dashboard_view_model",
 ]
 
 if __name__ == "__main__":
