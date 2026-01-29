@@ -3403,7 +3403,25 @@ class OptikkoerperView(QWidget):
         self._updating_expo = False
         self._cam_indices = [4, 5]
         self._primary_cam_idx = self._cam_indices[0] if self._cam_indices else 0
+        self._cam_a_idx = self._cam_indices[0] if self._cam_indices else None
+        self._cam_b_idx = self._cam_indices[1] if len(self._cam_indices) > 1 else None
         self._cam_titles = ["Optikkorper Cam A", "Optikkorper Cam B"]
+        self._cam_b_crop_frac = 0.30
+        self._cam_b_track_alpha = 1.0
+        self._cam_b_thresh_ratio = 0.80
+        self._cam_b_thresh_percentile = 99.7
+        self._cam_b_detector = LaserSpotDetector()
+        self._cam_b_last_center = None
+        self._cam_b_last_pattern_center = None
+        self._cam_b_last_pattern_ellipse = None
+        self._cam_b_pattern_alpha = 0.4
+        self._cam_b_cross_alpha = 0.5
+        self._cam_b_cross_max_jump = 0.08
+        self._cam_b_cross_angle = None
+        self._cam_b_inner_circle = None
+        self._cam_b_circle_alpha = 0.25
+        self._cam_a_show_blende1 = False
+        self._cam_a_show_blende2 = False
         self.cam_embed = None
         self._cam_buttons = {}
         self._current_cam_idx = self._primary_cam_idx
@@ -3436,6 +3454,19 @@ class OptikkoerperView(QWidget):
             self._cam_buttons[cam_idx] = btn
         cam_card.add_layout(cam_layout)
         controls_row.addWidget(cam_card, 2)
+        ring_card = Card("CAM A RINGE")
+        ring_layout = QHBoxLayout()
+        ring_layout.setSpacing(6)
+        self.btn_blende1 = ModernButton("Blende 1", "secondary")
+        self.btn_blende1.setMinimumHeight(30)
+        self.btn_blende1.clicked.connect(self._toggle_blende1)
+        ring_layout.addWidget(self.btn_blende1)
+        self.btn_blende2 = ModernButton("Blende 2", "secondary")
+        self.btn_blende2.setMinimumHeight(30)
+        self.btn_blende2.clicked.connect(self._toggle_blende2)
+        ring_layout.addWidget(self.btn_blende2)
+        ring_card.add_layout(ring_layout)
+        controls_row.addWidget(ring_card, 1)
         expo_card = Card("EXPOSURE")
         sl = QVBoxLayout()
         sl.setSpacing(8)
@@ -3532,7 +3563,19 @@ class OptikkoerperView(QWidget):
             self._cam_timeouts[idx] = max(200, self._cam_timeouts[idx] - 100)
         msg = f"Cam {idx}"
         self._log_cam_status(idx, msg)
-        return self._normalize_frame(frame), msg
+        frame = self._normalize_frame(frame)
+        if self._cam_a_idx is not None and idx == self._cam_a_idx:
+            if self._cam_a_show_blende1 or self._cam_a_show_blende2:
+                qimg = self._overlay_cam_a_rings(frame)
+                if qimg is not None:
+                    return qimg, msg
+        if self._cam_b_idx is not None and idx == self._cam_b_idx:
+            frame = self._crop_cam_b_frame(frame)
+            qimg, (cx, cy) = self._track_cam_b_spot(frame)
+            self._cam_b_last_center = (int(cx), int(cy))
+            msg = f"Cam {idx} | {int(cx)}, {int(cy)}"
+            return qimg, msg
+        return frame, msg
     def _normalize_frame(self, frame):
         if frame is None:
             return None
@@ -3546,6 +3589,286 @@ class OptikkoerperView(QWidget):
                 else:
                     frame = np.zeros_like(frame, dtype=np.uint8)
         return frame
+    def _crop_cam_b_frame(self, frame):
+        if frame is None:
+            return None
+        try:
+            h, w = frame.shape[:2]
+            target_frac = self._cam_b_crop_frac
+            crop_w = max(64, int(w * target_frac))
+            crop_h = max(64, int(h * target_frac))
+            cx, cy = w // 2, h // 2
+            x0 = max(0, min(w - crop_w, cx - crop_w // 2))
+            y0 = max(0, min(h - crop_h, cy - crop_h // 2))
+            cropped = frame[y0:y0 + crop_h, x0:x0 + crop_w]
+            return cv2.resize(cropped, (w, h), interpolation=cv2.INTER_CUBIC)
+        except Exception:
+            return frame
+    def _track_cam_b_spot(self, frame):
+        if frame is None:
+            return None, (0, 0)
+        try:
+            if frame.ndim == 3:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = frame
+            cx, cy = self._detect_cam_b_spot_custom(gray, self._cam_b_last_center)
+            h, w = gray.shape[:2]
+            if cx is None or cy is None:
+                if self._cam_b_last_center is not None:
+                    cx, cy = self._cam_b_last_center
+                else:
+                    cx, cy = w // 2, h // 2
+            if self._cam_b_last_center is not None:
+                lx, ly = self._cam_b_last_center
+                alpha = self._cam_b_track_alpha
+                cx = int(round(lx * (1.0 - alpha) + cx * alpha))
+                cy = int(round(ly * (1.0 - alpha) + cy * alpha))
+            px, py, pang = self._detect_cam_b_crosshair_center(gray, mask_center=(cx, cy))
+            if px is None or py is None:
+                if self._cam_b_last_pattern_center is not None:
+                    px, py = self._cam_b_last_pattern_center
+                else:
+                    px, py = w // 2, h // 2
+            if pang is None:
+                pang = self._cam_b_cross_angle
+            if self._cam_b_last_pattern_center is not None:
+                lx, ly = self._cam_b_last_pattern_center
+                alpha = self._cam_b_cross_alpha
+                px = int(round(lx * (1.0 - alpha) + px * alpha))
+                py = int(round(ly * (1.0 - alpha) + py * alpha))
+                max_jump = int(min(w, h) * self._cam_b_cross_max_jump)
+                if max_jump > 0:
+                    px = int(np.clip(px, lx - max_jump, lx + max_jump))
+                    py = int(np.clip(py, ly - max_jump, ly + max_jump))
+            self._cam_b_last_pattern_center = (int(px), int(py))
+            self._cam_b_cross_angle = pang
+            icircle = self._detect_cam_b_inner_circle(gray, px, py)
+            if icircle is None:
+                icircle = self._cam_b_inner_circle
+            elif self._cam_b_inner_circle is not None:
+                (lx, ly, lr) = self._cam_b_inner_circle
+                (nx, ny, nr) = icircle
+                alpha = self._cam_b_circle_alpha
+                icircle = (
+                    int(round(lx * (1.0 - alpha) + nx * alpha)),
+                    int(round(ly * (1.0 - alpha) + ny * alpha)),
+                    int(round(lr * (1.0 - alpha) + nr * alpha)),
+                )
+            self._cam_b_inner_circle = icircle
+            frame_bytes = np.ascontiguousarray(gray).tobytes()
+            qimg = QImage(frame_bytes, w, h, w, QImage.Format_Grayscale8).copy()
+            if qimg.format() != QImage.Format_ARGB32:
+                qimg = qimg.convertToFormat(QImage.Format_ARGB32)
+            painter = QPainter(qimg)
+            try:
+                # Draw circle matched to detected inner ring if available (1.0 mm diameter baseline)
+                if icircle is not None:
+                    icx, icy, ir = icircle
+                    r0 = max(6, int(ir))
+                    cx0, cy0 = icx, icy
+                else:
+                    r0 = max(14, min(w, h) // 30)
+                    cx0, cy0 = px, py
+                eff_r = max(1, int(r0 * 0.9))
+                in_circle = (cx - cx0) * (cx - cx0) + (cy - cy0) * (cy - cy0) <= (eff_r * eff_r)
+                circle_color = "#00ff6a" if in_circle else "#ff2d2d"
+                pen_c = QPen(QColor(circle_color))
+                pen_c.setWidth(4)
+                painter.setPen(pen_c)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(int(cx0 - r0), int(cy0 - r0), int(2 * r0), int(2 * r0))
+                # Additional tolerance circles (scaled from 1.0 mm diameter baseline)
+                r1 = int(round(r0 * 1.6))
+                r2 = int(round(r0 * 2.4))
+                pen_b1 = QPen(QColor("#00b3ff"))
+                pen_b1.setWidth(2)
+                pen_b1.setStyle(Qt.DashLine)
+                painter.setPen(pen_b1)
+                painter.drawEllipse(int(cx0 - r1), int(cy0 - r1), int(2 * r1), int(2 * r1))
+                pen_b2 = QPen(QColor("#ffb000"))
+                pen_b2.setWidth(2)
+                pen_b2.setStyle(Qt.DashLine)
+                painter.setPen(pen_b2)
+                painter.drawEllipse(int(cx0 - r2), int(cy0 - r2), int(2 * r2), int(2 * r2))
+                # Labels
+                painter.setPen(QPen(QColor("#00b3ff")))
+                painter.drawText(int(cx0 + r1 + 6), int(cy0 - 2), "Blende 1 = 1.6 mm")
+                painter.setPen(QPen(QColor("#ffb000")))
+                painter.drawText(int(cx0 + r2 + 6), int(cy0 + 12), "Blende 2 = 2.4 mm")
+            except Exception:
+                pass
+            try:
+                # Mark laser spot with small cross
+                pen_l = QPen(QColor("#ff2d2d"))
+                pen_l.setWidth(3)
+                pen_l.setCapStyle(Qt.RoundCap)
+                painter.setPen(pen_l)
+                size = max(6, min(w, h) // 40)
+                painter.drawLine(max(0, cx - size), cy, min(w, cx + size), cy)
+                painter.drawLine(cx, max(0, cy - size), cx, min(h, cy + size))
+            except Exception:
+                pass
+            try:
+                painter.end()
+            except Exception:
+                pass
+            return qimg, (cx, cy)
+        except Exception:
+            qimg = QImage()
+            return qimg, (0, 0)
+    def _detect_cam_b_spot_custom(self, gray, last_center=None):
+        try:
+            if gray.ndim != 2:
+                return None, None
+            frame = gray
+            if frame.dtype != np.uint8:
+                max_val = float(frame.max()) if frame.size else 0.0
+                if max_val > 0:
+                    frame = (frame.astype(np.float32) / max_val * 255.0).astype(np.uint8)
+                else:
+                    frame = np.zeros_like(frame, dtype=np.uint8)
+            if self._cam_b_detector is None:
+                self._cam_b_detector = LaserSpotDetector()
+            cx, cy = self._cam_b_detector.detect_laser_spot(frame)
+            return int(cx), int(cy)
+        except Exception:
+            return None, None
+    def _detect_cam_b_crosshair_center(self, gray, mask_center=None):
+        try:
+            if gray.ndim != 2:
+                return None, None, None
+            h, w = gray.shape[:2]
+            blur = cv2.GaussianBlur(gray, (0, 0), 1.2)
+            # Normalize to reduce vignette influence
+            denom = cv2.GaussianBlur(blur, (0, 0), 9.0)
+            denom = np.clip(denom.astype(np.float32), 1.0, 255.0)
+            norm = (blur.astype(np.float32) / denom) * 255.0
+            norm = np.clip(norm, 0, 255).astype(np.uint8)
+            inv = 255 - norm
+            # Mask out laser spot so it does not pull crosshair center
+            if mask_center is not None:
+                mx, my = mask_center
+                if mx is not None and my is not None:
+                    rmask = max(12, min(w, h) // 30)
+                    base = int(np.median(inv))
+                    cv2.circle(inv, (int(mx), int(my)), int(rmask), base, -1)
+            # Sum along axes; dark lines become peaks in inv projections
+            col_profile = inv.mean(axis=0)
+            row_profile = inv.mean(axis=1)
+            k = max(7, int(min(h, w) * 0.01) | 1)
+            col_s = cv2.GaussianBlur(col_profile.reshape(1, -1), (k, 1), 0).ravel()
+            row_s = cv2.GaussianBlur(row_profile.reshape(-1, 1), (1, k), 0).ravel()
+            cx = int(np.argmax(col_s))
+            cy = int(np.argmax(row_s))
+            # Validate contrast: ensure lines are meaningfully darker
+            if col_s.max() < np.median(col_s) * 1.05:
+                return None, None, None
+            if row_s.max() < np.median(row_s) * 1.05:
+                return None, None, None
+            ang = self._estimate_crosshair_angle(inv, cx, cy)
+            return cx, cy, ang
+        except Exception:
+            return None, None, None
+    def _estimate_crosshair_angle(self, inv, cx, cy):
+        try:
+            h, w = inv.shape[:2]
+            win = max(40, int(min(h, w) * 0.18))
+            x0 = max(0, cx - win)
+            y0 = max(0, cy - win)
+            x1 = min(w, cx + win)
+            y1 = min(h, cy + win)
+            roi = inv[y0:y1, x0:x1]
+            edges = cv2.Canny(roi, 30, 90, L2gradient=True)
+            lines = cv2.HoughLinesP(
+                edges,
+                1,
+                np.pi / 180.0,
+                threshold=60,
+                minLineLength=max(20, int(min(h, w) * 0.12)),
+                maxLineGap=max(4, int(min(h, w) * 0.02)),
+            )
+            if lines is None:
+                return None
+            angles = []
+            for l in lines[:, 0]:
+                x1, y1, x2, y2 = l
+                dx = x2 - x1
+                dy = y2 - y1
+                if dx == 0 and dy == 0:
+                    continue
+                ang = np.arctan2(dy, dx)
+                # fold to [0, pi)
+                if ang < 0:
+                    ang += np.pi
+                angles.append(ang)
+            if len(angles) < 4:
+                return None
+            angles = np.array(angles, dtype=np.float32)
+            # Pick dominant angle (longest lines)
+            hist, edges = np.histogram(angles, bins=90, range=(0, np.pi))
+            peak = np.argmax(hist)
+            ang = float((edges[peak] + edges[peak + 1]) / 2.0)
+            return ang
+        except Exception:
+            return None
+    def _detect_cam_b_inner_circle(self, gray, cx, cy):
+        try:
+            h, w = gray.shape[:2]
+            min_dim = min(w, h)
+            win = int(min_dim * 0.45)
+            x0 = max(0, int(cx) - win)
+            y0 = max(0, int(cy) - win)
+            x1 = min(w, int(cx) + win)
+            y1 = min(h, int(cy) + win)
+            roi = gray[y0:y1, x0:x1]
+            if roi.size == 0:
+                return None
+            blur = cv2.GaussianBlur(roi, (0, 0), 1.2)
+            # Normalize to reduce vignette and uneven illumination
+            denom = cv2.GaussianBlur(blur, (0, 0), 9.0)
+            denom = np.clip(denom.astype(np.float32), 1.0, 255.0)
+            norm = (blur.astype(np.float32) / denom) * 255.0
+            norm = np.clip(norm, 0, 255).astype(np.float32)
+            cx_r = float(cx - x0)
+            cy_r = float(cy - y0)
+            yy, xx = np.indices(blur.shape)
+            rs = np.sqrt((xx - cx_r) ** 2 + (yy - cy_r) ** 2)
+            rmin = max(6, int(min_dim * 0.04))
+            rmax = max(rmin + 4, int(min_dim * 0.18))
+            # mask out crosshair lines around center
+            line_w = max(2, int(min_dim * 0.005))
+            mask = (rs >= rmin) & (rs <= rmax)
+            mask &= (np.abs(xx - cx_r) > line_w) & (np.abs(yy - cy_r) > line_w)
+            if mask.sum() < 800:
+                return None
+            # Radial intensity profile (mean)
+            rs_int = rs[mask].astype(np.int32)
+            vals = norm[mask].astype(np.float32)
+            max_bin = rmax + 1
+            sums = np.bincount(rs_int, weights=vals, minlength=max_bin)
+            counts = np.bincount(rs_int, minlength=max_bin)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                prof = sums / np.clip(counts, 1, None)
+            prof = prof[rmin:rmax + 1]
+            # smooth profile
+            k = max(7, int(min_dim * 0.01) | 1)
+            prof_s = cv2.GaussianBlur(prof.reshape(1, -1), (k, 1), 0).ravel()
+            # use early radii as bright baseline
+            head = prof_s[: max(3, int(len(prof_s) * 0.12))]
+            base = float(np.percentile(head, 80)) if head.size else float(np.median(prof_s))
+            # find first pronounced dark ring (local minimum)
+            min_idx = None
+            for i in range(1, len(prof_s) - 1):
+                if prof_s[i] < prof_s[i - 1] and prof_s[i] < prof_s[i + 1] and prof_s[i] < base * 0.88:
+                    min_idx = i
+                    break
+            if min_idx is None:
+                min_idx = int(np.argmin(prof_s))
+            r = int(rmin + min_idx)
+            return int(cx), int(cy), r
+        except Exception:
+            return None
     def _init_exposure_controls(self, cam):
         if cam is None:
             return
@@ -3659,6 +3982,71 @@ class OptikkoerperView(QWidget):
                 btn.set_variant("primary")
             else:
                 btn.set_variant("secondary")
+        self._update_cam_a_ring_buttons()
+    def _update_cam_a_ring_buttons(self):
+        if hasattr(self, "btn_blende1"):
+            self.btn_blende1.set_variant("primary" if self._cam_a_show_blende1 else "secondary")
+        if hasattr(self, "btn_blende2"):
+            self.btn_blende2.set_variant("primary" if self._cam_a_show_blende2 else "secondary")
+    def _toggle_blende1(self):
+        self._cam_a_show_blende1 = not self._cam_a_show_blende1
+        self._update_cam_a_ring_buttons()
+    def _toggle_blende2(self):
+        self._cam_a_show_blende2 = not self._cam_a_show_blende2
+        self._update_cam_a_ring_buttons()
+    def _overlay_cam_a_rings(self, frame):
+        if frame is None:
+            return None
+        try:
+            if frame.ndim == 3:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = frame
+            h, w = gray.shape[:2]
+            px, py, _ang = self._detect_cam_b_crosshair_center(gray, mask_center=None)
+            if px is None or py is None:
+                px, py = w // 2, h // 2
+            icircle = self._detect_cam_b_inner_circle(gray, px, py)
+            if icircle is not None:
+                cx0, cy0, r0 = icircle
+                r0 = max(6, int(r0))
+            else:
+                cx0, cy0 = px, py
+                r0 = max(14, min(w, h) // 30)
+            frame_bytes = np.ascontiguousarray(gray).tobytes()
+            qimg = QImage(frame_bytes, w, h, w, QImage.Format_Grayscale8).copy()
+            if qimg.format() != QImage.Format_ARGB32:
+                qimg = qimg.convertToFormat(QImage.Format_ARGB32)
+            painter = QPainter(qimg)
+            try:
+                pen_base = QPen(QColor("#00ff6a"))
+                pen_base.setWidth(3)
+                painter.setPen(pen_base)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(int(cx0 - r0), int(cy0 - r0), int(2 * r0), int(2 * r0))
+                if self._cam_a_show_blende1:
+                    r1 = int(round(r0 * 1.6))
+                    pen_b1 = QPen(QColor("#00b3ff"))
+                    pen_b1.setWidth(2)
+                    pen_b1.setStyle(Qt.DashLine)
+                    painter.setPen(pen_b1)
+                    painter.drawEllipse(int(cx0 - r1), int(cy0 - r1), int(2 * r1), int(2 * r1))
+                if self._cam_a_show_blende2:
+                    r2 = int(round(r0 * 2.4))
+                    pen_b2 = QPen(QColor("#ffb000"))
+                    pen_b2.setWidth(2)
+                    pen_b2.setStyle(Qt.DashLine)
+                    painter.setPen(pen_b2)
+                    painter.drawEllipse(int(cx0 - r2), int(cy0 - r2), int(2 * r2), int(2 * r2))
+            except Exception:
+                pass
+            try:
+                painter.end()
+            except Exception:
+                pass
+            return qimg
+        except Exception:
+            return None
 class IPCView(QWidget):
     """Graphical In Process Control View (connected to DB)."""
     def __init__(self, parent=None):
