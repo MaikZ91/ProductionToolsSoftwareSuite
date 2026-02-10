@@ -9,11 +9,11 @@ import subprocess
 import sys
 import time
 import threading
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
-_backend_dir = pathlib.Path(__file__).resolve().parent / "Resolve Hardware Backend"
-if _backend_dir.is_dir():
-    sys.path.insert(0, str(_backend_dir))
+
 import pandas as pd
 pd.set_option('future.no_silent_downcasting', True)
 import numpy as np
@@ -21,12 +21,12 @@ import cv2
 from PySide6.QtCore import (
     Qt, QTimer, QPoint, QRect, Signal,
     QObject, QThread, QEvent,
-    QMetaObject
+    QMetaObject, QPropertyAnimation, QEasingCurve
 )
 from PySide6.QtGui import (
     QColor, QFont, QPainter, QPen, QBrush, QIcon,
     QPainterPath, QPixmap, QImage,
-    QFontMetrics
+    QFontMetrics, QTextCursor
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QGridLayout, QSlider, QSizePolicy, QScrollArea, QAbstractItemView,
     QProgressBar, QMessageBox, QComboBox, QToolButton, QDoubleSpinBox, QSpinBox,
     QDialog, QCheckBox, QFormLayout, QInputDialog, QStyledItemDelegate,
-    QStyle
+    QStyle, QFileDialog
 )
 # Matplotlib integration
 import matplotlib
@@ -43,17 +43,17 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.figure import Figure
 from matplotlib import image as mpimg
-import autofocus
-from autofocus import IdsCam, LaserSpotDetector, LiveLaserController, paint_laser_overlay
-from commonIE import dbConnector
-from commonIE import miltenyiBarcode
+
 import datenbank as db
-from z_trieb import ZTriebController
-import gitterschieber as gs
-import stage_control as resolve_stage
-import stage_test as blaze_stage_test
-from ie_Framework.Hardware.Camera.panda import PcoCameraBackend
+from ie_Framework.Utility import miltenyiBarcode
+from ie_Framework.DB import dbConnector
+from ie_Framework.Tools.Resolve import (autofocus,z_trieb,gitterschieber,xy_stage)
+from ie_Framework.Tools.Blaze import xy_stage as blaze_stage_test
+from ie_Framework.Hardware.Camera.pco_panda_camera import PcoCameraBackend
 from ie_Framework.Algorithm.laser_spot_detection import LaserSpotDetector as StageLaserSpotDetector
+
+# Keep legacy in-file naming used across this module.
+resolve_stage = xy_stage
 # ========================== DATENBANK / INFRA ==========================
 DASHBOARD_WIDGET_CLS, _DASHBOARD_IMPORT_ERROR = (None, None)
 # --- THEME CONFIGURATION ---
@@ -93,6 +93,126 @@ _DEFAULT_PDF_COLORS = {
 
 _PDF_COLORS = dict(_DEFAULT_PDF_COLORS)
 _PDF_DEFAULT_DIR_PROVIDER = None
+_LAST_PDF_UPLOAD_GUID = None
+_LAST_PDF_UPLOAD_TESTTYPE = None
+_PDF_DB_TESTTYPE_CANDIDATES = [
+    "stage_test",
+    "gitterschieber_tool",
+    "kleberoboter",
+    "laserscan_fine_lens",
+    "laserscan_fine_prisma",
+]
+
+
+def _find_guid_column_name(columns) -> str | None:
+    for col in columns:
+        norm = str(col).lower().replace("_", "").replace("-", "")
+        if "testguid" in norm:
+            return str(col)
+    for col in columns:
+        norm = str(col).lower().replace("_", "").replace("-", "")
+        if "guid" in norm and "test" in norm:
+            return str(col)
+    return None
+
+
+def _find_time_column_name(columns) -> str | None:
+    priorities = ("starttest", "endtest", "timestamp", "datetime", "time", "date")
+    lowered = [(str(c), str(c).lower()) for c in columns]
+    for key in priorities:
+        for original, low in lowered:
+            if key in low:
+                return original
+    return None
+
+
+def _to_dataframe(raw):
+    if isinstance(raw, tuple) and len(raw) >= 2:
+        # dbConnector often returns (status, dataframe_or_text)
+        raw = raw[1]
+    try:
+        return db.parse_db_response(raw)
+    except Exception:
+        if isinstance(raw, pd.DataFrame):
+            return raw
+        return pd.DataFrame()
+
+
+def _extract_latest_test_guid(conn, preferred_testtype: str | None = None) -> str | None:
+    candidates = []
+    if preferred_testtype:
+        candidates.append(preferred_testtype)
+    for t in _PDF_DB_TESTTYPE_CANDIDATES:
+        if t not in candidates:
+            candidates.append(t)
+
+    best_guid = None
+    best_ts = pd.Timestamp.min
+    for testtype in candidates:
+        try:
+            raw = conn.getLastTests(5, testtype)
+            df = _to_dataframe(raw)
+            if df.empty:
+                continue
+            guid_col = _find_guid_column_name(df.columns)
+            if not guid_col:
+                continue
+            time_col = _find_time_column_name(df.columns)
+            if time_col and time_col in df.columns:
+                ts_series = pd.to_datetime(df[time_col], errors="coerce")
+                idx = ts_series.fillna(pd.Timestamp.min).idxmax()
+                row = df.loc[idx]
+                ts = ts_series.loc[idx]
+            else:
+                row = df.iloc[0]
+                ts = pd.Timestamp.min
+            guid = str(row.get(guid_col, "")).strip()
+            if not guid:
+                continue
+            if ts >= best_ts:
+                best_ts = ts
+                best_guid = guid
+        except Exception:
+            continue
+    return best_guid
+
+
+def _find_user_column_name(columns) -> str | None:
+    for col in columns:
+        low = str(col).lower()
+        if low == "user" or "employee" in low:
+            return str(col)
+    return None
+
+#Aktuell: TEST_GUID als Rückgabeparameter von getLastTests
+def upload_pdf_to_db_simple(pdf):
+    with dbConnector.connection() as c:                     # DB connect (auto-disconnect)
+        now = datetime.datetime.now()                        # Zeitstempel
+        c.sendData(now, now, 0, "gitterschieber_tool",{"particle_count": 0, "justage_angle": 0.0},miltenyiBarcode.mBarcode(str(db.DUMMY_BARCODE)),"pdf_upload")# Test anlegen (GUID entsteht serverseitig)
+        df = _to_dataframe(c.getLastTests(1, "gitterschieber_tool"))  # letzten Test holen
+        Test_GUID = str(df.iloc[0]["Test_GUID"]).strip()             # Test_GUID extrahieren
+        c.saveFile(Test_GUID, str(pdf))                              # PDF an Test hängen
+        return Test_GUID                                             # Test_GUID zurückgeben
+
+
+def _upload_pdf_to_db_job(pdf_path: pathlib.Path | str, preferred_testtype: str | None = None):
+    guid = upload_pdf_to_db_simple(pdf_path)
+    if guid:
+        global _LAST_PDF_UPLOAD_GUID, _LAST_PDF_UPLOAD_TESTTYPE
+        _LAST_PDF_UPLOAD_GUID = guid
+        _LAST_PDF_UPLOAD_TESTTYPE = "gitterschieber_tool"
+
+
+def _upload_pdf_to_db_async(pdf_path: pathlib.Path | str, test_guid: str | None = None, preferred_testtype: str | None = None):
+    # Kept for call compatibility; test_guid is ignored by the simplified upload flow.
+    threading.Thread(
+        target=_upload_pdf_to_db_job,
+        kwargs={
+            "pdf_path": pdf_path,
+            "preferred_testtype": preferred_testtype,
+        },
+        daemon=True,
+    ).start()
 
 
 class PdfModule:
@@ -279,20 +399,42 @@ class PdfModule:
         return {"type": "text", "text": str(item)}
 
     @staticmethod
-    def write_pdf(pdf_path: pathlib.Path | str, items):
-        PdfModule.report(pdf_path, items)
+    def write_pdf(
+        pdf_path: pathlib.Path | str,
+        items,
+        db_test_type: str | None = None,
+        db_test_guid: str | None = None,
+    ):
+        PdfModule.report(
+            pdf_path,
+            items,
+            db_test_type=db_test_type,
+            db_test_guid=db_test_guid,
+        )
 
     @staticmethod
-    def report(pdf_path: pathlib.Path | str, items):
+    def report(
+        pdf_path: pathlib.Path | str,
+        items,
+        db_test_type: str | None = None,
+        db_test_guid: str | None = None,
+        upload_to_db: bool = True,
+    ):
         if not isinstance(items, (list, tuple)):
             items = [items]
         with PdfPages(str(pdf_path)) as pdf:
             for item in items:
                 page = PdfModule._normalize_item(item)
                 PdfModule._render_page(pdf, page)
+        if upload_to_db:
+            _upload_pdf_to_db_async(
+                pdf_path=pdf_path,
+                test_guid=db_test_guid,
+                preferred_testtype=db_test_type,
+            )
 
     @staticmethod
-    def save_camera_pdf_capture(parent, frame_provider, filename_prefix, page_title, header_lines_provider=None):
+    def save_camera_pdf_capture(parent, frame_provider, filename_prefix, page_title, header_lines_provider=None, db_test_type: str = "gitterschieber_tool"):
         frame = frame_provider()
         if frame is None:
             QMessageBox.warning(parent, "PDF speichern", "Kein Bild verfuegbar.")
@@ -307,7 +449,7 @@ class PdfModule:
             "title": page_title,
             "header_lines": header_lines,
             "image": frame,
-        }])
+        }], db_test_type=db_test_type)
         QMessageBox.information(parent, "PDF gespeichert", f"Report gespeichert:\n{path_str}")
 
     @staticmethod
@@ -356,7 +498,7 @@ class PdfModule:
         return "\n".join(text_lines), None
 
     @staticmethod
-    def save_text_image_pdf(parent, image_provider, text_provider, filename_prefix, page_title=None):
+    def save_text_image_pdf(parent, image_provider, text_provider, filename_prefix, page_title=None, db_test_type: str = "gitterschieber_tool"):
         image = image_provider()
         if image is None:
             QMessageBox.warning(parent, "PDF speichern", "Kein Bild verfuegbar.")
@@ -374,7 +516,7 @@ class PdfModule:
             "title": page_title,
             "text": text,
             "image": image,
-        }])
+        }], db_test_type=db_test_type)
         QMessageBox.information(parent, "PDF gespeichert", f"Report gespeichert:\n{path_str}")
 
 PdfModule.set_theme(COLORS)
@@ -1161,6 +1303,22 @@ class DashboardTableDelegate(QStyledItemDelegate):
             painter.drawRoundedRect(pill, ph // 2, ph // 2)
             painter.setPen(QColor(fg))
             painter.drawText(pill, Qt.AlignCenter, pill_text)
+        elif col_name == "media":
+            is_yes = str(text).strip().lower() in {"ja", "yes", "true", "1"}
+            bg = hex_to_rgba(COLORS['success'], 0.18) if is_yes else hex_to_rgba(COLORS['danger'], 0.18)
+            fg = COLORS['success'] if is_yes else COLORS['danger']
+            pill_text = "Ja" if is_yes else "Nein"
+            fm = QFontMetrics(option.font)
+            pw = fm.horizontalAdvance(pill_text) + 16
+            ph = fm.height() + 6
+            px = rect.center().x() - pw // 2
+            py = rect.center().y() - ph // 2
+            pill = QRect(px, py, pw, ph)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(bg))
+            painter.drawRoundedRect(pill, ph // 2, ph // 2)
+            painter.setPen(QColor(fg))
+            painter.drawText(pill, Qt.AlignCenter, pill_text)
         else:
             color = COLORS['text_muted'] if "guid" in col_name else COLORS['text']
             painter.setPen(QColor(color))
@@ -1176,6 +1334,7 @@ class DashboardView(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(f"background-color: {COLORS['bg']};")
         self._is_fetching = False
+        self._chat_data_cache = {}
         self.data_updated.connect(self._on_data_received)
         # Main layout for the entire view (Vertical stack)
         main_layout = QVBoxLayout(self)
@@ -1245,8 +1404,8 @@ class DashboardView(QWidget):
         entry_row.addStretch()
         al.addLayout(entry_row)
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["Time", "Barcode", "User", "Status", "Details"])
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["Time", "Barcode", "User", "Status", "Media", "Details"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -1282,6 +1441,7 @@ class DashboardView(QWidget):
         self.table.setSortingEnabled(True)
         self.table.setItemDelegate(DashboardTableDelegate(self.table))
         self.table.setObjectName("Dash_Table")
+        self.table.itemDoubleClicked.connect(self._on_activity_item_double_clicked)
         al.addWidget(self.table)
         activity_card.add_layout(al)
         main_layout.addWidget(activity_card, 2)
@@ -1384,6 +1544,7 @@ class DashboardView(QWidget):
         if not self.timer.isActive():
             self.timer.start(10000)
         self.update_data()
+
     def update_data(self):
         """Starts a background thread to fetch data."""
         if self._is_fetching:
@@ -1396,7 +1557,9 @@ class DashboardView(QWidget):
         self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['text_muted']}; font-weight: 800; font-size: 11px; margin-left: 10px; }}")
         def task():
             try:
-                df, connected = db.fetch_test_data(testtype, limit=20)
+                # Dashboard should prefer DB data so uploaded files map to visible test_guid rows.
+                # Gateway remains a fallback inside fetch_test_data() on DB errors.
+                df, connected = db.fetch_test_data(testtype, limit=20, prefer_gateway=False)
                 self.data_updated.emit(df, connected)
             except Exception as e:
                 print(f"Background Fetch Error: {e}")
@@ -1424,15 +1587,53 @@ class DashboardView(QWidget):
             item.setForeground(QBrush(QColor(COLORS['danger'])))
             item.setFont(QFont(FONTS['ui'], 11, QFont.Bold))
             self.table.setItem(0, 0, item)
-            for col in range(1, 5):
+            for col in range(1, max(1, self.table.columnCount())):
                 self.table.setItem(0, col, QTableWidgetItem(""))
-            self.table.setSpan(0, 0, 1, 5) # Span across all columns
+            self.table.setSpan(0, 0, 1, max(1, self.table.columnCount())) # Span across all columns
             return
         else:
             self.status_indicator.setText(f"● LIVE ({source_label})")
             self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['success']}; font-weight: 800; font-size: 11px; text-align: left; padding-left: 5px; }}")
             # Clear potential spans from error state
             self.table.clearSpans()
+        # Add media indicator column (Ja/Nein) for each row based on file attachments in DB.
+        df = df.copy()
+        df["Media"] = "Nein"
+        if not df.empty:
+            guid_col_name = _find_guid_column_name(df.columns)
+            media_lookup = {}
+            if guid_col_name:
+                unique_guids = []
+                for val in df[guid_col_name].tolist():
+                    guid = "" if pd.isna(val) else str(val).strip()
+                    if guid and guid not in media_lookup:
+                        unique_guids.append(guid)
+                if unique_guids:
+                    conn = None
+                    try:
+                        conn = dbConnector.connection()
+                        conn.connect()
+                        for guid in unique_guids:
+                            has_media = False
+                            try:
+                                raw = conn.getFileListFromTest(guid)
+                                files_df = _to_dataframe(raw)
+                                has_media = not files_df.empty
+                            except Exception:
+                                has_media = False
+                            media_lookup[guid] = has_media
+                    except Exception as exc:
+                        print(f"Dashboard media lookup error: {exc}")
+                    finally:
+                        if conn:
+                            try:
+                                conn.disconnect()
+                            except Exception:
+                                pass
+                df["Media"] = df[guid_col_name].apply(
+                    lambda v: "Ja" if media_lookup.get("" if pd.isna(v) else str(v).strip(), False) else "Nein"
+                )
+        self._chat_data_cache[testtype] = df.copy()
         # Update KPIs
         total = len(df)
         ok_ratio = 0
@@ -1500,6 +1701,14 @@ class DashboardView(QWidget):
                 pass
         if not ordered_columns:
             ordered_columns = columns
+        if "Media" in columns:
+            ordered_columns = [c for c in ordered_columns if c != "Media"]
+            insert_pos = 1 if ordered_columns else 0
+            for idx, col_name in enumerate(ordered_columns):
+                if str(col_name).lower() in {"ok", "status", "result"}:
+                    insert_pos = idx + 1
+                    break
+            ordered_columns.insert(insert_pos, "Media")
         # Sort data by time (desc) then parameters (asc) to rank newest first
         sort_cols = time_cols[:1] + param_cols
         display_df = df
@@ -1510,12 +1719,24 @@ class DashboardView(QWidget):
             except Exception as e:
                 print(f"DashboardView sort fallback: {e}")
         self.table.clear()
+        if "Media" in display_df.columns and "Media" not in ordered_columns:
+            ordered_columns = list(ordered_columns) + ["Media"]
+        if "Media" not in ordered_columns:
+            print(f"[Dashboard] WARN: Media column missing in ordered_columns={ordered_columns}")
         self.table.setColumnCount(len(ordered_columns))
         self.table.setHorizontalHeaderLabels([str(c) for c in ordered_columns])
         self.table.setRowCount(len(display_df))
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        if "Media" in ordered_columns:
+            media_index = ordered_columns.index("Media")
+            self.table.setColumnHidden(media_index, False)
+            self.table.setColumnWidth(media_index, 84)
         for i, (_, row) in enumerate(display_df.iterrows()):
+            row_test_guid = ""
+            if guid_col_name and guid_col_name in display_df.columns:
+                guid_val = row.get(guid_col_name, "")
+                row_test_guid = "" if pd.isna(guid_val) else str(guid_val).strip()
             for j, col in enumerate(ordered_columns):
                 val = row.get(col)
                 if pd.isna(val):
@@ -1525,6 +1746,10 @@ class DashboardView(QWidget):
                 else:
                     text = str(val)
                 item = QTableWidgetItem(text)
+                if str(col).strip().lower() == "media":
+                    # Keep the DB key on the clickable media cell so downloads
+                    # keep working even when columns are hidden/reordered/sorted.
+                    item.setData(Qt.UserRole, row_test_guid)
                 item.setFont(QFont(FONTS['ui'], 10))
                 self.table.setItem(i, j, item)
         # Default sort indicator on time column if available
@@ -1534,8 +1759,154 @@ class DashboardView(QWidget):
             self.table.sortItems(time_index, Qt.DescendingOrder)
         else:
             self.table.setSortingEnabled(True)
+        if self.table.rowCount() > 0:
+            selected = False
+            target_guid = (_LAST_PDF_UPLOAD_GUID or "").strip()
+            target_testtype = (_LAST_PDF_UPLOAD_TESTTYPE or "").strip()
+            if target_guid and (not target_testtype or target_testtype == testtype):
+                guid_col = self._find_guid_column_index()
+                if guid_col >= 0:
+                    for r in range(self.table.rowCount()):
+                        item = self.table.item(r, guid_col)
+                        if item and item.text().strip() == target_guid:
+                            self.table.selectRow(r)
+                            selected = True
+                            break
+            if not selected:
+                self.table.selectRow(0)
         # Also sync entry stack index
         self.entry_stack.setCurrentIndex(self.combo_testtype.currentIndex())
+
+    def get_chat_data_cache(self) -> dict:
+        return {k: v.copy() for k, v in self._chat_data_cache.items()}
+
+    def _find_column_index_by_header(self, header_name: str) -> int:
+        target = str(header_name).strip().lower()
+        for i in range(self.table.columnCount()):
+            header_item = self.table.horizontalHeaderItem(i)
+            if not header_item:
+                continue
+            if header_item.text().strip().lower() == target:
+                return i
+        return -1
+
+    def _find_guid_column_index(self) -> int:
+        for i in range(self.table.columnCount()):
+            header_item = self.table.horizontalHeaderItem(i)
+            if not header_item:
+                continue
+            norm = header_item.text().lower().replace("_", "").replace("-", "")
+            if "testguid" in norm or ("guid" in norm and "test" in norm):
+                return i
+        return -1
+
+    def _download_media_for_row(self, row: int, preferred_test_guid: str | None = None):
+        test_guid = (preferred_test_guid or "").strip()
+        if not test_guid:
+            guid_col = self._find_guid_column_index()
+            if guid_col >= 0 and row >= 0:
+                guid_item = self.table.item(row, guid_col)
+                test_guid = guid_item.text().strip() if guid_item else ""
+        if not test_guid:
+            QMessageBox.warning(self, "Download", "Datensatz hat keine test_guid.")
+            return
+        conn = None
+        try:
+            conn = dbConnector.connection()
+            conn.connect()
+            raw = conn.getFileListFromTest(test_guid)
+            if isinstance(raw, tuple) and len(raw) >= 2 and int(raw[0]) != 0:
+                QMessageBox.warning(self, "Download", "Dateiliste konnte nicht geladen werden.")
+                return
+            file_df = _to_dataframe(raw)
+        except Exception as exc:
+            print(f"Dashboard file list error: {exc}")
+            QMessageBox.critical(self, "Download Fehler", f"Dateiliste konnte nicht geladen werden:\n{exc}")
+            return
+        finally:
+            if conn:
+                try:
+                    conn.disconnect()
+                except Exception:
+                    pass
+        if file_df.empty:
+            QMessageBox.information(self, "Download", "Kein Media verfuegbar.")
+            return
+        cols = list(file_df.columns)
+        id_col = None
+        name_col = None
+        for c in cols:
+            low = str(c).lower()
+            if id_col is None and "file" in low and "id" in low:
+                id_col = c
+            if name_col is None and ("filename" in low or ("file" in low and "name" in low) or low == "name"):
+                name_col = c
+        if id_col is None and cols:
+            id_col = cols[0]
+        if name_col is None:
+            name_col = id_col
+        latest_row = file_df.iloc[0]
+        if id_col in file_df.columns:
+            try:
+                sort_series = pd.to_numeric(file_df[id_col], errors="coerce")
+                if sort_series.notna().any():
+                    latest_row = file_df.loc[sort_series.idxmax()]
+            except Exception:
+                pass
+        file_id_raw = latest_row.get(id_col, "")
+        file_name_raw = latest_row.get(name_col, "") if name_col is not None else ""
+        file_id_text = "" if pd.isna(file_id_raw) else str(file_id_raw).strip()
+        file_name_text = "" if pd.isna(file_name_raw) else str(file_name_raw).strip()
+        if not file_name_text:
+            file_name_text = f"file_{file_id_text or 'download'}.bin"
+        try:
+            file_id_int = int(float(file_id_text))
+        except Exception:
+            QMessageBox.warning(self, "Download", "Ungueltige File-ID fuer Download.")
+            return
+        self._download_file_from_db(file_id_int, file_name_text)
+
+    def _on_activity_item_double_clicked(self, item: QTableWidgetItem):
+        if item is None:
+            return
+        media_col = self._find_column_index_by_header("Media")
+        if media_col < 0 or item.column() != media_col:
+            return
+        media_text = item.text().strip().lower()
+        if media_text not in {"ja", "yes", "true", "1"}:
+            return
+        test_guid = item.data(Qt.UserRole)
+        test_guid = "" if test_guid is None else str(test_guid).strip()
+        self._download_media_for_row(item.row(), preferred_test_guid=test_guid)
+    def _download_file_from_db(self, file_id: int, filename_hint: str):
+        conn = None
+        try:
+            conn = dbConnector.connection()
+            conn.connect()
+            file_bytes = conn.downloadFile(int(file_id))
+            if not file_bytes:
+                QMessageBox.warning(self, "Download", "Leere Datei oder Download fehlgeschlagen.")
+                return
+            default_name = filename_hint.strip() or f"file_{file_id}.bin"
+            save_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Datei speichern",
+                default_name,
+                "Alle Dateien (*.*)",
+            )
+            if not save_path:
+                return
+            with open(save_path, "wb") as f:
+                f.write(file_bytes)
+            QMessageBox.information(self, "Download", f"Datei gespeichert:\n{save_path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Download Fehler", f"Datei konnte nicht geladen werden:\n{exc}")
+        finally:
+            if conn:
+                try:
+                    conn.disconnect()
+                except Exception:
+                    pass
     def clear_entry_fields(self):
         self.le_barcode.clear()
         self.le_user.clear()
@@ -1840,7 +2211,7 @@ class PcoLaserController(QObject):
     """Live controller for PCO Panda cameras with laser overlay support."""
     frameReady = Signal(QImage)
     centerChanged = Signal(int, int)
-    def __init__(self, cam_index: int, detector: LaserSpotDetector, parent=None):
+    def __init__(self, cam_index: int, detector: StageLaserSpotDetector, parent=None):
         super().__init__(parent)
         self.cam_index = cam_index
         self.detector = detector
@@ -1889,7 +2260,7 @@ class PcoLaserController(QObject):
             frame = self._backend.get_frame()
             if frame is None:
                 return
-            qimg, (cx, cy) = paint_laser_overlay(
+            qimg, (cx, cy) = autofocus.paint_laser_overlay(
                 frame,
                 self.detector,
                 ref_point=self._ref_point,
@@ -1940,7 +2311,7 @@ class AutofocusView(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(f"background-color: {COLORS['bg']};")
         self._current_dev_idx = 0
-        self._detector = LaserSpotDetector()
+        self._detector = StageLaserSpotDetector()
         self._laser = None
         self._last_center = None
         self._last_frame_size = None
@@ -2033,6 +2404,7 @@ class AutofocusView(QWidget):
             lambda: PdfModule.build_alignment_report(self._last_center, self._last_frame_size, self._laser),
             "autofocus_alignment",
             "Autofocus Alignment Report",
+            db_test_type="gitterschieber_tool",
         ))
         al.addWidget(self.btn_save_align_pdf)
         self.lbl_ref = QLabel("Ref: —")
@@ -2169,7 +2541,7 @@ class AutofocusView(QWidget):
                 cam_index = 0 if idx == -1 else 1
                 self._laser = PcoLaserController(cam_index, self._detector, parent=self)
             else:
-                self._laser = LiveLaserController(idx, self._detector, parent=self)
+                self._laser = autofocus.LiveLaserController(idx, self._detector, parent=self)
             self._laser.frameReady.connect(self._on_laser_frame)
             self._laser.centerChanged.connect(self._on_laser_center)
             self._laser.start()
@@ -2365,7 +2737,7 @@ class ZTriebView(QWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(f"background-color: {COLORS['bg']};")
-        self.controller = ZTriebController()
+        self.controller = z_trieb.ZTriebController()
         self.executor = ThreadPoolExecutor(max_workers=1)
         self._dauer_future = None
         self._stop_event = None
@@ -2854,7 +3226,12 @@ class StageControlView(QWidget):
         except Exception as e:
             print(f"Report Error: {e}")
         meas_ok = (self._meas_max_um <= self.MEAS_MAX_UM)
-        msg = f"Kalibriermessung beendet.\nMax. Abweichung: {self._meas_max_um:.2f} µm\nLimit: {self.MEAS_MAX_UM:.1f} µm -> {'OK' if meas_ok else 'FEHLER'}"
+        msg = (
+            f"Kalibriermessung beendet.\n"
+            f"Daten gespeichert: lokal und in DB.\n"
+            f"Max. Abweichung: {self._meas_max_um:.2f} µm\n"
+            f"Limit: {self.MEAS_MAX_UM:.1f} µm -> {'OK' if meas_ok else 'FEHLER'}"
+        )
         QMessageBox.information(self, "Test Beendet", msg)
     # --- Endurance Test ---
     def toggle_endurance_test(self):
@@ -2998,8 +3375,13 @@ class StageControlView(QWidget):
         except Exception as e:
             print(f"Report Update Error: {e}")
         dur_ok = (self._dur_max_um <= limit)
-        msg = f"Endurance test completed.\nMax deviation: {self._dur_max_um:.2f} µm\nLimit: {limit:.1f} µm -> {'OK' if dur_ok else 'FAIL'}"
-        QMessageBox.information(self, "Endurance Done", msg)
+        msg = (
+            f"Dauertest beendet.\n"
+            f"Daten gespeichert: lokal und in DB.\n"
+            f"Max. Abweichung: {self._dur_max_um:.2f} µm\n"
+            f"Limit: {limit:.1f} µm -> {'OK' if dur_ok else 'FEHLER'}"
+        )
+        QMessageBox.information(self, "Test Beendet", msg)
     def _on_thr_finished(self):
         self.running = False
         self.dauer_running = False
@@ -3074,7 +3456,7 @@ class StageControlView(QWidget):
             pages.append({"type": "image_grid", "title": "Diagramme", "paths": chart_paths, "cols": 2})
         if image_paths:
             pages.append({"type": "image_grid", "title": "Bilder", "paths": image_paths, "cols": 2})
-        PdfModule.write_pdf(pdf_path, pages)
+        PdfModule.write_pdf(pdf_path, pages, db_test_type="gitterschieber_tool")
     def _on_error(self, msg):
         QMessageBox.critical(self, "Error", msg)
         self.running = False
@@ -3132,7 +3514,7 @@ class BlazeStageTestView(QWidget):
         layout.setSpacing(12)
         left_col = QVBoxLayout()
         left_col.setSpacing(10)
-        setup_card = Card("Blaze Stage Test")
+        setup_card = Card("XYZ Satge Blaze")
         setup_card.set_compact()
         form = QGridLayout()
         form.setHorizontalSpacing(12)
@@ -3344,7 +3726,7 @@ class BlazeStageTestView(QWidget):
         except Exception as exc:
             self.backend_future = None
             self.lbl_status.setText("Hardware Fehler")
-            QMessageBox.critical(self, "Blaze Stage Test", f"Initialisierung fehlgeschlagen:\n{exc}")
+            QMessageBox.critical(self, "XYZ Satge Blaze", f"Initialisierung fehlgeschlagen:\n{exc}")
             return
         self.backend_future = None
         cam_error = getattr(self.backend, "camera_error", None)
@@ -3352,7 +3734,7 @@ class BlazeStageTestView(QWidget):
             self.lbl_status.setText("Bereit (ohne Kamera)")
             QMessageBox.warning(
                 self,
-                "Blaze Stage Test",
+                "XYZ Satge Blaze",
                 f"Kamera nicht verfuegbar:\n{cam_error}\nDu kannst die Buehne ohne Kamera nutzen.",
             )
         else:
@@ -3370,7 +3752,7 @@ class BlazeStageTestView(QWidget):
             embed.status.setText(f"{axis} | bereit (manuell starten)")
     def _ensure_backend(self):
         if self.backend is None:
-            QMessageBox.warning(self, "Blaze Stage Test", "Hardware ist noch nicht bereit.")
+            QMessageBox.warning(self, "XYZ Satge Blaze", "Hardware ist noch nicht bereit.")
             return False
         return True
     def _submit_backend(self, method_name, *args):
@@ -3378,7 +3760,7 @@ class BlazeStageTestView(QWidget):
             return
         method = getattr(self.backend, method_name, None)
         if method is None:
-            QMessageBox.critical(self, "Blaze Stage Test", f"Backend-Methode fehlt: {method_name}")
+            QMessageBox.critical(self, "XYZ Satge Blaze", f"Backend-Methode fehlt: {method_name}")
             return
         if method_name == "test_camera":
             method(*args)
@@ -3573,7 +3955,7 @@ class GitterschieberView(QWidget):
     def _get_frame(self):
         if self._overlay_active and self._last_overlay is not None:
             return self._last_overlay
-        frame = gs.capture_frame()
+        frame = gitterschieber.capture_frame()
         self._last_frame = frame
         return frame
     def _detect_particles(self):
@@ -3582,9 +3964,9 @@ class GitterschieberView(QWidget):
         def task():
             try:
                 # Capture fresh frame if live is off, or use last
-                frame = gs.capture_frame()
+                frame = gitterschieber.capture_frame()
                 if frame is None: return
-                results = gs.process_image(frame)
+                results = gitterschieber.process_image(frame)
                 count = results["count"]
                 overlay = results["overlay"]
                 # Update UI
@@ -3609,7 +3991,7 @@ class GitterschieberView(QWidget):
         self.btn_angle.setText("Measuring...")
         def task():
             try:
-                angle = gs.MeasureSingleImageGratingAngle()
+                angle = gitterschieber.MeasureSingleImageGratingAngle()
                 def update_ui():
                     self.metric_angle.value_label.setText(f"{angle:.3f}°")
                     self.btn_angle.setEnabled(True)
@@ -3624,7 +4006,7 @@ class GitterschieberView(QWidget):
         self.btn_af.setText("Focusing...")
         def task():
             try:
-                gs.autofocus()
+                gitterschieber.autofocus()
                 QMetaObject.invokeMethod(self, lambda: (self.btn_af.setEnabled(True), self.btn_af.setText("Autofocus")))
             except Exception as e:
                 print(f"AF Error: {e}")
@@ -3737,7 +4119,7 @@ class OptikkoerperView(QWidget):
     def _ensure_cam(self, idx):
         cam = self._cams.get(idx)
         if cam is None:
-            cam = IdsCam(index=idx, set_min_exposure=False)
+            cam = autofocus.IdsCam(index=idx, set_min_exposure=False)
             self._cams[idx] = cam
         try:
             self._last_error[idx] = None
@@ -3893,7 +4275,7 @@ class OptikkoerperView(QWidget):
             else:
                 btn.set_variant("secondary")
 class IPCView(QWidget):
-    """Graphical In Process Control View (connected to DB)."""
+    """Graphical SPC view (connected to DB)."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -4114,7 +4496,7 @@ class IPCView(QWidget):
             if t_min == t_max:
                 t_max = t_min + 1.0
             self.chart1.ax.set_xlim(t_min, t_max)
-        self.chart2.ax.set_title("Live Stage Control (DB Sync)", color=COLORS['text_muted'])
+        self.chart2.ax.set_title("Live XY- Stage Resolve (DB Sync)", color=COLORS['text_muted'])
         self.chart2.ax.set_axis_off()
         self.chart1.draw_idle()
         self.chart2.draw_idle()
@@ -4179,11 +4561,48 @@ class LaserscanView(QWidget):
         self.cam_embed = None
         self.spin_expo = None
         self.slider_expo = None
+        self.btn_laser_toggle = None
+        self.slider_laser = None
+        self.lbl_laser_status = None
+        self.lbl_laser_intensity = None
+        self._laser_enabled = False
+        self._laser_intensity = 60
+        self.btn_prisma_sequence = None
+        self.spin_prisma_frames = None
+        self.spin_prisma_target_angle = None
+        self.spin_prisma_tolerance = None
+        self.lbl_prisma_angle = None
+        self.lbl_prisma_delta = None
+        self.lbl_prisma_status = None
+        self._prisma_sequence_running = False
+        self.btn_line_width_capture = None
+        self.spin_line_width_threshold = None
+        self.spin_line_width_target = None
+        self.spin_line_width_tolerance = None
+        self.lbl_line_width_value = None
+        self.lbl_line_width_delta = None
+        self.lbl_line_width_status = None
+        self._line_width_running = False
+        self.spin_line_angle_target = None
+        self.spin_line_angle_tolerance = None
+        self.lbl_line_angle = None
+        self.btn_wavelength_check = None
+        self.spin_wave_target = None
+        self.spin_wave_tolerance = None
+        self.lbl_wave_value = None
+        self.lbl_wave_status = None
+        self._wavelength_running = False
+        self.btn_prisma_fine_sequence = None
+        self.spin_prisma_fine_frames = None
+        self.spin_prisma_fine_target = None
+        self.spin_prisma_fine_tolerance = None
+        self.lbl_prisma_fine_angle = None
+        self.lbl_prisma_fine_delta = None
+        self.lbl_prisma_fine_status = None
+        self._prisma_fine_running = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
+        layout.setSpacing(12)
         card = Card("PCO Panda")
         card.setObjectName("Laserscan_Card_Cam")
         # Check global PcoCameraBackend
@@ -4198,7 +4617,264 @@ class LaserscanView(QWidget):
             self.cam_embed = CameraWidget(self._get_frame, start_immediately=False)
             self.cam_embed.setObjectName("Laserscan_CamEmbed") # IMPORTANT FOR RESIZE
             card.add_widget(self.cam_embed)
-        layout.addWidget(card)
+        workflow_card = Card("Workflow Übersicht")
+        workflow_card.set_compact(content_spacing=6)
+        workflow_layout = QVBoxLayout()
+        workflow_layout.setSpacing(6)
+        steps = [
+            ("1. Wellenlänge / Check", "Ermittle die dominante Farbe der Laserlinie und vergleiche sie mit dem Sollwert. Passe Intensität oder Filter an, falls der Offset zu groß ist."),
+            ("2. Prisma Grobjustage", "Kamera anzeigen lassen, Messsequenz aufnehmen und Winkel + Toleranz einsehen. Nutze den resultierenden Mittelwert für erste Ausrichtung."),
+            ("3. FineJustage Linse Ausrichten", "Führe die Messsequenz durch und bewerte Linienbreite sowie Winkel der Fokuslinie. Wiederhole bis beide Werte im Toleranzbereich liegen."),
+            ("4. FineJustage Prisma", "Feinjustage der Prismaposition mit höherer Stichprobentiefe, Winkeltracking und engeren Toleranzen. Nur aktivieren, wenn alle Lens-Checks grün sind.")
+        ]
+        for title, desc in steps:
+            lbl = QLabel(f"<b>{title}</b><br><span style='color:{COLORS['secondary']}; font-size:11px;'>{desc}</span>")
+            lbl.setWordWrap(True)
+            workflow_layout.addWidget(lbl)
+        workflow_card.add_layout(workflow_layout)
+        top_row = QHBoxLayout()
+        top_row.setSpacing(12)
+        top_row.addWidget(card, 2)
+        top_row.addWidget(workflow_card, 1)
+        layout.addLayout(top_row)
+        prism_card = Card("Prisma Grobjustage")
+        prism_layout = QVBoxLayout()
+        prism_layout.setContentsMargins(0, 0, 0, 0)
+        prism_layout.setSpacing(8)
+        seq_row = QHBoxLayout()
+        seq_row.setSpacing(8)
+        seq_row.addWidget(QLabel("Messungen:"))
+        self.spin_prisma_frames = QSpinBox()
+        self.spin_prisma_frames.setRange(1, 30)
+        self.spin_prisma_frames.setValue(5)
+        self.spin_prisma_frames.setFixedWidth(64)
+        seq_row.addWidget(self.spin_prisma_frames)
+        seq_row.addStretch()
+        self.btn_prisma_sequence = ModernButton("Messsequenz aufnehmen", "primary")
+        self.btn_prisma_sequence.setFixedHeight(32)
+        self.btn_prisma_sequence.clicked.connect(self._on_prisma_sequence)
+        target_row = QHBoxLayout()
+        target_row.setSpacing(8)
+        target_row.addWidget(QLabel("Zielwinkel:"))
+        self.spin_prisma_target_angle = QDoubleSpinBox()
+        self.spin_prisma_target_angle.setRange(-180.0, 180.0)
+        self.spin_prisma_target_angle.setDecimals(2)
+        self.spin_prisma_target_angle.setValue(0.0)
+        self.spin_prisma_target_angle.setSingleStep(0.1)
+        self.spin_prisma_target_angle.setSuffix("°")
+        self.spin_prisma_target_angle.setFixedWidth(100)
+        target_row.addWidget(self.spin_prisma_target_angle)
+        target_row.addWidget(QLabel("Toleranz:"))
+        self.spin_prisma_tolerance = QDoubleSpinBox()
+        self.spin_prisma_tolerance.setRange(0.1, 10.0)
+        self.spin_prisma_tolerance.setDecimals(2)
+        self.spin_prisma_tolerance.setSingleStep(0.1)
+        self.spin_prisma_tolerance.setValue(0.6)
+        self.spin_prisma_tolerance.setSuffix("°")
+        self.spin_prisma_tolerance.setFixedWidth(90)
+        target_row.addWidget(self.spin_prisma_tolerance)
+        target_row.addStretch()
+        self.lbl_prisma_angle = QLabel("Winkel: ---")
+        self.lbl_prisma_angle.setStyleSheet(f"color: {COLORS['primary']}; font-weight: 600;")
+        self.lbl_prisma_delta = QLabel("Abweichung: ---")
+        self.lbl_prisma_delta.setStyleSheet(f"color: {COLORS['secondary']};")
+        self.lbl_prisma_status = QLabel("Status: Bereit")
+        self.lbl_prisma_status.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 600;")
+        prism_layout.addLayout(seq_row)
+        prism_layout.addWidget(self.btn_prisma_sequence)
+        prism_layout.addLayout(target_row)
+        prism_layout.addWidget(self.lbl_prisma_angle)
+        prism_layout.addWidget(self.lbl_prisma_delta)
+        prism_layout.addWidget(self.lbl_prisma_status)
+        prism_card.add_layout(prism_layout)
+        wavelength_card = Card("Wellenlänge / Check")
+        wave_layout = QVBoxLayout()
+        wave_layout.setContentsMargins(0, 0, 0, 0)
+        wave_layout.setSpacing(8)
+        wave_target_row = QHBoxLayout()
+        wave_target_row.setSpacing(8)
+        wave_target_row.addWidget(QLabel("Zielwellenlänge:"))
+        self.spin_wave_target = QDoubleSpinBox()
+        self.spin_wave_target.setRange(400.0, 800.0)
+        self.spin_wave_target.setValue(633.0)
+        self.spin_wave_target.setSuffix(" nm")
+        self.spin_wave_target.setFixedWidth(100)
+        wave_target_row.addWidget(self.spin_wave_target)
+        wave_target_row.addWidget(QLabel("Toleranz:"))
+        self.spin_wave_tolerance = QDoubleSpinBox()
+        self.spin_wave_tolerance.setRange(0.1, 20.0)
+        self.spin_wave_tolerance.setDecimals(1)
+        self.spin_wave_tolerance.setValue(3.0)
+        self.spin_wave_tolerance.setSuffix(" nm")
+        self.spin_wave_tolerance.setFixedWidth(80)
+        wave_target_row.addWidget(self.spin_wave_tolerance)
+        wave_target_row.addStretch()
+        self.btn_wavelength_check = ModernButton("Wellenlänge prüfen", "primary")
+        self.btn_wavelength_check.setFixedHeight(32)
+        self.btn_wavelength_check.clicked.connect(self._on_wavelength_check)
+        self.lbl_wave_value = QLabel("Wellenlänge: --- nm")
+        self.lbl_wave_value.setStyleSheet(f"color: {COLORS['primary']}; font-weight: 600;")
+        self.lbl_wave_status = QLabel("Status: Bereit")
+        self.lbl_wave_status.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 600;")
+        wave_layout.addLayout(wave_target_row)
+        wave_layout.addWidget(self.btn_wavelength_check)
+        wave_layout.addWidget(self.lbl_wave_value)
+        wave_layout.addWidget(self.lbl_wave_status)
+        wavelength_card.add_layout(wave_layout)
+        mid_row = QHBoxLayout()
+        mid_row.setSpacing(12)
+        mid_row.addWidget(prism_card, 1)
+        mid_row.addWidget(wavelength_card, 1)
+        layout.addLayout(mid_row)
+        lens_card = Card("FineJustage Linse Ausrichten")
+        lens_layout = QVBoxLayout()
+        lens_layout.setContentsMargins(0, 0, 0, 0)
+        lens_layout.setSpacing(8)
+        threshold_row = QHBoxLayout()
+        threshold_row.setSpacing(8)
+        threshold_row.addWidget(QLabel("Schwellwert:"))
+        self.spin_line_width_threshold = QSpinBox()
+        self.spin_line_width_threshold.setRange(0, 255)
+        self.spin_line_width_threshold.setValue(200)
+        self.spin_line_width_threshold.setFixedWidth(80)
+        threshold_row.addWidget(self.spin_line_width_threshold)
+        threshold_row.addStretch()
+        width_row = QHBoxLayout()
+        width_row.setSpacing(8)
+        width_row.addWidget(QLabel("Zielbreite:"))
+        self.spin_line_width_target = QDoubleSpinBox()
+        self.spin_line_width_target.setRange(0.0, 500.0)
+        self.spin_line_width_target.setValue(150.0)
+        self.spin_line_width_target.setSuffix(" px")
+        self.spin_line_width_target.setFixedWidth(110)
+        width_row.addWidget(self.spin_line_width_target)
+        width_row.addWidget(QLabel("Toleranz:"))
+        self.spin_line_width_tolerance = QDoubleSpinBox()
+        self.spin_line_width_tolerance.setRange(0.0, 200.0)
+        self.spin_line_width_tolerance.setValue(12.0)
+        self.spin_line_width_tolerance.setSuffix(" px")
+        self.spin_line_width_tolerance.setFixedWidth(110)
+        width_row.addWidget(self.spin_line_width_tolerance)
+        width_row.addStretch()
+        angle_row = QHBoxLayout()
+        angle_row.setSpacing(8)
+        angle_row.addWidget(QLabel("Zielwinkel:"))
+        self.spin_line_angle_target = QDoubleSpinBox()
+        self.spin_line_angle_target.setRange(-90.0, 90.0)
+        self.spin_line_angle_target.setDecimals(2)
+        self.spin_line_angle_target.setValue(0.0)
+        self.spin_line_angle_target.setSuffix("°")
+        self.spin_line_angle_target.setFixedWidth(100)
+        angle_row.addWidget(self.spin_line_angle_target)
+        angle_row.addWidget(QLabel("Toleranz:"))
+        self.spin_line_angle_tolerance = QDoubleSpinBox()
+        self.spin_line_angle_tolerance.setRange(0.1, 20.0)
+        self.spin_line_angle_tolerance.setDecimals(2)
+        self.spin_line_angle_tolerance.setValue(5.0)
+        self.spin_line_angle_tolerance.setSuffix("°")
+        self.spin_line_angle_tolerance.setFixedWidth(90)
+        angle_row.addWidget(self.spin_line_angle_tolerance)
+        angle_row.addStretch()
+        self.btn_line_width_capture = ModernButton("Messsequenz starten", "primary")
+        self.btn_line_width_capture.setFixedHeight(32)
+        self.btn_line_width_capture.clicked.connect(self._on_line_width_measure)
+        self.lbl_line_width_value = QLabel("Linienbreite: --- px")
+        self.lbl_line_width_value.setStyleSheet(f"color: {COLORS['primary']}; font-weight: 600;")
+        self.lbl_line_angle = QLabel("Winkel: ---")
+        self.lbl_line_angle.setStyleSheet(f"color: {COLORS['secondary']};")
+        self.lbl_line_width_delta = QLabel("Abweichung: ---")
+        self.lbl_line_width_delta.setStyleSheet(f"color: {COLORS['secondary']};")
+        self.lbl_line_width_status = QLabel("Status: Bereit")
+        self.lbl_line_width_status.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 600;")
+        lens_layout.addLayout(threshold_row)
+        lens_layout.addLayout(width_row)
+        lens_layout.addLayout(angle_row)
+        lens_layout.addWidget(self.btn_line_width_capture)
+        lens_layout.addWidget(self.lbl_line_width_value)
+        lens_layout.addWidget(self.lbl_line_angle)
+        lens_layout.addWidget(self.lbl_line_width_delta)
+        lens_layout.addWidget(self.lbl_line_width_status)
+        lens_card.add_layout(lens_layout)
+        prism_fine_card = Card("FineJustage Prisma")
+        fine_layout = QVBoxLayout()
+        fine_layout.setContentsMargins(0, 0, 0, 0)
+        fine_layout.setSpacing(8)
+        fine_seq_row = QHBoxLayout()
+        fine_seq_row.setSpacing(8)
+        fine_seq_row.addWidget(QLabel("Messungen:"))
+        self.spin_prisma_fine_frames = QSpinBox()
+        self.spin_prisma_fine_frames.setRange(5, 60)
+        self.spin_prisma_fine_frames.setValue(20)
+        self.spin_prisma_fine_frames.setFixedWidth(64)
+        fine_seq_row.addWidget(self.spin_prisma_fine_frames)
+        fine_seq_row.addStretch()
+        self.btn_prisma_fine_sequence = ModernButton("Fine-Messsequenz", "primary")
+        self.btn_prisma_fine_sequence.setFixedHeight(32)
+        self.btn_prisma_fine_sequence.clicked.connect(self._on_prisma_fine_sequence)
+        fine_target_row = QHBoxLayout()
+        fine_target_row.setSpacing(8)
+        fine_target_row.addWidget(QLabel("Zielwinkel:"))
+        self.spin_prisma_fine_target = QDoubleSpinBox()
+        self.spin_prisma_fine_target.setRange(-180.0, 180.0)
+        self.spin_prisma_fine_target.setDecimals(2)
+        self.spin_prisma_fine_target.setValue(0.0)
+        self.spin_prisma_fine_target.setSingleStep(0.1)
+        self.spin_prisma_fine_target.setSuffix("°")
+        self.spin_prisma_fine_target.setFixedWidth(100)
+        fine_target_row.addWidget(self.spin_prisma_fine_target)
+        fine_target_row.addWidget(QLabel("Toleranz:"))
+        self.spin_prisma_fine_tolerance = QDoubleSpinBox()
+        self.spin_prisma_fine_tolerance.setRange(0.05, 5.0)
+        self.spin_prisma_fine_tolerance.setDecimals(2)
+        self.spin_prisma_fine_tolerance.setValue(0.3)
+        self.spin_prisma_fine_tolerance.setSuffix("°")
+        self.spin_prisma_fine_tolerance.setFixedWidth(80)
+        fine_target_row.addWidget(self.spin_prisma_fine_tolerance)
+        fine_target_row.addStretch()
+        self.lbl_prisma_fine_angle = QLabel("Winkel: ---")
+        self.lbl_prisma_fine_angle.setStyleSheet(f"color: {COLORS['primary']}; font-weight: 600;")
+        self.lbl_prisma_fine_delta = QLabel("Abweichung: ---")
+        self.lbl_prisma_fine_delta.setStyleSheet(f"color: {COLORS['secondary']};")
+        self.lbl_prisma_fine_status = QLabel("Status: Bereit")
+        self.lbl_prisma_fine_status.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 600;")
+        fine_layout.addLayout(fine_seq_row)
+        fine_layout.addWidget(self.btn_prisma_fine_sequence)
+        fine_layout.addLayout(fine_target_row)
+        fine_layout.addWidget(self.lbl_prisma_fine_angle)
+        fine_layout.addWidget(self.lbl_prisma_fine_delta)
+        fine_layout.addWidget(self.lbl_prisma_fine_status)
+        prism_fine_card.add_layout(fine_layout)
+        fine_row = QHBoxLayout()
+        fine_row.setSpacing(12)
+        fine_row.addWidget(lens_card)
+        fine_row.addWidget(prism_fine_card)
+        layout.addLayout(fine_row)
+        laser_card = Card("LASER CONTROL")
+        laser_card.setObjectName("Laserscan_Card_Laser")
+        laser_layout = QVBoxLayout()
+        laser_layout.setSpacing(8)
+        self.btn_laser_toggle = ModernButton("Laser einschalten", "secondary")
+        self.btn_laser_toggle.setCheckable(True)
+        self.btn_laser_toggle.setFixedHeight(34)
+        self.btn_laser_toggle.clicked.connect(self._on_laser_toggle)
+        laser_layout.addWidget(self.btn_laser_toggle)
+        self.lbl_laser_status = QLabel("Laser: AUS")
+        self.lbl_laser_status.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 600;")
+        laser_layout.addWidget(self.lbl_laser_status)
+        intensity_row = QHBoxLayout()
+        self.lbl_laser_intensity = QLabel(f"Intensität: {self._laser_intensity}%")
+        self.lbl_laser_intensity.setStyleSheet(f"font-size: 11px; color: {COLORS['secondary']};")
+        intensity_row.addWidget(self.lbl_laser_intensity)
+        intensity_row.addStretch()
+        laser_layout.addLayout(intensity_row)
+        self.slider_laser = QSlider(Qt.Horizontal)
+        self.slider_laser.setRange(0, 100)
+        self.slider_laser.setValue(self._laser_intensity)
+        self.slider_laser.valueChanged.connect(self._on_laser_intensity_changed)
+        laser_layout.addWidget(self.slider_laser)
+        laser_card.add_layout(laser_layout)
+        layout.addWidget(laser_card)
+        self._apply_laser_state()
         expo_card = Card("EXPOSURE")
         expo_card.setObjectName("Laserscan_Card_Expo")
         sl = QVBoxLayout()
@@ -4309,10 +4985,391 @@ class LaserscanView(QWidget):
             self._last_error = str(exc)
             if self.cam_embed is not None:
                 self.cam_embed.status.setText(f"EXPOSURE-Fehler: {exc}")
+
+    def _on_laser_toggle(self, checked: bool):
+        self._laser_enabled = bool(checked)
+        self._apply_laser_state()
+
+    def _on_laser_intensity_changed(self, value: int):
+        self._laser_intensity = max(0, min(100, int(value)))
+        if self.lbl_laser_intensity is not None:
+            self.lbl_laser_intensity.setText(f"Intensität: {self._laser_intensity}%")
+        self._apply_laser_intensity()
+
+    def _apply_laser_state(self):
+        if self.btn_laser_toggle is None or self.lbl_laser_status is None:
+            return
+        self.btn_laser_toggle.setChecked(self._laser_enabled)
+        if self._laser_enabled:
+            self.btn_laser_toggle.setText("Laser ausschalten")
+            self.btn_laser_toggle.set_variant("primary")
+            status_color = COLORS["success"]
+            status_text = "Laser: AN"
+        else:
+            self.btn_laser_toggle.setText("Laser einschalten")
+            self.btn_laser_toggle.set_variant("secondary")
+            status_color = COLORS["text_muted"]
+            status_text = "Laser: AUS"
+        self.lbl_laser_status.setText(status_text)
+        self.lbl_laser_status.setStyleSheet(f"color: {status_color}; font-weight: 600;")
+        print(f"[Laserscan] Laser {'ON' if self._laser_enabled else 'OFF'} | Intensity {self._laser_intensity}%")
+
+    def _apply_laser_intensity(self):
+        if not self._laser_enabled:
+            return
+        print(f"[Laserscan] Laser intensity set to {self._laser_intensity}%")
+   
+    def _on_prisma_sequence(self):
+        if self._prisma_sequence_running:
+            return
+        if self.btn_prisma_sequence:
+            self.btn_prisma_sequence.setEnabled(False)
+        if not self._ensure_cam():
+            self._reset_prisma_feedback("Kamera nicht erreichbar", COLORS["danger"], self.lbl_prisma_angle, self.lbl_prisma_delta, self.lbl_prisma_status)
+            if self.btn_prisma_sequence:
+                self.btn_prisma_sequence.setEnabled(True)
+            return
+        self._prisma_sequence_running = True
+        angles = []
+        try:
+            seq_count = self.spin_prisma_frames.value() if self.spin_prisma_frames else 1
+            angles = self._collect_prisma_angles(seq_count)
+        finally:
+            self._prisma_sequence_running = False
+            if self.btn_prisma_sequence:
+                self.btn_prisma_sequence.setEnabled(True)
+        target = self.spin_prisma_target_angle.value() if self.spin_prisma_target_angle else 0.0
+        tolerance = self.spin_prisma_tolerance.value() if self.spin_prisma_tolerance else 0.5
+        success, _, _, _ = self._update_prisma_feedback(angles, target, tolerance, self.lbl_prisma_angle, self.lbl_prisma_delta, self.lbl_prisma_status)
+        if not success:
+            self._reset_prisma_feedback("Keine Linie erkannt", COLORS["warning"], self.lbl_prisma_angle, self.lbl_prisma_delta, self.lbl_prisma_status)
+
+    def _on_prisma_fine_sequence(self):
+        if self._prisma_fine_running:
+            return
+        if self.btn_prisma_fine_sequence:
+            self.btn_prisma_fine_sequence.setEnabled(False)
+        if not self._ensure_cam():
+            self._reset_prisma_feedback("Kamera nicht erreichbar", COLORS["danger"], self.lbl_prisma_fine_angle, self.lbl_prisma_fine_delta, self.lbl_prisma_fine_status)
+            if self.btn_prisma_fine_sequence:
+                self.btn_prisma_fine_sequence.setEnabled(True)
+            return
+        self._prisma_fine_running = True
+        angles = []
+        try:
+            seq_count = self.spin_prisma_fine_frames.value() if self.spin_prisma_fine_frames else 10
+            angles = self._collect_prisma_angles(seq_count)
+        finally:
+            self._prisma_fine_running = False
+            if self.btn_prisma_fine_sequence:
+                self.btn_prisma_fine_sequence.setEnabled(True)
+        target = self.spin_prisma_fine_target.value() if self.spin_prisma_fine_target else 0.0
+        tolerance = self.spin_prisma_fine_tolerance.value() if self.spin_prisma_fine_tolerance else 0.3
+        success, mean_angle, delta, ok = self._update_prisma_feedback(
+            angles,
+            target,
+            tolerance,
+            self.lbl_prisma_fine_angle,
+            self.lbl_prisma_fine_delta,
+            self.lbl_prisma_fine_status,
+        )
+        if not success:
+            self._reset_prisma_feedback("Keine Linie erkannt", COLORS["warning"], self.lbl_prisma_fine_angle, self.lbl_prisma_fine_delta, self.lbl_prisma_fine_status)
+            return
+        self._persist_prisma_measurement(mean_angle, delta, target, tolerance, len(angles), ok)
+
+    def _collect_prisma_angles(self, frame_count):
+        angles = []
+        for _ in range(frame_count):
+            frame_result = self._get_frame()
+            if not frame_result:
+                continue
+            frame, _ = frame_result
+            angle = self._measure_prisma_angle(frame)
+            if angle is not None:
+                angles.append(angle)
+            QApplication.processEvents()
+            time.sleep(0.04)
+        return angles
+
+    def _update_prisma_feedback(self, angles, target, tolerance, angle_label, delta_label, status_label):
+        if not angles:
+            return False, None, None, False
+        mean_angle = float(np.mean(angles))
+        delta = mean_angle - target
+        is_ok = abs(delta) <= tolerance
+        status_color = COLORS["success"] if is_ok else COLORS["danger"]
+        if angle_label:
+            angle_label.setText(f"Winkel: {mean_angle:.2f}°")
+        if delta_label:
+            delta_label.setText(f"Abweichung: {delta:+.2f}° (Tol. +/-{tolerance:.2f}°)")
+        if status_label:
+            status_label.setText("Innerhalb Toleranz" if is_ok else "Toleranz verletzt")
+            status_label.setStyleSheet(f"font-weight: 600; color: {status_color};")
+        return True, mean_angle, delta, is_ok
+
+    def _reset_prisma_feedback(self, status_text, color, angle_label, delta_label, status_label):
+        if angle_label:
+            angle_label.setText("Winkel: ---")
+        if delta_label:
+            delta_label.setText("Abweichung: ---")
+        if status_label:
+            status_label.setText(status_text)
+            status_label.setStyleSheet(f"font-weight: 600; color: {color};")
+ 
+    def _send_laser_db_payload(self, device_id: str, payload: dict, user_id: str = "laser_scan", async_send: bool = True):
+        def _task():
+            conn = None
+            try:
+                now = datetime.datetime.now()
+                if db.is_on_gateway_wifi():
+                    db.send_payload_gateway(
+                        device_id=device_id,
+                        barcode=str(db.DUMMY_BARCODE),
+                        payload=payload,
+                        user=user_id,
+                        start_time=now,
+                        end_time=now,
+                    )
+                else:
+                    conn = dbConnector.connection()
+                    conn.connect()
+                    barcode_obj = miltenyiBarcode.mBarcode(str(db.DUMMY_BARCODE))
+                    conn.sendData(
+                        now,
+                        now,
+                        0,
+                        device_id,
+                        payload,
+                        barcode_obj,
+                        user_id,
+                    )
+                print(f"[Laserscan] DB payload sent ({device_id})")
+            except Exception as exc:
+                print(f"[Laserscan] DB payload failed ({device_id}): {exc}")
+            finally:
+                if conn:
+                    try:
+                        conn.disconnect()
+                    except Exception:
+                        pass
+        if async_send:
+            threading.Thread(target=_task, daemon=True).start()
+        else:
+            _task()
+
+    def _write_laser_report(self, category: str, title: str, lines: list[str]) -> pathlib.Path:
+        base = resolve_stage.DATA_ROOT / "LaserScanReports" / category
+        base.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_title = title.replace(" ", "_")
+        path = base / f"{safe_title}_{ts}.pdf"
+        pages = [{"type": "text", "title": title, "text": lines}]
+        test_type = "laserscan_fine_lens" if category == "fine_lens" else "laserscan_fine_prisma" if category == "fine_prisma" else None
+        PdfModule.write_pdf(path, pages, db_test_type=test_type)
+        print(f"[Laserscan] Report saved: {path}")
+        return path
+
+    def _persist_lens_measurement(self, width, angle, width_target, width_tol, angle_target, angle_tol, width_delta, angle_delta, ok):
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        status_text = "OK" if ok else "FAIL"
+        lines = [
+            f"Zeitpunkt: {now}",
+            "",
+            f"Linienbreite: {width:.1f} px",
+            f"Zielbreite: {width_target:.1f} px ±{width_tol:.1f} px",
+            f"Abweichung: {width_delta:+.1f} px",
+            "",
+            f"Winkel: {angle:.2f}°",
+            f"Zielwinkel: {angle_target:.2f}° ±{angle_tol:.2f}°",
+            f"Abweichung: {angle_delta:+.2f}°",
+            "",
+            f"Status: {status_text}",
+        ]
+        payload = {
+            "width_px": round(width, 3),
+            "width_target_px": round(width_target, 3),
+            "width_delta_px": round(width_delta, 3),
+            "width_tol_px": round(width_tol, 3),
+            "angle_deg": round(angle, 3),
+            "angle_target_deg": round(angle_target, 3),
+            "angle_delta_deg": round(angle_delta, 3),
+            "angle_tol_deg": round(angle_tol, 3),
+            "ok": bool(ok),
+        }
+        self._send_laser_db_payload("laserscan_fine_lens", payload, async_send=False)
+        self._write_laser_report("fine_lens", "FineJustage Linse", lines)
+
+    def _persist_prisma_measurement(self, mean_angle, delta, target, tolerance, seq_count, ok):
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        status_text = "OK" if ok else "FAIL"
+        lines = [
+            f"Zeitpunkt: {now}",
+            "",
+            f"Messungen: {seq_count}",
+            f"Zielwinkel: {target:.2f}° ±{tolerance:.2f}°",
+            f"Gemessener Winkel: {mean_angle:.2f}°",
+            f"Abweichung: {delta:+.2f}°",
+            "",
+            f"Status: {status_text}",
+        ]
+        payload = {
+            "mean_angle_deg": round(mean_angle, 3),
+            "target_deg": round(target, 3),
+            "delta_deg": round(delta, 3),
+            "tolerance_deg": round(tolerance, 3),
+            "sequence": int(seq_count),
+            "ok": bool(ok),
+        }
+        self._send_laser_db_payload("laserscan_fine_prisma", payload, async_send=False)
+        self._write_laser_report("fine_prisma", "FineJustage Prisma", lines)
+
+    def _on_wavelength_check(self):
+        if self._wavelength_running:
+            return
+        if self.btn_wavelength_check:
+            self.btn_wavelength_check.setEnabled(False)
+        if not self._ensure_cam():
+            self._reset_wavelength_feedback("Kamera nicht erreichbar", COLORS["danger"])
+            if self.btn_wavelength_check:
+                self.btn_wavelength_check.setEnabled(True)
+            return
+        self._wavelength_running = True
+        frame_result = None
+        try:
+            frame_result = self._get_frame()
+        finally:
+            self._wavelength_running = False
+            if self.btn_wavelength_check:
+                self.btn_wavelength_check.setEnabled(True)
+        if not frame_result:
+            self._reset_wavelength_feedback("Kein Frame", COLORS["warning"])
+            return
+        frame, _ = frame_result
+        wavelength = self._estimate_wavelength(frame)
+        if wavelength is None:
+            self._reset_wavelength_feedback("Kein Index", COLORS["warning"])
+            return
+        target = self.spin_wave_target.value() if self.spin_wave_target else 0.0
+        tolerance = self.spin_wave_tolerance.value() if self.spin_wave_tolerance else 0.0
+        delta = wavelength - target
+        is_ok = abs(delta) <= tolerance
+        status_color = COLORS["success"] if is_ok else COLORS["danger"]
+        if self.lbl_wave_value:
+            self.lbl_wave_value.setText(f"Wellenlänge: {wavelength:.1f} nm")
+        if self.lbl_wave_status:
+            self.lbl_wave_status.setText("Innerhalb Toleranz" if is_ok else "Toleranz verletzt")
+            self.lbl_wave_status.setStyleSheet(f"font-weight: 600; color: {status_color};")
+
+    def _estimate_wavelength(self, frame):
+        if frame is None:
+            return None
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        hue = float(np.mean(hsv[:, :, 0]))
+        wavelength = 380.0 + (hue / 179.0) * 400.0
+        return wavelength
+
+    def _reset_wavelength_feedback(self, status_text, color):
+        if self.lbl_wave_value:
+            self.lbl_wave_value.setText("Wellenlänge: --- nm")
+        if self.lbl_wave_status:
+            self.lbl_wave_status.setText(status_text)
+            self.lbl_wave_status.setStyleSheet(f"font-weight: 600; color: {color};")
+
+    def _on_line_width_measure(self):
+        if self._line_width_running:
+            return
+        if not self._ensure_cam():
+            self._reset_line_width_feedback("Kamera nicht erreichbar", COLORS["danger"])
+            return
+        self._line_width_running = True
+        if self.btn_line_width_capture:
+            self.btn_line_width_capture.setEnabled(False)
+        try:
+            frame_result = self._get_frame()
+        finally:
+            self._line_width_running = False
+            if self.btn_line_width_capture:
+                self.btn_line_width_capture.setEnabled(True)
+        if not frame_result:
+            self._reset_line_width_feedback("Kein Frame", COLORS["warning"])
+            return
+        frame, _ = frame_result
+        result = self._estimate_line_parameters(frame)
+        if result is None:
+            self._reset_line_width_feedback("Linie nicht gefunden", COLORS["warning"])
+            return
+        width, angle = result
+        width_target = self.spin_line_width_target.value() if self.spin_line_width_target else 0.0
+        width_tolerance = self.spin_line_width_tolerance.value() if self.spin_line_width_tolerance else 0.0
+        width_delta = width - width_target
+        angle_target = self.spin_line_angle_target.value() if self.spin_line_angle_target else 0.0
+        angle_tolerance = self.spin_line_angle_tolerance.value() if self.spin_line_angle_tolerance else 0.0
+        angle_delta = angle - angle_target
+        width_ok = abs(width_delta) <= width_tolerance
+        angle_ok = abs(angle_delta) <= angle_tolerance
+        overall_ok = width_ok and angle_ok
+        status_color = COLORS["success"] if overall_ok else COLORS["danger"]
+        if self.lbl_line_width_value:
+            self.lbl_line_width_value.setText(f"Linienbreite: {width:.1f} px")
+        if self.lbl_line_angle:
+            self.lbl_line_angle.setText(f"Winkel: {angle:.2f}°")
+        if self.lbl_line_width_delta:
+            self.lbl_line_width_delta.setText(f"Breite Δ: {width_delta:+.1f} px | Winkel Δ: {angle_delta:+.2f}°")
+        if self.lbl_line_width_status:
+            self.lbl_line_width_status.setText("Innerhalb Toleranz" if overall_ok else "Toleranz verletzt")
+            self.lbl_line_width_status.setStyleSheet(f"font-weight: 600; color: {status_color};")
+        self._persist_lens_measurement(
+            width,
+            angle,
+            width_target,
+            width_tolerance,
+            angle_target,
+            angle_tolerance,
+            width_delta,
+            angle_delta,
+            overall_ok,
+        )
+
+    def _estimate_line_parameters(self, frame):
+        if frame is None:
+            return None
+        gray = frame
+        if gray.ndim == 3:
+            gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (11, 11), 0)
+        threshold_value = int(self.spin_line_width_threshold.value()) if self.spin_line_width_threshold else 200
+        _, thresh = cv2.threshold(blurred, threshold_value, 255, cv2.THRESH_BINARY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+        cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        contours_result = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = contours_result[0] if len(contours_result) == 2 else contours_result[1]
+        if not contours:
+            return None
+        best = max(contours, key=cv2.contourArea)
+        x, y, w, h = cv2.boundingRect(best)
+        width = float(max(w, h))
+        vx, vy, x0, y0 = cv2.fitLine(best, cv2.DIST_L2, 0, 0.01, 0.01)
+        angle = np.degrees(np.arctan2(vy, vx))
+        angle = (angle + 360) % 180
+        return width, angle
+
+    def _reset_line_width_feedback(self, status_text, color):
+        if self.lbl_line_width_value:
+            self.lbl_line_width_value.setText("Linienbreite: --- px")
+        if self.lbl_line_angle:
+            self.lbl_line_angle.setText("Winkel: ---")
+        if self.lbl_line_width_delta:
+            self.lbl_line_width_delta.setText("Abweichung: ---")
+        if self.lbl_line_width_status:
+            self.lbl_line_width_status.setText(status_text)
+            self.lbl_line_width_status.setStyleSheet(f"font-weight: 600; color: {color};")
+    
     def showEvent(self, event):
         super().showEvent(event)
         if self.cam_embed is not None:
             self.cam_embed.open()
+    
     def hideEvent(self, event):
         if self.cam_embed is not None:
             self.cam_embed.stop()
@@ -4321,6 +5378,7 @@ class LaserscanView(QWidget):
             self._cam = None
         self._expo_initialized = False
         super().hideEvent(event)
+    
 class AddComponentDialog(QDialog):
     def __init__(self, tool_name, parent=None):
         super().__init__(parent)
@@ -4658,10 +5716,427 @@ class SidebarButton(QPushButton):
                 border: 1px solid {hex_to_rgba(COLORS['primary'], 0.2)};
             }}
         """)
+
+
+class _OllamaChatSignals(QObject):
+    response_chunk = Signal(str)
+    response_ready = Signal(str)
+    response_error = Signal(str)
+
+
+class OllamaChatView(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.model = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:3b")
+        self.ollama_chat_url = os.environ.get("OLLAMA_API_URL", "http://127.0.0.1:11434/api/chat")
+        self._request_timeout_s = max(20, int(os.environ.get("OLLAMA_REQUEST_TIMEOUT_S", "90")))
+        self._num_predict = max(64, int(os.environ.get("OLLAMA_NUM_PREDICT", "160")))
+        self._context_rows = max(10, int(os.environ.get("OLLAMA_CONTEXT_ROWS", "20")))
+        self._stream_enabled = os.environ.get("OLLAMA_STREAM", "1").strip().lower() not in {"0", "false", "off", "no"}
+        self._stream_text = ""
+        self._active_bot_start = None
+        self._active_bot_end = None
+
+        self._signals = _OllamaChatSignals()
+        self._signals.response_chunk.connect(self._on_response_chunk)
+        self._signals.response_ready.connect(self._on_response_ready)
+        self._signals.response_error.connect(self._on_response_error)
+        self._busy = False
+        self._req_timer = QTimer(self)
+        self._req_timer.setSingleShot(True)
+        self._req_timer.timeout.connect(self._on_request_timeout)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(12)
+
+        header = QFrame()
+        header.setStyleSheet(
+            f"background-color: {COLORS['surface']}; border: 1px solid {COLORS['border']}; border-radius: 10px;"
+        )
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(14, 10, 14, 10)
+        title = QLabel("Chat Assistant")
+        title.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {COLORS['text']};")
+        self.info_lbl = QLabel(f"Model: {self.model} | Timeout: {self._request_timeout_s}s")
+        self.info_lbl.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
+        hl.addWidget(title)
+        hl.addStretch()
+        hl.addWidget(self.info_lbl)
+        root.addWidget(header)
+
+        self.chat_log = QTextEdit()
+        self.chat_log.setReadOnly(True)
+        self.chat_log.setStyleSheet(
+            f"background-color: {COLORS['surface']};"
+            f"border: 1px solid {COLORS['border']};"
+            f"border-radius: 12px;"
+            f"padding: 10px;"
+        )
+        root.addWidget(self.chat_log, 1)
+
+        composer = QFrame()
+        composer.setStyleSheet(
+            f"background-color: {COLORS['surface']}; border: 1px solid {COLORS['border']}; border-radius: 12px;"
+        )
+        row = QHBoxLayout(composer)
+        row.setContentsMargins(10, 10, 10, 10)
+        row.setSpacing(8)
+        self.input_line = QLineEdit()
+        self.input_line.setPlaceholderText("Frage zu Produktionsdaten eingeben...")
+        self.input_line.setStyleSheet(
+            f"QLineEdit {{"
+            f"background-color: {COLORS['surface_light']};"
+            f"border: 1px solid {COLORS['border']};"
+            f"border-radius: 8px;"
+            f"padding: 8px 10px;"
+            f"color: {COLORS['text']};"
+            f"}}"
+        )
+        self.input_line.returnPressed.connect(self._send_current_prompt)
+        self.send_btn = QPushButton("Nachricht absenden")
+        self.send_btn.setDefault(True)
+        self.send_btn.setMinimumHeight(34)
+        self.send_btn.setMinimumWidth(170)
+        self.send_btn.setCursor(Qt.PointingHandCursor)
+        self.send_btn.setStyleSheet(
+            f"QPushButton {{"
+            f"background-color: {COLORS['primary']};"
+            f"color: {COLORS['bg']};"
+            f"border: 1px solid {COLORS['primary']};"
+            f"border-radius: 8px;"
+            f"font-weight: 700;"
+            f"padding: 6px 12px;"
+            f"}}"
+            f"QPushButton:hover {{ background-color: {COLORS['primary_hover']}; }}"
+            f"QPushButton:disabled {{"
+            f"background-color: {COLORS['surface_light']};"
+            f"color: {COLORS['text_muted']};"
+            f"border: 1px solid {COLORS['border']};"
+            f"}}"
+        )
+        self.send_btn.clicked.connect(self._send_current_prompt)
+        row.addWidget(self.input_line, 1)
+        row.addWidget(self.send_btn)
+        root.addWidget(composer)
+
+        self._append_chat("System", "Chat gestartet. Frage direkt eingeben und senden.")
+
+    def prefill_and_send(self, prompt: str):
+        self.input_line.setText(prompt)
+        self._send_current_prompt()
+
+    def _set_busy(self, busy: bool):
+        self._busy = busy
+        self.send_btn.setEnabled(not busy)
+        self.input_line.setEnabled(not busy)
+
+    def _append_chat(self, role: str, text: str):
+        self.chat_log.append(f"{role}: {text}")
+
+    def _send_current_prompt(self):
+        if self._busy:
+            self._append_chat("System", "Bitte warten, die letzte Anfrage laeuft noch.")
+            return
+        prompt = self.input_line.text().strip()
+        if not prompt:
+            return
+        self.input_line.clear()
+        self._append_chat("Du", prompt)
+        self._start_bot_response("Denke nach ...")
+        self._stream_text = ""
+        self._set_busy(True)
+        self._req_timer.start(self._request_timeout_s * 1000)
+        threading.Thread(target=self._request_ollama, args=(prompt,), daemon=True).start()
+
+    def _start_bot_response(self, text: str):
+        cursor = self.chat_log.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        if not self.chat_log.document().isEmpty():
+            cursor.insertText("\n")
+        self._active_bot_start = cursor.position()
+        cursor.insertText(f"Bot: {text}")
+        self._active_bot_end = cursor.position()
+        self.chat_log.setTextCursor(cursor)
+        self.chat_log.verticalScrollBar().setValue(self.chat_log.verticalScrollBar().maximum())
+
+    def _request_ollama(self, prompt: str):
+        db_context = ""
+        try:
+            db_context = self._build_db_context(limit=self._context_rows)
+            answer = self._ask_ollama(prompt, db_context)
+            self._signals.response_ready.emit(answer)
+        except Exception as exc:
+            if db_context:
+                fallback = (
+                    "Ollama ist aktuell nicht verfuegbar, aber DB-Zugriff funktioniert.\n\n"
+                    f"{db_context}\n\n"
+                    f"Fehlerdetails: {exc}"
+                )
+                self._signals.response_ready.emit(fallback)
+                return
+            self._signals.response_error.emit(str(exc))
+
+    def _on_response_ready(self, text: str):
+        self._req_timer.stop()
+        if self._stream_text.strip():
+            text = self._stream_text
+        self._replace_last_bot_line(text)
+        self._stream_text = ""
+        self._active_bot_start = None
+        self._active_bot_end = None
+        self._set_busy(False)
+
+    def _on_response_error(self, error_text: str):
+        self._req_timer.stop()
+        self._stream_text = ""
+        msg = (
+            "Ollama Anfrage fehlgeschlagen.\n"
+            f"{error_text}\n"
+            "Pruefe, ob Ollama laeuft (http://127.0.0.1:11434) und ein Modell installiert ist."
+        )
+        self._replace_last_bot_line(msg)
+        self._active_bot_start = None
+        self._active_bot_end = None
+        self._set_busy(False)
+
+    def _on_request_timeout(self):
+        if not self._busy:
+            return
+        self._stream_text = ""
+        self._replace_last_bot_line("Zeitlimit erreicht. Bitte erneut senden.")
+        self._active_bot_start = None
+        self._active_bot_end = None
+        self._set_busy(False)
+
+    def _on_response_chunk(self, chunk: str):
+        if not self._busy:
+            return
+        if not chunk:
+            return
+        self._stream_text += chunk
+        self._replace_last_bot_line(self._stream_text)
+
+    def _replace_last_bot_line(self, text: str):
+        if (
+            isinstance(self._active_bot_start, int)
+            and isinstance(self._active_bot_end, int)
+            and self._active_bot_start >= 0
+            and self._active_bot_end >= self._active_bot_start
+        ):
+            cursor = self.chat_log.textCursor()
+            cursor.setPosition(self._active_bot_start)
+            cursor.setPosition(self._active_bot_end, QTextCursor.KeepAnchor)
+            cursor.insertText(f"Bot: {text}")
+            self._active_bot_end = cursor.position()
+        else:
+            self._append_chat("Bot", text)
+            self._active_bot_start = None
+            self._active_bot_end = None
+        self.chat_log.verticalScrollBar().setValue(self.chat_log.verticalScrollBar().maximum())
+
+    def _build_db_context(self, limit: int = 20) -> str:
+        sections = []
+        host = self.window()
+        dashboard = getattr(host, "dashboard", None)
+        cache = {}
+        if dashboard is not None and hasattr(dashboard, "get_chat_data_cache"):
+            try:
+                cache = dashboard.get_chat_data_cache()
+            except Exception:
+                cache = {}
+        if not cache:
+            return (
+                "Keine Dashboard-Daten im Cache. "
+                "Bitte Dashboard aktualisieren und danach erneut fragen."
+            )
+        for testtype in ("kleberoboter", "gitterschieber_tool", "stage_test"):
+            df = cache.get(testtype, pd.DataFrame())
+            if df is None or df.empty:
+                sections.append(f"- {testtype}: nicht im Dashboard-Cache geladen.")
+                continue
+            if len(df) > limit:
+                df = df.head(limit).copy()
+
+            latest_ts = self._latest_timestamp(df)
+            ts_text = latest_ts.isoformat() if latest_ts is not None else "unbekannt"
+            line = f"- {testtype}: rows={len(df)}, latest={ts_text}"
+
+            if "ok" in df.columns:
+                try:
+                    ok_series = df["ok"].dropna().astype(bool)
+                    if not ok_series.empty:
+                        ok_ratio = int(round(float(ok_series.mean()) * 100))
+                        line += f", ok_ratio={ok_ratio}%"
+                except Exception:
+                    pass
+
+            numeric_cols = []
+            for col in df.columns:
+                try:
+                    if pd.api.types.is_numeric_dtype(df[col]):
+                        numeric_cols.append(col)
+                except Exception:
+                    continue
+            if numeric_cols:
+                stats_parts = []
+                for col in numeric_cols[:3]:
+                    series = pd.to_numeric(df[col], errors="coerce").dropna()
+                    if series.empty:
+                        continue
+                    stats_parts.append(f"{col}:mean={series.mean():.3f}")
+                if stats_parts:
+                    line += " | " + ", ".join(stats_parts)
+            sections.append(line)
+            preview = self._build_recent_rows_preview(df, max_rows=2)
+            if preview:
+                sections.append(preview)
+        return "\n".join(sections)
+
+    def _build_recent_rows_preview(self, df: pd.DataFrame, max_rows: int = 2) -> str:
+        if df is None or df.empty:
+            return ""
+        interesting = []
+        for col in ("StartTest", "EndTest", "Test_GUID", "barcodenummer", "Device_GUID", "Employee_ID", "ok"):
+            if col in df.columns and col not in interesting:
+                interesting.append(col)
+        numeric = []
+        for col in df.columns:
+            if col in interesting:
+                continue
+            try:
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    numeric.append(col)
+            except Exception:
+                continue
+        chosen_cols = (interesting + numeric[:3])[:10]
+        if not chosen_cols:
+            chosen_cols = [str(c) for c in list(df.columns)[:6]]
+        rows = []
+        for _, row in df.head(max_rows).iterrows():
+            pairs = []
+            for col in chosen_cols:
+                val = row.get(col, "")
+                if pd.isna(val):
+                    continue
+                if hasattr(val, "strftime"):
+                    val = val.strftime("%Y-%m-%d %H:%M:%S")
+                pairs.append(f"{col}={val}")
+            if pairs:
+                rows.append("- " + ", ".join(pairs))
+        if not rows:
+            return ""
+        return "  letzte Zeilen:\n" + "\n".join(rows)
+
+    def _is_db_summary_prompt(self, prompt: str) -> bool:
+        p = (prompt or "").strip().lower()
+        if not p:
+            return False
+        keywords = (
+            "aktuelle test daten",
+            "aktuellen test daten",
+            "letzte test daten",
+            "letzten test daten",
+            "letzte daten",
+            "letzten daten",
+            "neueste daten",
+            "was sind die letzten daten",
+            "wie sehen die letzten daten aus",
+            "wie sehen die aktuellen daten aus",
+            "current test data",
+            "latest test data",
+            "db stand",
+            "datenbank stand",
+        )
+        if any(k in p for k in keywords):
+            return True
+        has_time_word = any(w in p for w in ("aktuell", "letzte", "letzten", "neueste", "latest", "current"))
+        has_data_word = any(w in p for w in ("daten", "testdaten", "tests", "db", "datenbank"))
+        return has_time_word and has_data_word
+
+    def _latest_timestamp(self, df: pd.DataFrame):
+        for col in ("StartTest", "EndTest", "timestamp", "datetime", "time", "date"):
+            if col in df.columns:
+                try:
+                    ts = pd.to_datetime(df[col], errors="coerce").dropna()
+                    if not ts.empty:
+                        return ts.max().to_pydatetime()
+                except Exception:
+                    continue
+        return None
+
+    def _ask_ollama(self, prompt: str, db_context: str) -> str:
+        system_prompt = (
+            "Rolle: Du bist ein erfahrener Production Supervisor fuer Resolve Tools.\n"
+            "Ziel: Antworte kurz, klar und entscheidungsorientiert.\n"
+            "Datenbasis: Verwende AUSSCHLIESSLICH den gelieferten DB-KONTEXT (Dashboard-Cache).\n"
+            "Wenn etwas nicht im Kontext steht, sage explizit: 'nicht im Dashboard-Cache vorhanden'.\n"
+            "Keine erfundenen IDs, Werte oder Ursachen.\n"
+            "Sprache: Deutsch.\n"
+            "Antwortformat (immer in dieser Struktur):\n"
+            "1) Lagebild (1-2 Saetze)\n"
+            "2) Aktueller Stand je Linie (kleberoboter, gitterschieber_tool, stage_test) als kurze Stichpunkte\n"
+            "3) Auffaelligkeiten/Risiken (nur wenn vorhanden, sonst 'Keine kritischen Auffaelligkeiten')\n"
+            "4) Naechste sinnvolle Aktion (1 konkrete Empfehlung)\n"
+            "Regel: Keine langen Rohdaten-Listen; nur die wichtigsten Kennzahlen/Zeitstempel nennen."
+        )
+        user_prompt = f"DB-KONTEXT:\n{db_context}\n\nFRAGE:\n{prompt}"
+        payload = {
+            "model": self.model,
+            "stream": self._stream_enabled,
+            "options": {
+                "num_predict": self._num_predict,
+            },
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        req = urllib.request.Request(
+            self.ollama_chat_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=self._request_timeout_s) as resp:
+            if self._stream_enabled:
+                chunks = []
+                while True:
+                    raw_line = resp.readline()
+                    if not raw_line:
+                        break
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if data.get("error"):
+                        raise RuntimeError(str(data.get("error")))
+                    msg = data.get("message", {})
+                    piece = str(msg.get("content", ""))
+                    if piece:
+                        chunks.append(piece)
+                        self._signals.response_chunk.emit(piece)
+                    if bool(data.get("done")):
+                        break
+                content = "".join(chunks).strip()
+            else:
+                raw = resp.read().decode("utf-8", errors="replace")
+                data = json.loads(raw)
+                msg = data.get("message", {})
+                content = str(msg.get("content", "")).strip()
+        if not content:
+            raise RuntimeError("Leere Antwort von Ollama.")
+        return content
+
 # --- MAIN WINDOW ---
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._ollama_chat_view = None
+        self._chat_panel = None
+        self._chat_panel_anim = None
+        self._chat_panel_target_width = 320
         self.setWindowTitle("Resolve Production Suite")
         self.setObjectName("MainWindow")
         # Dynamic sizing: Strictly tied to the available screen vertical space.
@@ -4723,7 +6198,7 @@ class MainWindow(QMainWindow):
         )
         _sync_combo(self.dashboard.combo_testtype, self.ipc_view.combo_source)
         self.btn_dash = add_nav("Dashboard", self.dashboard)
-        self.btn_ipc = add_nav("In Process Control", self.ipc_view)
+        self.btn_ipc = add_nav("SPC", self.ipc_view)
         # Connect Dashboard Button to IPC View
         self.dashboard.btn_goto_ipc.clicked.connect(lambda: self.btn_ipc.click())
         wf_header = self._make_nav_section("WORKFLOWS")
@@ -4731,10 +6206,10 @@ class MainWindow(QMainWindow):
         self.btn_ztrieb = add_nav("Z-Trieb", ZTriebView())
         self.btn_af = add_nav("Autofocus", AutofocusView())
         add_nav("Optikkorper", OptikkoerperView())
-        self.stage_view = LazyView(StageControlView, "Stage Control")
-        add_nav("Stage Control", self.stage_view)
-        self.blaze_stage_view = LazyView(BlazeStageTestView, "Blaze Stage Test")
-        add_nav("Blaze Stage Test", self.blaze_stage_view)
+        self.stage_view = LazyView(StageControlView, "XY- Stage Resolve")
+        add_nav("XY- Stage Resolve", self.stage_view)
+        self.blaze_stage_view = LazyView(BlazeStageTestView, "XYZ Satge Blaze")
+        add_nav("XYZ Satge Blaze", self.blaze_stage_view)
         add_nav("Gitterschieber", GitterschieberView())
         add_nav("Laserscan", LaserscanView())
         # Load Dynamic Tools
@@ -4781,13 +6256,17 @@ class MainWindow(QMainWindow):
         self.page_title = QLabel("Dashboard")
         self.page_title.setStyleSheet("font-size: 18px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase;")
         self.search_bar = QLineEdit()
-        self.search_bar.setPlaceholderText("Search Serial Number...")
+        self.search_bar.setPlaceholderText("Chat: Frage eingeben und senden...")
         self.search_bar.setFixedWidth(280)
         self.search_bar.setStyleSheet(f"""
             border-radius: 16px; 
             background-color: {COLORS['surface']};
             padding-left: 14px;
         """)
+        self.btn_search_submit = ModernButton("Senden", "secondary")
+        self.btn_search_submit.setFixedHeight(32)
+        self.btn_search_submit.setMinimumWidth(92)
+        self.btn_search_submit.clicked.connect(self._handle_search_submit)
         self.btn_open_stage_folder = QToolButton()
         self.btn_open_stage_folder.setIcon(_make_folder_icon(COLORS['text_muted'], 16))
         self.btn_open_stage_folder.setToolTip("Stage-Ordner oeffnen")
@@ -4803,8 +6282,10 @@ class MainWindow(QMainWindow):
         hl.addWidget(self.page_title)
         hl.addStretch()
         hl.addWidget(self.search_bar)
+        hl.addWidget(self.btn_search_submit)
         hl.addWidget(self.btn_open_stage_folder)
         self.search_bar.textChanged.connect(self._filter_navigation)
+        self.search_bar.returnPressed.connect(self._handle_search_submit)
         content_col.addWidget(header)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -4814,7 +6295,49 @@ class MainWindow(QMainWindow):
         content_col.addWidget(scroll)
         content_widget = QWidget()
         content_widget.setLayout(content_col)
-        main_layout.addWidget(content_widget)
+        main_layout.addWidget(content_widget, 1)
+        self._chat_panel = QFrame()
+        self._chat_panel.setObjectName("RightChatPanel")
+        self._chat_panel.setMinimumWidth(0)
+        self._chat_panel.setMaximumWidth(0)
+        self._chat_panel.setStyleSheet(
+            f"QFrame#RightChatPanel {{"
+            f"background-color: {COLORS['bg']};"
+            f"border-left: 1px solid {COLORS['border']};"
+            f"}}"
+        )
+        panel_layout = QVBoxLayout(self._chat_panel)
+        panel_layout.setContentsMargins(10, 10, 10, 10)
+        panel_layout.setSpacing(8)
+        panel_header = QFrame()
+        panel_header.setStyleSheet(
+            f"background-color: {COLORS['surface']}; border: 1px solid {COLORS['border']}; border-radius: 8px;"
+        )
+        ph = QHBoxLayout(panel_header)
+        ph.setContentsMargins(10, 6, 6, 6)
+        lbl_chat = QLabel("Chat")
+        lbl_chat.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {COLORS['text']};")
+        btn_close_chat = QToolButton()
+        btn_close_chat.setText("Schliessen")
+        btn_close_chat.setCursor(Qt.PointingHandCursor)
+        btn_close_chat.setStyleSheet(
+            f"QToolButton {{"
+            f"background: {COLORS['surface_light']};"
+            f"color: {COLORS['text']};"
+            f"border: 1px solid {COLORS['border']};"
+            f"border-radius: 6px;"
+            f"padding: 4px 8px;"
+            f"}}"
+            f"QToolButton:hover {{ border: 1px solid {COLORS['primary']}; }}"
+        )
+        btn_close_chat.clicked.connect(lambda: self._set_chat_panel_open(False))
+        ph.addWidget(lbl_chat)
+        ph.addStretch()
+        ph.addWidget(btn_close_chat)
+        panel_layout.addWidget(panel_header)
+        self._ollama_chat_view = OllamaChatView(self._chat_panel)
+        panel_layout.addWidget(self._ollama_chat_view, 1)
+        main_layout.addWidget(self._chat_panel)
         # Init
         self.btn_dash.click()
         # Final Step: Apply all saved configurations to the entire UI
@@ -4844,6 +6367,48 @@ class MainWindow(QMainWindow):
                 else:
                     # For other widgets like brand, user profile, etc., keep them visible
                     widget.setVisible(True)
+
+    def _handle_search_submit(self):
+        text = self.search_bar.text().strip()
+        if not text:
+            return
+        lowered = text.lower()
+        if lowered.startswith("/chat"):
+            prompt = text[5:].strip()
+            self._open_ollama_chat(prompt)
+        elif lowered.startswith("chat "):
+            prompt = text[5:].strip()
+            self._open_ollama_chat(prompt)
+        elif lowered in {"chat", "chatbot", "/bot", "/chatbot"}:
+            self._open_ollama_chat("")
+        else:
+            self._open_ollama_chat(text)
+        self.search_bar.clear()
+
+    def _open_ollama_chat(self, prompt: str):
+        if self._ollama_chat_view is None:
+            return
+        self._set_chat_panel_open(True)
+        if prompt:
+            self._ollama_chat_view.prefill_and_send(prompt)
+
+    def _set_chat_panel_open(self, open_panel: bool):
+        if self._chat_panel is None:
+            return
+        start_width = self._chat_panel.width()
+        end_width = self._chat_panel_target_width if open_panel else 0
+        if start_width == end_width:
+            return
+        anim = QPropertyAnimation(self._chat_panel, b"minimumWidth", self)
+        anim.setDuration(200)
+        anim.setStartValue(start_width)
+        anim.setEndValue(end_width)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.valueChanged.connect(lambda v: self._chat_panel.setMaximumWidth(int(v)))
+        anim.finished.connect(lambda: self._chat_panel.setMaximumWidth(end_width))
+        self._chat_panel_anim = anim
+        anim.start()
+
     def _open_stage_data_folder(self):
         if hasattr(self, "stage_view") and self.stage_view is not None:
             view = self.stage_view.view if hasattr(self.stage_view, "view") else self.stage_view
@@ -4926,12 +6491,7 @@ class MainWindow(QMainWindow):
         wl.addWidget(line)
         return wrapper
 if __name__ == "__main__":
-    # Enable High DPI Scaling for Windows
-    try:
-        from ctypes import windll
-        windll.shcore.SetProcessDpiAwareness(1)
-    except Exception:
-        pass
+    # Let Qt 6 control DPI awareness (default: Per-Monitor V2 on Windows).
     app = QApplication(sys.argv)
     app.setStyleSheet(GLOBAL_STYLESHEET)
     # Set app font

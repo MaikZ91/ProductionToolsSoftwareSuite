@@ -5,6 +5,7 @@ import serial
 import serial.tools.list_ports
 
 
+
 class _NullSerial:
     """Dummy Serial-Ersatz, damit das Programm auch ohne COM-Port laeuft."""
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import time
 import threading
 from typing import Optional
@@ -81,9 +82,11 @@ class IdsCam:
             try:
                 pf_node = self.remote.FindNode("PixelFormat")
                 pf_node.SetCurrentEntry(self.pixel_format)
-            except Exception:
+            except Exception as e:
                 # Some devices lock PixelFormat; continue with current setting.
-                pass
+                logging.warning("Motor address mapping is defined by config; using fallback defaults.")
+                logging.warning(e)  # <-- das ist die Exception
+            
             self.remote.FindNode("AcquisitionMode").SetCurrentEntry("Continuous")
             self.remote.FindNode("TriggerMode").SetCurrentEntry("Off")
 

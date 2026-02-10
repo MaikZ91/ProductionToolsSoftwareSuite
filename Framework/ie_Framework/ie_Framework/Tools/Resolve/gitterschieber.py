@@ -29,7 +29,7 @@ from PIL import Image
 
 from pipython import GCSDevice, pitools
 
-import ie_Framework.Hardware.Motor.EightMotorcontroller as stage
+import ie_Framework.Hardware.Motor.EightMotorcontroller as stage_hw
 from ie_Framework.Hardware.Camera.DinoLiteController import DinoLiteController, DummyDinoLite
 from ie_Framework.Algorithm import AngleAnalysisFunctions as AAF
 from ie_Framework.Algorithm.particle_detection import blend_overlay_and_annotate, particle_detection
@@ -78,10 +78,17 @@ def wait_time(old_pos: float, new_pos: float) -> float:
 # Hardware-Layer: seriell (Stage) + Kamera
 # ---------------------------------------------------------------------------
 _motor_lock = threading.Lock()
-try:
-    stage = stage.MotorController(port_number=5, baud_rate=9600, verbose=False)
-except Exception:
-    stage = None
+_stage_controller: Optional[Any] = None
+
+
+def _get_stage_controller():
+    """Open the stage COM port only when a stage operation is requested."""
+    global _stage_controller
+    if _stage_controller is None:
+        with _motor_lock:
+            if _stage_controller is None:
+                _stage_controller = stage_hw.MotorController(port_number=5, baud_rate=9600, verbose=False)
+    return _stage_controller
 
 
 _camera_lock = threading.Lock()
@@ -179,6 +186,7 @@ def autofocus(
     settle_s: float = 0.5,
 ) -> Optional[np.ndarray]:
     """Autofokus entlang der Z-Achse."""
+    stage = _get_stage_controller()
     try:
         current_z = int(stage.current_pos(z_addr))
     except Exception:
@@ -258,6 +266,7 @@ def _ensure_dpc() -> tuple[GCSDevice, Any]:
 
 def startpos(delay_s: float = 2.0) -> tuple[int, int, int]:
     """Faehrt die vordefinierten Startpositionen an."""
+    stage = _get_stage_controller()
     stage.move_to_pos(x_addr, startpos_x)
     if delay_s:
         time.sleep(delay_s)
@@ -313,6 +322,7 @@ def GratingShiftwSave(
 ) -> Path:
     """Verfuehrt Piezo-Schritte, speichert die aufgenommenen Frames und liefert das Zielverzeichnis."""
     piezo, axis = _ensure_dpc()
+    stage = _get_stage_controller()
     out_dir = Path(save_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stage.move_to_pos(x_addr, SIM31_SEcornerpos[0])
@@ -337,6 +347,7 @@ def MeasureShiftFFT(
 ) -> tuple[float, float]:
     """Piezo-Gitterwinkel ueber FFT-Analyse bestimmen."""
     connect_DPC()
+    stage = _get_stage_controller()
     stage.move_to_pos(z_addr, startpos_z + working_distance_dif)
     stage.move_to_pos(x_addr, SIM31_centerpos[0])
     stage.move_to_pos(y_addr, SIM31_centerpos[1])
@@ -356,6 +367,7 @@ def MeasureShiftGratingEdge(
     shift_dx: int = -200,
 ) -> tuple[float, float]:
     """Piezo-Gitterwinkel ueber Kantenverschiebung bestimmen."""
+    stage = _get_stage_controller()
     stage.move_to_pos(x_addr, SIM31_SEcornerpos[0])
     time.sleep(2.5)
     stage.move_to_pos(y_addr, SIM31_SEcornerpos[1])
@@ -369,6 +381,7 @@ def MeasureShiftGratingEdge(
 
 def MeasureSingleImageGratingAngle() -> float:
     """Gitterwinkel aus einem Einzelbild bestimmen."""
+    stage = _get_stage_controller()
     stage.move_to_pos(y_addr, SIM31_centerpos[1])
     time.sleep(1)
     stage.move_to_pos(x_addr, SIM31_centerpos[0])
