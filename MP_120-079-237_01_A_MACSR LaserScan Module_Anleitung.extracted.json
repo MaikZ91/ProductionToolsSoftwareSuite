@@ -1,0 +1,1574 @@
+[
+  {
+    "text": "All Approvals are maintained and controlled via Miltenyi Biotec Group, MASTERControl™ Software.",
+    "style": "tablesubhead",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Please Refer to Miltenyi Biotec Group, MASTERControl™ Software for the current controlled revision and approval records.",
+    "style": "tablesubhead",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "SAP Nummer",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "120-079-237",
+    "style": null,
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "Bezeichnung",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "pMACSima UBG CellX-PT Laser-LineModul V2",
+    "style": null,
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "Abbildung",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Inhaltsverzeichnis:",
+    "style": null,
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "1Ziel3",
+    "style": "Verzeichnis1",
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "2Geltungsbereich und Verantwortlichkeit3",
+    "style": "Verzeichnis1",
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "3Mitgeltende Dokumente und Definitionen3",
+    "style": "Verzeichnis1",
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "3.1Mitgeltende Dokumente3",
+    "style": "Verzeichnis2",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "3.1.1Interne mitgeltende Dokumente3",
+    "style": "Verzeichnis3",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "3.1.2Externe Referenzen3",
+    "style": "Verzeichnis3",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "3.2Definitionen3",
+    "style": "Verzeichnis2",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "4Eingangsvoraussetzungen4",
+    "style": "Verzeichnis1",
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "4.1Erforderliche Materialien4",
+    "style": "Verzeichnis2",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "4.2Erforderliche Werkzeuge und Hilfsmittel4",
+    "style": "Verzeichnis2",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "4.3Erforderliche Hilfsstoffe4",
+    "style": "Verzeichnis2",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "5Fertigungsanweisung6",
+    "style": "Verzeichnis1",
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "6Aufzeichnungen8",
+    "style": "Verzeichnis1",
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "7Anhänge8",
+    "style": "Verzeichnis1",
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "8Änderungshistorie8",
+    "style": "Verzeichnis1",
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "9Liste der Arbeitspakete9",
+    "style": "Verzeichnis1",
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "10Liste der Arbeitspakete und Arbeitsschritte9",
+    "style": "Verzeichnis1",
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "Ziel",
+    "style": "berschrift1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Dieses Dokument beschreibt den Herstellprozess (Manufacturing Procedere MP) der Baugruppe:",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "pMACSima UBG CellX-PT Laser-LineModul V2 (215983) Vorlage (XXX-XXX-XXX)",
+    "style": null,
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "Geltungsbereich und Verantwortlichkeit",
+    "style": "berschrift1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Der Geltungsbereich wird elektronisch über die MASTERControlTM-Software in den benutzerdefinierten Feldern verwaltet und gesteuert.",
+    "style": "Beschriftung",
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "Tabelle 1: Verantwortlichkeit",
+    "style": "Beschriftung",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Abteilung / Funktion",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Verantwortlichkeit",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Industrial Engineering (IE)",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Definition des Herstellungsverfahrens und Erstellen der Anweisung (MP) und der Aufzeichnung (MR).",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Hardware Productions (HP)",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Fertigung der Baugruppe, unter Einhaltung der mit diesem Dokument festgelegten Produktionsanweisungen.",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Mitgeltende Dokumente und Definitionen",
+    "style": "berschrift1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Mitgeltende Dokumente",
+    "style": "berschrift2",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Interne mitgeltende Dokumente",
+    "style": "berschrift3",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Externe Referenzen",
+    "style": "berschrift3",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Siehe CORP-cQM-ATT-000002 List of Legislation, guidance and standards applicable for the Quality Management System and processing.",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Definitionen",
+    "style": "berschrift2",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Tabelle 2: Definitionen",
+    "style": "Beschriftung",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "HP",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Hardware Productions",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "IE",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Industrial Engineering",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Eingangsvoraussetzungen",
+    "style": "berschrift1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Erforderliche Materialien",
+    "style": "berschrift2",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Materialien gemäß aktuell gültiger:MSDXXX-XXX-XXX",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Erforderliche Werkzeuge und Hilfsmittel",
+    "style": "berschrift2",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Pos.",
+    "style": null,
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "AP+ Nr.",
+    "style": null,
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "Artikel",
+    "style": null,
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "Menge",
+    "style": null,
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "Einheit",
+    "style": null,
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "0010",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "214555",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "pMACSima Galvo Teststand",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "1",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "ST",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0020",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Vorrichtung Prima kleben",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "1",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "ST",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0030",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "91111010-0",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Reinigungs- und Klebeschutzaufkleber Galvo",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "1",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "ST",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0040",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Einmalhandschuhe",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "1",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "ST",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0050",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Drehmomentschraubendreher 0,1 Nm – 10 Nm",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "1",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "ST",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0060",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Zahnspachtel",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "1",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "ST",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0070",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0080",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0090",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Erforderliche Hilfsstoffe",
+    "style": "berschrift2",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Pos.",
+    "style": null,
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "AP+ Nr.",
+    "style": null,
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "Artikel",
+    "style": null,
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "Menge",
+    "style": null,
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "Einheit",
+    "style": null,
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "0010",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Ethanol",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "1",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "ST",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0020",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "205330",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "R&G 5min 2K Kleber",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "1",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "ST",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0030",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "215016",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Wärmeleitpaste 10W/mK, 5 ml, 7g",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "(Fischer Elektronik Wärmeleitpaste Keramik)",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "1",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "ST",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0040",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "214428",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Loctite 243 (mittelfest)",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "1",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "ST",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0050",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "214427",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Loctite 648 (Welle-Nabe)",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "1",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "ST",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0060",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0070",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0080",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0090",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Fertigungsanweisung",
+    "style": "berschrift1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Montage der Laser-Scanmodul Grundplatte",
+    "style": "Arbeitspaket",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Montage der Top Plate",
+    "style": "Arbeitsschritt",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Zug-Druckschrauben eindrehen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Kugelrolle mit einem Schlitzschraubendreher (an der Gewindeseite) eindrehen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "2x Zylinderstift Ø 3m6 x 6 einsetzen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "2x Zylinderstift Ø 3m6 x 10 einsetzten",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Wärmeleitpaste (215016) wie im Bild gezeigt auf den Kühlkörper per Zahnspachtel aufbringen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Anschrauben des Kühlkörpers mit vier M4 x 10 Zylinderschrauben",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Wärmeleitpaste auch auf den Temperatursensor aufbringen (siehe Bild) und diesen mit einer M3 x 6 Zylinderkopfschraube anschrauben",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Montage der Bottom Plate",
+    "style": "Arbeitsschritt",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Zylinderstift Ø 3m6 x 10 einsetzen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Federn in die Federanker einhängen und die Anker dann einschrauben und kontern. Dabei die Ösen wie im Bild gezeigt ausrichten",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Bei dem Federanker in der Mitte und rechts (im Bild) kann die Feder auch nach der Montage eingehängt werden",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Stahlronde einpressen. Bei lockerem Sitz der Ronde kann Loctite 648 (Welle-Nabe) verwendet werden",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Montage von Top und Bottom Plate",
+    "style": "Arbeitsschritt",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Top Plate auflegen und die Feder mit einem Federnzieher durch die entsprechende Bohrung ziehen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Ø 1m6 x10 Zylinderstift durch die Federöse schieben und in die Nut einlegen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Darauf achten, dass die Kugel in der Top Plate in der Senkung der „Ronde“ in der Bottom Plate liegt",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Jeweils eine Kugelscheibe unter die Zug-Druckschraube schieben und dann die M3x20 Zylinderkopf-schrauben ebenfalls mit einer Kugelscheibe montieren (siehe Bild)",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Kegelscheibe",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Kegelscheibe",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Kegelscheibe",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Kegelscheibe",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Den Spalt zwischen den Platten auf 3 mm einstellen. Dazu den Abstand der Platten an jeder Zug-Druckschraube messen.",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Zug-Druckschraube Drehmoment?",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Kleben des Prismenspiegels",
+    "style": "Arbeitspaket",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Spiegelhalter in die Vorrichtung legen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Einen Tropfen 2K Epoxydkleber (205330) auf die Klebefläche auftragen (blaue Fläche im Bild).",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "2K Epoxy",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "2K Epoxy",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Das Prisma auflegen, an den rot markierten Anschlagsflächen (im Bild) ausrichten und leicht andrücken",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Der Kleber sollte dabei die blaue Fläche komplett bedecken oder darf sogar in die umgebene Nut fließen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Hier Spalt!",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Hier Spalt!",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Wenn dies nicht der Fall ist, dann alle Bauteile reinigen und den Klebeprozess erneut starten",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Kein Spalt!",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Kein Spalt!",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Den Kleber 15 min lang aushärten lassen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Montage der Scaneinheit",
+    "style": "Arbeitspaket",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Passbohrungen zur Top Plate prüfen. Das Prismengehäuse sollte sich auf die Top Plate einfach aufstecken lassen. Ggf. Passbohrungen nacharbeiten",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Langlöcher im Scanlinsenhalter prüfen, die Zylinderstifte sollten im Prismengehäuse fest sitzen. Der Scanlinsenhalter sollte sich mit montieren Zylinderstiften einfach verschieben lassen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Zylinderstifte Ø 3m6 x 6 einsetzen. Hier darf Loctite 243 (mittelfest) verwendet werden",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Zylinderstifte Ø 1,5m6 x 6 in den Kreuzfedergelenk-Halter einsetzen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Kreuzfedergelenk bis zum Absatz einsetzen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Zylinderkopfschraube M2 x 6 mit Loctite 243 (mittelfest) einsetzen und mit dem einem Drehmoment von 0,1 Nm (10 cNm) festziehen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Dieses vormontierte Bauteil mit zwei Zylinderkopf-schrauben M2 x 6 von unten an den Scanlinsen-halter anschrauben",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Einstellmutter in das Prismengehäuse einschrauben und danach die Feineinstellschraube und die zugehörige Kontermutter einschrauben",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Dann den Prismenhalter mit dem Prisma auf das Kreuzfedergelenk aufsetzen und an den Anschlag drehen, die Einstellschraube ggf. etwas herausdrehen. Das Kreuzfedergelenk muss dabei vollständig entspannt sein!",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Anschlag",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Anschlag",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Mit der Zylinderkopfschraube M 2 x 8 den Prismenhalter am Kreuzfedergelenk befestigen. Hier wieder Loctite 243 (mittelfest) verwenden und das Drehmoment von 0,1 Nm (10 cNm) beachten",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Nun die Einstellschraube reindrehen, bis das Prisma wieder gerade zum Prismen-gehäuse steht.",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Kontermutter nur per Hand anziehen, diese Einstellschraube wird in der späteren Justage noch benutzt",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "UBG Galvo Spiegel",
+    "style": "Arbeitspaket",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Vorbereitungen",
+    "style": "Arbeitsschritt",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Beim Handling des Galvo-Antriebes ESD-Maßnahmen anwenden",
+    "style": "Warnhinweis",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "gemäß BGL-OPHI-SOP-000019",
+    "style": "Warnhinweis",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Galvo-Scanner in die Vorrichtung einspannen und den Reinigungs- und Klebeschutz aufbringen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Nut der Spiegelaufnahme vom Galvo-Scanner (siehe Bild) mit Ethanol reinigen. Den Galvo dabei mit der Nut nach unten halten, damit kein Ethanol in die Galvo-Mechanik läuft",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Spiegel im Klebebereich reinigen (beide Seiten und die Kantenflächen!)",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Linienlaser einstellen, der Referenzspiegel erzeugt auf dem Schirm hinter dem Laser eine Referenzlinie",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Justage und Verklebung",
+    "style": "Arbeitsschritt",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Vorrichtung prüfen, hier wird nur die Höhenposition der Bildmitte und die Parallelität des Laserstrahls zur Grundplatte justiert:",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Kameraeinheit vor den Laser positionieren",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "die Kamera auf die Höhe des Laserstrahls justieren (Bildmitte)",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "die Kameraeinheit von der Lasereinheit wegschieben",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Der Strahl trifft weiterhin die Kamera auf der Bildmitte, ansonsten den Laserstrahl justieren",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Kameraeinheit wieder an die ursprüngliche Position stellen und fixieren",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Diese Kalibrierung der Vorrichtung sollte vor jedem Fertigungsbatch durchgeführt werden!",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Spiegel testweise in die Nut vom Galvo-Scanner setzen und mit der Vorrichtung versuchen den Spiegel auf den Referenzstrahl auszurichten",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Kleber anmischen und auf den Spiegel auftragen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Spiegel in die Nut des Galvo-Scanners mittig einsetzen Spiegelseite zeigt in Strahlrichtung",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Justagearm auf den Spiegel auflegen und mit den Justageschrauben den reflektierten Strahl auf den Referenzstrahl ausrichten. Die Toleranz auf dem Schirm beträgt XY mm (1mrad)",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Beim Härten des Klebers die Justage überprüfen und ggf. nachjustieren.",
+    "style": "Listenabsatz",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Nach 15min Aushärtezeit kann der Galvo aus der Vorrichtung entnommen werden",
+    "style": "Listenabsatz",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Überprüfung der Verklebung",
+    "style": "Arbeitsschritt",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Zur Überprüfung der Justage wird der Galvo Scanner an die V-Nut der Referenzspiegel-Einheit gehalten. Die genannten Toleranzen müssen eingehalten werden.",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Der Klebeschutz wird entfernt",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Der Galvo-Scanner kann in der vorgesehenen Verpackung gelagert werden oder direkt in die zugehörige Baugruppe eingebaut werden",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Finaler Zusammenbau",
+    "style": "Arbeitspaket",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "ESD-Maßnahmen anwenden gemäß BGL-OPHI-SOP-000019",
+    "style": "Warnhinweis",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Vormontierte Scaneinheit auf die vormontierte Grundplatte aufsetzen und mit Zylinderschrauben (2x M3 x 35 und 1x M2,5 x 6) befestigen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Scanlinse, wie im Bild gezeigt einsetzen, die Seite der Scanlinse mit dem Gewindering zeigt nach links, die kleine Gewindebohrung zeigt nach oben (zum Langloch ausgerichtet)",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "und mit dem Scanlinsenhalter und einer M3x12 Zylinderkopfschraube befestigen",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Die Wärmeleitfolie (150 µm Folie) in die Bohrung für den Galvo einlegen und den Mylar Ring auf den Galvo auffädeln",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Dann den Galvo-Scanner einsetzen. Dabei darf der Spalt (wie im Bild gezeigt) vorsichtig aufgehebelt werden",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Den Galvo-Scanner so drehen, dass der Stromanschluss schräg nach oben guckt und der Spiegel unter 45° gedreht steht (siehe Bild)",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "beschichtete Fläche",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "beschichtete Fläche",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Schaumstoffring aufkleben",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Die Staubkappe beim Lasermodul abnehmen und auch den Schutzring an der Powell-Linse abschrauben",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Das Lasermodul aufsetzen und mit den beiliegenden Schrauben verschrauben",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Ausrichtleiste mit Montagewinkel und Federn montieren (BILD)",
+    "style": "APBeschreibung",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Justage und Endabnahme",
+    "style": "Arbeitspaket",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Einbau in die Justagevorrichtung",
+    "style": "Arbeitsschritt",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Ab hier die Checkliste ausfüllen!",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Laser-Scanmodul in die Justagevorrichtung „Prismenjustage“ aufsetzen, an die Anschläge schieben und verschrauben",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Deckel vom Scanmodul abnehmen und die Befestigungsschraube für das Prisma lösen und anschließend den Deckel befestigen. Ohne Deckel darf das Laser-Scanmodul nicht eingeschaltet werden. Laserschutz!",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Triggerkabel und Stromkabel werden vom Backplane zum Laser eingesteckt",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Der Inbetriebnahmeplatz wird mit Strom versorgt. Der Laser wird sich dann über ca. 1 Minute aufwärmen",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Software: Man startet Functional Model von der Entwicklungssoftware auf dem Rechner. Man muss sich mit dem Inbetriebnahmeplatz verbinden indem man „Connect to SAMBoard“ drückt. Dies dauert ein Moment.",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Außerdem muss man Pycharm starten. Das Skript „LSM-main.py“ wird ausgeführt. Dies öffnet ein Fenster",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Scanlinsenjustage",
+    "style": "Arbeitsschritt",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Zweite Kameraposition verwenden (weiter entfernte Kameraposition mit Tubuslinse dazwischen)",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Scanlinse in x/y schieben um auf die Mitte abzubilden",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Scanlinse in z schieben um diese scharf zu stellen",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "…?",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Galvoscanner kalibrieren – Line Scan Calibration",
+    "style": "Arbeitsschritt",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Wenn der LSM erst in Betrieb genommen wird, ist der Galvoscanner noch nicht kalibriert. Eine Line scan calibration wird über das Menu „Calibration“ -> „Line Scan“ und dann auf die Entsprechende Wellenlänge mit der Kamera 0. Die Kalibrierung erfolgt automatisch.",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Wenn man das Python-Justage-Skript benutzen will, muss man erst eine aktuelle Line scan calibration für die entsprechende Wellenlänge durchgeführt haben. Alternativ kann man den Checkbox „Override line scan calibration“ im LSM-main.py-Programm clicken. Dann muss man manuell den Schieber für den Galvoscanner in FM betreiben, und die Werte wo die Laserlinie unten und oben am Kamerasensor treffen, notieren.",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Um Bilder von der Laserlinie auf der Kamera in FM aufzunehmen, muss man den „Live mode“ starten. Im Hauptfenster in FM werden die Optionen „Trigger cam 1“, „Parameter change“, „continuous“ und die entsprechende Wellenlänge gewählt“. Dann auf „Start“ drücken. Wenn der Galvoregler jetzt betätigt wird, entstehen Bilder im Fenster in FM.",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Güte des Laser-Scanmoduls bestimmen",
+    "style": "Arbeitsschritt",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Falls das System in „Live mode“ aktiv ist, drück auf „Stop“. Dann ändere die Optionen für „Live mode“ auf „Trigger cam 1“, „Direct“ und „Once“. Starte nicht den „Live mode“",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "Jetzt kann eine Erstaufnahme mit der aktuellen Güte des Laserscanmoduls mit dem „LSM-main.py“ gemacht werden. Drücke dafür auf „Aquire images“",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Das System soll jetzt vier Bilder aufnehmen; ein Initialbild, dann jeweils ein Bild von der Laserlinie unten, mittig, und oben auf dem Kamerasensor",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Verfolge den Output von dem Skript in der Pycharm-Output-Fenster. Wenn der Befehl: „Acquired images, proceed with analysis“ kommt, ist die Momentaufnahme fertig",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Analyse der Momentaufnahme",
+    "style": "Arbeitsschritt",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Drück auf „Analyse image stack“ um die Bilder zu analysieren",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Jetzt im Output werden die Schiefe und die Krümmung der Laserlinie analysiert. Bei dieser Justage wird nur die Krümmung justiert. Ziel ist, eine Krümmung von weniger als 2 Pixel zu erreichen",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": true
+  },
+  {
+    "text": "Um die Krümmung zu justieren, muss das Prisma unter dem Galvoscanner justiert werden. Dies geschieht mit der Feingewindeschraube. Nach dem Verstellen der Feingewindeschraube den Konterring festziehen!",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Messung wiederholen und ggf. die Justage des Prismas ebenfalls wiederholen",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Deckel vom Scanmodul abnehmen und die am Anfang entnommene Befestigungsschraube für das Prisma wieder einsetzen und anschließend den Deckel befestigen",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Die Messung zur Kontrolle nochmals wiederholen",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Scanlinsenjustage",
+    "style": "Arbeitsschritt",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Zweite Kameraposition verwenden (weiter entfernte Kameraposition mit Tubuslinse dazwischen)",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Scanlinse in x/y schieben um auf die Mitte abzubilden",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Scanlinse in z schieben um diese scharf zu stellen",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Aufzeichnungen",
+    "style": "berschrift1",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Die erfolgreiche Ausführung des Herstellprozesses wird auf dem Fertigungsauftrag quittiert und eine Archivierung ist nicht notwendig.",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Anhänge",
+    "style": "berschrift1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Tabelle 3 Liste der Anhänge",
+    "style": "Beschriftung",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Nr.",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "MC Dok. ID #",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Titel",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "1.",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "n/a",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "n/a",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Änderungshistorie",
+    "style": "berschrift1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Tabelle 4 Änderungshistorie",
+    "style": "Beschriftung",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Änderungen, incl. Änderungsgrund (z.B. CC, DEV, etc.); Andere Dokumente, die durch dieses ersetzt werden",
+    "style": null,
+    "num": false,
+    "bold": false
+  }
+]

@@ -1,0 +1,752 @@
+[
+  {
+    "text": "Titel",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "pMACSima UBG CellX-PT Laser-LineModul V2",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Zugehörig zu Artikel",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "120-079-237",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Benennung",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Checkliste Laser-Scanmodul",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Abteilung / Prozess",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Baugruppenmontage",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Seriennummer",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "______________________________________",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Testperson mit Kürzel",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "_____________________________ : ________",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Benötigte Arbeitsmittel",
+    "style": "Formatvorlage1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Justagevorrichtung Prismenjustage",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Justagevorrichtung Scanlinsenjustage",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Inbetriebnahmeplatz mit SAMBoard, Backplane, Stromversorgung, DC1000-Board und PC (mit Ubuntu, Functional Model, Python API für FM und die Skripte: LSM-functions.py und LSM-main.py)",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Python Skripte: \\Miltenyi Biotec B.V. & Co. Kg\\Personal MACSima - Instrument\\03 Components\\Laser Scan Modules\\Übergabe IndEng\\Justage Programm Periskop Qualität",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Prerequisite Pythonskripte: tkinter, numpy, tifffile, matplotlib, scipy, glob, reportlab, svglib",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Arbeitsschritt 1: Dokumentation der verbauten Batch- oder Seriennummern",
+    "style": "Formatvorlage1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Unterbaugruppe / Kaufteil",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Artikelnummer",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Batch- / Seriennummer",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Lasermodul CellX PT 4FT-T 4x100 mW",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "214000",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "___________________________",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Scanlinse f42-2x2x2",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "216052",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "___________________________",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "UBG CM Galvo Spiegel verklebt",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "213718",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "___________________________",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Arbeitsschritt 2: Montage der Mechanik",
+    "style": "Formatvorlage1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Das Kreuzfedergelenk unterhalb des Prismenhalters wurde vorgespannt und die Feingewindeschraube lässt dich einfach und leicht drehen, ggf. leicht geölt (siehe Anleitung Kapitel 0030)",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Der Abstand der beiden Platten ist auf 3 mm (+/- 0,1 mm) eingestellt",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Der Galvospiegel wurde auf 45°gedreht und die Spiegelseite zeigt in Richtung Prisma/Laser",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Arbeitsschritt 3: Ausrichten des Moduls auf der Vorrichtung",
+    "style": "Formatvorlage1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Auf der Vorrichtung ist der Justageblock an den Anschlägen ausgerichtet und festgeschraubt (siehe Bild)",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Laser-Scanmodul an dem Justageblock ausrichten. Dabei den Winkel zwischen dem Modul und Justageblock prüfen und ggf. justieren (siehe Bild)",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Diese Schraube für die Winkeljustage nutzen",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Oben oder unten darf max. ein Spalt von 100 µm vorliegen (mit Fühlerlehre messen)",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Diese Schraube für die Winkeljustage nutzen",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Oben oder unten darf max. ein Spalt von 100 µm vorliegen (mit Fühlerlehre messen)",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Justageblock",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Justageblock",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Lasermodul an die universelle Testelektronik anschließen und die Baugruppe auf Funktion testen:",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Laserlinien nacheinander mit der Kamera testen (Laserschutz beachten)",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Galvo in Betrieb nehmen",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Arbeitsschritt 4: Vor-Justage des Prismas",
+    "style": "Formatvorlage1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Kamera auf die vordere Position setzen und das Skript (für die 561nm Laser Linie) ausführen",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Variablen Tilt bestimmen (Kippung Bild oben minus unten) und durch Rotation des Prismas an der Prismen-Verstell Schraube (Roter Pfeil Bild) grob optimieren auf <= 5 mrad",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Ergebnis dieser Vorjustage (Kippung Bild oben minus unten): ______ (Soll: 0 mrad +/- 5 mrad)",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Arbeitsschritt 4: Justage der Scanlinse",
+    "style": "Formatvorlage1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Kamera auf die hintere Position setzen (siehe Bild)",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Hier ein Skript für Abweichung und Laserliniendicke?",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Scanlinse mit dem Halter lateral schieben, damit die Laserlinie mittig abgebildet wird. Die Abweichungen hier festhalten und anschließend die Schrauben festziehen",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Abweichung in y (hoch/runter): _______ µm (Soll: 500 µm)",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Abweichung in x (rechts/links): ________ µm (Soll: 500 µm)",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Fokus der Scanlinse justieren. Laserlinie hat eine minimale Dicke und ist scharf abgebildet.",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Laserliniendicke: _______ µm",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Arbeitsschritt 5: Feinjustage des Prismas",
+    "style": "Formatvorlage1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Kamera wieder auf die vordere Position setzen.",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Die z Position Modul zu Base (siehe Bild) an der Verschraubungs-Kante mit Schiebelehre messen, ______ (Soll: 0 mm +/- 0.3).",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Den Anschlag vom Laser-Scanmodul festschrauben und anschließend die Befestigungsschrauben leicht lösen. Durch die federnden Wellscheiben lässt sich das Laser-Scanmodul nun leicht entlang des Anschlages verschieben.",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Laserlinie 561nm aktivieren und das Laser-Scanmodul leicht verschieben, bis die Scanlinie maximal scharf abgebildet wird.",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Die z Position (im Bild oben rechts/links) an der Verschraubungs Kante mit Schiebelehre erneut messen, und Differenz/Verschiebung zur ersten Messung Bestimmen. Vorzeichen + ist Verschiebung Richtung Kamera: Verschiebung  ______ (Soll: 0 mm +/- 1.5mm).",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Das Skript mit der 561nm Laserlinie ausführen.",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Variablen Tilt bestimmen (Kippung Bild oben minus unten) und durch Rotation des Prismas an der Prismen-Verstell Schraube fein optimieren auf <= 1mrad",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Variablen Tilt Fein Justage Ergebnis (Kippung Bild oben minus unten): ______ (Soll: 0 mrad +/- 1 mrad). Anschließend Kontermutter der Justageschraube mit Schraubensicherungslack versehen",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Arbeitsschritt 6: Finale Überprüfung",
+    "style": "Formatvorlage1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Die folgenden Messungen müssen jeweils mit allen Wellenlängen (Leistung 30%) durchgeführt werden und in die unten stehende Tabelle eingetragen werden. (1 Pixel ≙ 6,5 µm)",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Variablen Tilt (Kippung Bild oben minus unten)",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Maximale Linienkrümmung bestimmen. Dies ist der Maximalwert der Krümmung mit der Linie an den drei Positionen (oben, mitte, unten im Bild)",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Variation der Linienkrümmung bestimmen. Dies ist die maximale Differenz der Krümmung an den drei Positionen (oben, mitte, unten im Bild)",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Linienbreite FWHM messen in der Linien-Mitte, Linie vertikal Position: Mitte",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Linienbreite FWHM Variation an den Positionen Top/Center/Bottom",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Flattop Homogenitaet/Relativ Intensity messen. Linie vertikal Position: Mitte",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Maximale Flattop Variation an den Positionen Top/Center/Bottom",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Nr",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Messung",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Grenzwerte",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "561 nm",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "405 nm",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "488 nm",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "638 nm",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "1",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Variablen Tilt",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "0 mrad +/- 1 mrad",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "2",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Maximale Linienkrümmung",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "0 Pixel +/- 2 Pixel",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "3",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Variation der Linienkrümmung",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "0 Pixel +/- 2 Pixel",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "4",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Linienbreite FWHM",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "561:13-21µm",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "405: 9-16µm",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "488: 11-19µm",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "640: 15-24µm",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "5",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Linienbreite FWHM Variation",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "0-35%",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "6",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Flattop Homogenitaet/Relative Intensity",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "100-70 %",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "7",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Maximale Flattop Variation Top/Center/Bottom",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "0-35%",
+    "style": "KeinLeerraum",
+    "num": true,
+    "bold": false
+  },
+  {
+    "text": "Alle Befestigungsschrauben mit Schraubensicherungslack versehen",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Finale Position der Scanlinse messen (Soll-Abstand 5 mm): _______ mm",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Arbeitsschritt 7: Verpacken",
+    "style": "Formatvorlage1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Z-Trieb in einem Zipp-Beutel verpacken und Checkliste beilegen",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Arbeitsschritt 8: Messwerte ablegen",
+    "style": "Formatvorlage1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Alle gemessenen Werte in das Req. Test Sheet übertragen:",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Bilder aus dem Skript ablegen:",
+    "style": "KeinLeerraum",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Versionskontrolle",
+    "style": "Formatvorlage1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Revision",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Bemerkung",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Datum",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "0",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "DRAFT-Status",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Freigabe (per digitale Signatur)",
+    "style": "Formatvorlage1",
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Erstellt",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "M. Jäger",
+    "style": null,
+    "num": false,
+    "bold": false
+  },
+  {
+    "text": "Freigegeben",
+    "style": null,
+    "num": false,
+    "bold": false
+  }
+]

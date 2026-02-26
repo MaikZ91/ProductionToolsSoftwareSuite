@@ -1,16 +1,22 @@
-# --- Snap/GIO Modul-Konflikte entschärfen (vor allen anderen Imports) ---
+﻿# --- Snap/GIO Modul-Konflikte entschÃ¤rfen (vor allen anderen Imports) ---
 import os as _os
 _os.environ.pop("GIO_MODULE_DIR", None)
 import datetime
+import hashlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
+import tempfile
 import time
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
+import zipfile
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 
@@ -26,7 +32,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor, QFont, QPainter, QPen, QBrush, QIcon,
     QPainterPath, QPixmap, QImage,
-    QFontMetrics, QTextCursor
+    QFontMetrics, QTextCursor, QTextImageFormat
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -40,20 +46,104 @@ from PySide6.QtWidgets import (
 import matplotlib
 matplotlib.use("qtagg")
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.figure import Figure
-from matplotlib import image as mpimg
 
-import datenbank as db
-from ie_Framework.Utility import miltenyiBarcode
-from ie_Framework.DB import dbConnector
-from ie_Framework.Tools.Resolve import (autofocus,z_trieb,gitterschieber,xy_stage)
+from data_management import Datenbank as db
+from data_management import LokaleSpeicherung as local_storage
+from ie_Framework.Tools.Resolve import (autofocus, z_trieb, gitterschieber)
 from ie_Framework.Tools.Blaze import xy_stage as blaze_stage_test
 from ie_Framework.Hardware.Camera.pco_panda_camera import PcoCameraBackend
 from ie_Framework.Algorithm.laser_spot_detection import LaserSpotDetector as StageLaserSpotDetector
 
-# Keep legacy in-file naming used across this module.
-resolve_stage = xy_stage
+# Keep legacy in-file naming used across this module, but load lazily so
+# PMAC detection does not run during app startup.
+class _LazyResolveStageModule:
+    def __init__(self):
+        self._module = None
+
+    def _load(self):
+        if self._module is None:
+            from ie_Framework.Tools.Resolve import xy_stage as _xy_stage
+            self._module = _xy_stage
+        return self._module
+
+    def __getattr__(self, item):
+        return getattr(self._load(), item)
+
+
+resolve_stage = _LazyResolveStageModule()
+
+
+def _shutdown_executor(executor):
+    if executor is None:
+        return
+    try:
+        executor.shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        executor.shutdown(wait=False)
+    except Exception:
+        pass
+
+
+MODEL_NAME = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:3b")
+
+
+class OllamaWarmupManager:
+    def __init__(self, model_name: str, host: str, keep_alive: str = "24h"):
+        self.model_name = model_name
+        self.host = host
+        self.keep_alive = keep_alive
+        self._lock = threading.Lock()
+        self._thread = None
+        self._ready = False
+        self._started = False
+        self._finished = False
+        self._last_error = ""
+
+    def start_async(self):
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+            self._thread = threading.Thread(target=self._run, name="ollama-warmup", daemon=True)
+            self._thread.start()
+
+    def _run(self):
+        try:
+            from ollama import Client  # official Python API
+            client = Client(host=self.host)
+            client.chat(
+                model=self.model_name,
+                messages=[{"role": "user", "content": ""}],
+                options={"num_predict": 1, "temperature": 0},
+                keep_alive=self.keep_alive,
+            )
+            with self._lock:
+                self._ready = True
+                self._last_error = ""
+        except Exception as exc:
+            with self._lock:
+                self._ready = False
+                self._last_error = str(exc)
+        finally:
+            with self._lock:
+                self._finished = True
+
+    def is_ready(self) -> bool:
+        with self._lock:
+            return self._ready
+
+    def is_finished(self) -> bool:
+        with self._lock:
+            return self._finished
+
+    def has_error(self) -> bool:
+        with self._lock:
+            return bool(self._finished and self._last_error and not self._ready)
+
+    def error_text(self) -> str:
+        with self._lock:
+            return self._last_error
 # ========================== DATENBANK / INFRA ==========================
 DASHBOARD_WIDGET_CLS, _DASHBOARD_IMPORT_ERROR = (None, None)
 # --- THEME CONFIGURATION ---
@@ -76,450 +166,18 @@ FONTS = {
     "mono": "Consolas",
 }
 
-_DEFAULT_PDF_COLORS = {
-    "bg": "#050505",
-    "surface": "#0b0b0b",
-    "surface_light": "#141414",
-    "border": "#1f1f1f",
-    "primary": "#f5f5f5",
-    "primary_hover": "#e6e6e6",
-    "secondary": "#bdbdbd",
-    "text": "#f5f5f5",
-    "text_muted": "#9a9a9a",
-    "danger": "#ff5b5b",
-    "success": "#7ad39b",
-    "warning": "#f0b74a",
-}
-
-_PDF_COLORS = dict(_DEFAULT_PDF_COLORS)
-_PDF_DEFAULT_DIR_PROVIDER = None
 _LAST_PDF_UPLOAD_GUID = None
 _LAST_PDF_UPLOAD_TESTTYPE = None
-_PDF_DB_TESTTYPE_CANDIDATES = [
-    "stage_test",
-    "gitterschieber_tool",
-    "kleberoboter",
-    "laserscan_fine_lens",
-    "laserscan_fine_prisma",
-]
 
 
-def _find_guid_column_name(columns) -> str | None:
-    for col in columns:
-        norm = str(col).lower().replace("_", "").replace("-", "")
-        if "testguid" in norm:
-            return str(col)
-    for col in columns:
-        norm = str(col).lower().replace("_", "").replace("-", "")
-        if "guid" in norm and "test" in norm:
-            return str(col)
-    return None
+def _remember_last_pdf_upload(guid: str | None, preferred_testtype: str | None):
+    if not guid:
+        return
+    global _LAST_PDF_UPLOAD_GUID, _LAST_PDF_UPLOAD_TESTTYPE
+    _LAST_PDF_UPLOAD_GUID = str(guid).strip()
+    _LAST_PDF_UPLOAD_TESTTYPE = (preferred_testtype or "gitterschieber_tool").strip() or "gitterschieber_tool"
 
 
-def _find_time_column_name(columns) -> str | None:
-    priorities = ("starttest", "endtest", "timestamp", "datetime", "time", "date")
-    lowered = [(str(c), str(c).lower()) for c in columns]
-    for key in priorities:
-        for original, low in lowered:
-            if key in low:
-                return original
-    return None
-
-
-def _to_dataframe(raw):
-    if isinstance(raw, tuple) and len(raw) >= 2:
-        # dbConnector often returns (status, dataframe_or_text)
-        raw = raw[1]
-    try:
-        return db.parse_db_response(raw)
-    except Exception:
-        if isinstance(raw, pd.DataFrame):
-            return raw
-        return pd.DataFrame()
-
-
-def _extract_latest_test_guid(conn, preferred_testtype: str | None = None) -> str | None:
-    candidates = []
-    if preferred_testtype:
-        candidates.append(preferred_testtype)
-    for t in _PDF_DB_TESTTYPE_CANDIDATES:
-        if t not in candidates:
-            candidates.append(t)
-
-    best_guid = None
-    best_ts = pd.Timestamp.min
-    for testtype in candidates:
-        try:
-            raw = conn.getLastTests(5, testtype)
-            df = _to_dataframe(raw)
-            if df.empty:
-                continue
-            guid_col = _find_guid_column_name(df.columns)
-            if not guid_col:
-                continue
-            time_col = _find_time_column_name(df.columns)
-            if time_col and time_col in df.columns:
-                ts_series = pd.to_datetime(df[time_col], errors="coerce")
-                idx = ts_series.fillna(pd.Timestamp.min).idxmax()
-                row = df.loc[idx]
-                ts = ts_series.loc[idx]
-            else:
-                row = df.iloc[0]
-                ts = pd.Timestamp.min
-            guid = str(row.get(guid_col, "")).strip()
-            if not guid:
-                continue
-            if ts >= best_ts:
-                best_ts = ts
-                best_guid = guid
-        except Exception:
-            continue
-    return best_guid
-
-
-def _find_user_column_name(columns) -> str | None:
-    for col in columns:
-        low = str(col).lower()
-        if low == "user" or "employee" in low:
-            return str(col)
-    return None
-
-#Aktuell: TEST_GUID als Rückgabeparameter von getLastTests
-def upload_pdf_to_db_simple(pdf):
-    with dbConnector.connection() as c:                     # DB connect (auto-disconnect)
-        now = datetime.datetime.now()                        # Zeitstempel
-        c.sendData(now, now, 0, "gitterschieber_tool",{"particle_count": 0, "justage_angle": 0.0},miltenyiBarcode.mBarcode(str(db.DUMMY_BARCODE)),"pdf_upload")# Test anlegen (GUID entsteht serverseitig)
-        df = _to_dataframe(c.getLastTests(1, "gitterschieber_tool"))  # letzten Test holen
-        Test_GUID = str(df.iloc[0]["Test_GUID"]).strip()             # Test_GUID extrahieren
-        c.saveFile(Test_GUID, str(pdf))                              # PDF an Test hängen
-        return Test_GUID                                             # Test_GUID zurückgeben
-
-
-def _upload_pdf_to_db_job(pdf_path: pathlib.Path | str, preferred_testtype: str | None = None):
-    guid = upload_pdf_to_db_simple(pdf_path)
-    if guid:
-        global _LAST_PDF_UPLOAD_GUID, _LAST_PDF_UPLOAD_TESTTYPE
-        _LAST_PDF_UPLOAD_GUID = guid
-        _LAST_PDF_UPLOAD_TESTTYPE = "gitterschieber_tool"
-
-
-def _upload_pdf_to_db_async(pdf_path: pathlib.Path | str, test_guid: str | None = None, preferred_testtype: str | None = None):
-    # Kept for call compatibility; test_guid is ignored by the simplified upload flow.
-    threading.Thread(
-        target=_upload_pdf_to_db_job,
-        kwargs={
-            "pdf_path": pdf_path,
-            "preferred_testtype": preferred_testtype,
-        },
-        daemon=True,
-    ).start()
-
-
-class PdfModule:
-    @staticmethod
-    def set_theme(colors: dict | None):
-        if colors:
-            _PDF_COLORS.update(colors)
-
-    @staticmethod
-    def set_default_dir_provider(provider):
-        global _PDF_DEFAULT_DIR_PROVIDER
-        _PDF_DEFAULT_DIR_PROVIDER = provider
-
-    @staticmethod
-    def _get_default_dir() -> pathlib.Path:
-        if _PDF_DEFAULT_DIR_PROVIDER:
-            try:
-                return pathlib.Path(_PDF_DEFAULT_DIR_PROVIDER())
-            except Exception:
-                pass
-        return pathlib.Path.cwd()
-
-    @staticmethod
-    def _base_figure():
-        return Figure(figsize=(11.69, 8.27), dpi=110, facecolor=_PDF_COLORS["surface"])
-
-    @staticmethod
-    def qimage_to_rgb_array(qimg: QImage):
-        if qimg is None:
-            return None
-        qimg = qimg.convertToFormat(QImage.Format_RGB888)
-        h, w = qimg.height(), qimg.width()
-        stride = qimg.bytesPerLine()
-        buf = qimg.constBits()
-        arr = np.frombuffer(buf, np.uint8, count=qimg.sizeInBytes())
-        return arr.reshape((h, stride // 3, 3))[:, :w, :]
-
-    @staticmethod
-    def _load_image(path: str | None, log_errors: bool = False):
-        if not path or not os.path.exists(path):
-            return None
-        try:
-            return mpimg.imread(path)
-        except Exception as exc:
-            if log_errors:
-                print(f"Error reading image for PDF: {exc}")
-            return None
-
-    @staticmethod
-    def _render_page(pdf: PdfPages, page: dict):
-        kind = page.get("type") or "text"
-        if kind == "figure":
-            fig = page.get("figure")
-            if fig is not None:
-                pdf.savefig(fig)
-            return
-        if kind == "image_path":
-            img = PdfModule._load_image(page.get("path"), log_errors=True)
-            if img is None:
-                return
-            page = dict(page)
-            page["image"] = img
-            kind = "image"
-        if kind == "image_grid":
-            images = []
-            for path in page.get("paths") or []:
-                img = PdfModule._load_image(path)
-                if img is not None:
-                    images.append(img)
-            if not images:
-                page = {"type": "text", "title": page.get("title"), "text": "Kein Bild"}
-                kind = "text"
-            else:
-                page = dict(page)
-                page["images"] = images
-        if kind == "summary":
-            page = dict(page)
-            page["text"] = page.get("lines", [])
-            kind = "text"
-
-        fig = PdfModule._base_figure()
-        title = page.get("title")
-        header_lines = page.get("header_lines")
-        if title:
-            fig.text(0.02, 0.98, title, va="top", ha="left", fontsize=14, color=_PDF_COLORS["text"])
-        if header_lines:
-            y = 0.94 if title else 0.98
-            for line in header_lines:
-                fig.text(0.02, y, line, va="top", ha="left", fontsize=10, color=_PDF_COLORS["text_muted"])
-                y -= 0.04
-
-        if kind == "text":
-            ax = fig.add_subplot(111)
-            ax.axis("off")
-            text = page.get("text", "")
-            if text is None:
-                text = ""
-            if isinstance(text, (list, tuple)):
-                text = "\n".join(text)
-            ax.text(0.05, 0.95, text, va="top", ha="left", fontsize=12, color=_PDF_COLORS["text"], family="monospace")
-        elif kind == "image":
-            ax = fig.add_subplot(111)
-            ax.axis("off")
-            image = page.get("image")
-            if image is not None:
-                ax.imshow(image)
-            else:
-                ax.text(0.5, 0.5, "Kein Bild", ha="center", va="center", color=_PDF_COLORS["text_muted"])
-        elif kind == "text_image":
-            ax_text = fig.add_subplot(121)
-            ax_text.axis("off")
-            ax_text.text(
-                0.05,
-                0.95,
-                page.get("text", "") or "",
-                va="top",
-                ha="left",
-                fontsize=12,
-                color=_PDF_COLORS["text"],
-                family="monospace",
-            )
-            ax_img = fig.add_subplot(122)
-            ax_img.axis("off")
-            image = page.get("image")
-            if image is not None:
-                ax_img.imshow(image)
-            else:
-                ax_img.text(0.5, 0.5, "Kein Bild", ha="center", va="center", color=_PDF_COLORS["text_muted"])
-        elif kind == "image_grid":
-            cols = max(1, int(page.get("cols", 2)))
-            images = page.get("images") or []
-            rows = int(np.ceil(len(images) / cols)) if images else 1
-            for i, img in enumerate(images, 1):
-                ax = fig.add_subplot(rows, cols, i)
-                ax.axis("off")
-                if img is not None:
-                    ax.imshow(img)
-                else:
-                    ax.text(0.5, 0.5, "Kein Bild", ha="center", va="center", color=_PDF_COLORS["text_muted"])
-        else:
-            ax = fig.add_subplot(111)
-            ax.axis("off")
-            ax.text(
-                0.05,
-                0.95,
-                str(page.get("text", "") or ""),
-                va="top",
-                ha="left",
-                fontsize=12,
-                color=_PDF_COLORS["text"],
-                family="monospace",
-            )
-
-        if title or header_lines:
-            if kind in {"image", "image_grid"}:
-                fig.tight_layout(rect=[0, 0, 1, 0.9])
-            elif kind == "text_image":
-                fig.tight_layout(rect=[0, 0, 1, 0.95])
-        pdf.savefig(fig)
-
-    @staticmethod
-    def _is_path(value) -> bool:
-        try:
-            return value is not None and pathlib.Path(value).exists()
-        except Exception:
-            return False
-
-    @staticmethod
-    def _normalize_item(item):
-        if isinstance(item, dict):
-            return item
-        if isinstance(item, Figure):
-            return {"type": "figure", "figure": item}
-        if isinstance(item, QImage):
-            return {"type": "image", "image": PdfModule.qimage_to_rgb_array(item)}
-        if isinstance(item, np.ndarray):
-            return {"type": "image", "image": item}
-        if isinstance(item, tuple) and len(item) == 2:
-            return {"type": "text_image", "text": item[0], "image": item[1]}
-        if isinstance(item, (pathlib.Path, str)) and PdfModule._is_path(item):
-            return {"type": "image_path", "path": str(item)}
-        if isinstance(item, (pathlib.Path, str)):
-            return {"type": "text", "text": str(item)}
-        return {"type": "text", "text": str(item)}
-
-    @staticmethod
-    def write_pdf(
-        pdf_path: pathlib.Path | str,
-        items,
-        db_test_type: str | None = None,
-        db_test_guid: str | None = None,
-    ):
-        PdfModule.report(
-            pdf_path,
-            items,
-            db_test_type=db_test_type,
-            db_test_guid=db_test_guid,
-        )
-
-    @staticmethod
-    def report(
-        pdf_path: pathlib.Path | str,
-        items,
-        db_test_type: str | None = None,
-        db_test_guid: str | None = None,
-        upload_to_db: bool = True,
-    ):
-        if not isinstance(items, (list, tuple)):
-            items = [items]
-        with PdfPages(str(pdf_path)) as pdf:
-            for item in items:
-                page = PdfModule._normalize_item(item)
-                PdfModule._render_page(pdf, page)
-        if upload_to_db:
-            _upload_pdf_to_db_async(
-                pdf_path=pdf_path,
-                test_guid=db_test_guid,
-                preferred_testtype=db_test_type,
-            )
-
-    @staticmethod
-    def save_camera_pdf_capture(parent, frame_provider, filename_prefix, page_title, header_lines_provider=None, db_test_type: str = "gitterschieber_tool"):
-        frame = frame_provider()
-        if frame is None:
-            QMessageBox.warning(parent, "PDF speichern", "Kein Bild verfuegbar.")
-            return
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_dir = PdfModule._get_default_dir()
-        default_dir.mkdir(parents=True, exist_ok=True)
-        path_str = str(default_dir / f"{filename_prefix}_{ts}.pdf")
-        header_lines = header_lines_provider() if header_lines_provider else None
-        PdfModule.report(path_str, [{
-            "type": "image",
-            "title": page_title,
-            "header_lines": header_lines,
-            "image": frame,
-        }], db_test_type=db_test_type)
-        QMessageBox.information(parent, "PDF gespeichert", f"Report gespeichert:\n{path_str}")
-
-    @staticmethod
-    def build_alignment_report(last_center, last_frame_size, laser):
-        if last_center is None or not last_frame_size:
-            return None, "Keine Alignment-Daten verfuegbar."
-        w, h = last_frame_size
-        cx, cy = last_center
-        ref = laser.get_reference_point() if laser is not None else None
-        if ref is not None:
-            rx, ry = ref
-            dx = int(cx - rx)
-            dy = int(cy - ry)
-            ref_text = f"{rx}, {ry}"
-        else:
-            dx = int(cx - w // 2)
-            dy = int(cy - h // 2)
-            ref_text = "center"
-        dist = float(np.hypot(dx, dy))
-        px_um = None
-        if laser is not None:
-            px_um = laser.get_pixel_size_um()
-        tol_px = 5.0
-        ok = (dist <= tol_px)
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        text_lines = [
-            "Autofocus Alignment Report",
-            "",
-            f"Zeitpunkt: {now}",
-            f"Bildgroesse: {w} x {h} px",
-            f"Center: {cx}, {cy} px",
-            f"Referenz: {ref_text}",
-            f"dx/dy: {dx:+d} px / {dy:+d} px",
-            f"dist: {dist:.2f} px",
-            f"Toleranz: +/- {tol_px:.1f} px -> {'OK' if ok else 'ALIGN'}",
-        ]
-        if px_um:
-            dx_um = dx * px_um
-            dy_um = dy * px_um
-            dist_um = dist * px_um
-            dist_mm = dist_um / 1000.0
-            text_lines += [
-                f"dx/dy: {dx_um:+.1f} um / {dy_um:+.1f} um",
-                f"dist: {dist_um:.1f} um ({dist_mm:.3f} mm)",
-            ]
-        return "\n".join(text_lines), None
-
-    @staticmethod
-    def save_text_image_pdf(parent, image_provider, text_provider, filename_prefix, page_title=None, db_test_type: str = "gitterschieber_tool"):
-        image = image_provider()
-        if image is None:
-            QMessageBox.warning(parent, "PDF speichern", "Kein Bild verfuegbar.")
-            return
-        text, err = text_provider()
-        if text is None:
-            QMessageBox.warning(parent, "PDF speichern", err or "Keine Daten verfuegbar.")
-            return
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_dir = PdfModule._get_default_dir()
-        default_dir.mkdir(parents=True, exist_ok=True)
-        path_str = str(default_dir / f"{filename_prefix}_{ts}.pdf")
-        PdfModule.report(path_str, [{
-            "type": "text_image",
-            "title": page_title,
-            "text": text,
-            "image": image,
-        }], db_test_type=db_test_type)
-        QMessageBox.information(parent, "PDF gespeichert", f"Report gespeichert:\n{path_str}")
-
-PdfModule.set_theme(COLORS)
 def _latest_stage_outdir() -> pathlib.Path:
     root = resolve_stage.DATA_ROOT
     newest = None
@@ -541,7 +199,9 @@ def _latest_stage_outdir() -> pathlib.Path:
     except Exception:
         return root
     return newest if newest is not None else root
-PdfModule.set_default_dir_provider(_latest_stage_outdir)
+local_storage.PdfModule.set_theme(COLORS)
+local_storage.PdfModule.set_default_dir_provider(_latest_stage_outdir)
+local_storage.PdfModule.set_upload_success_callback(_remember_last_pdf_upload)
 def _make_folder_icon(color: str, size: int = 16) -> QIcon:
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
@@ -1369,7 +1029,7 @@ class DashboardView(QWidget):
         self.combo_testtype.currentIndexChanged.connect(self.trigger_refresh)
         self.combo_testtype.setFixedHeight(28)
         self.combo_testtype.setFixedWidth(190)
-        self.status_indicator = QPushButton("● LIVE")
+        self.status_indicator = QPushButton("â— LIVE")
         self.status_indicator.setCursor(Qt.PointingHandCursor)
         self.status_indicator.clicked.connect(self.trigger_refresh)
         self.status_indicator.setStyleSheet(
@@ -1379,7 +1039,7 @@ class DashboardView(QWidget):
         self.btn_goto_ipc = ModernButton("IPC", "secondary")
         self.btn_goto_ipc.setObjectName("Dash_Btn_IPC")
         self.btn_goto_ipc.setFixedHeight(28)
-        self.btn_toggle_entry = ModernButton("New Record", "ghost")
+        self.btn_toggle_entry = ModernButton("New Entry", "ghost")
         self.btn_toggle_entry.setFixedHeight(28)
         controls_layout.addStretch()
         controls_layout.addWidget(self.combo_testtype)
@@ -1395,9 +1055,7 @@ class DashboardView(QWidget):
         entry_layout.setContentsMargins(0, 0, 0, 0)
         entry_layout.addWidget(entry_card)
         self.entry_container.setVisible(False)
-        self.btn_toggle_entry.clicked.connect(
-            lambda: self.entry_container.setVisible(not self.entry_container.isVisible())
-        )
+        self.btn_toggle_entry.clicked.connect(self._toggle_entry_visibility)
         entry_row = QHBoxLayout()
         entry_row.setContentsMargins(0, 0, 0, 0)
         entry_row.addWidget(self.entry_container)
@@ -1450,6 +1108,8 @@ class DashboardView(QWidget):
         self.timer.timeout.connect(self.update_data)
         # Initial fetch only
         self.update_data()
+    def _toggle_entry_visibility(self):
+        self.entry_container.setVisible(not self.entry_container.isVisible())
     def setup_entry_ui_compact(self, layout=None):
         entry_card = Card("New Record")
         entry_card.set_compact()
@@ -1497,6 +1157,23 @@ class DashboardView(QWidget):
         l_stage.addWidget(self.le_pos_name); l_stage.addWidget(self.le_fov)
         self.entry_stack.addWidget(w_kleber); self.entry_stack.addWidget(w_git); self.entry_stack.addWidget(w_stage)
         entry_layout.addWidget(self.entry_stack)
+        self._entry_media_path = ""
+        media_row = QHBoxLayout()
+        media_row.setSpacing(6)
+        self.btn_pick_entry_media = ModernButton("Media waehlen", "secondary")
+        self.btn_pick_entry_media.setFixedHeight(28)
+        self.btn_pick_entry_media.clicked.connect(self._pick_entry_media)
+        media_row.addWidget(self.btn_pick_entry_media)
+        self.btn_clear_entry_media = ModernButton("Media entfernen", "ghost")
+        self.btn_clear_entry_media.setFixedHeight(28)
+        self.btn_clear_entry_media.clicked.connect(self._clear_entry_media)
+        media_row.addWidget(self.btn_clear_entry_media)
+        media_row.addStretch()
+        entry_layout.addLayout(media_row)
+        self.lbl_entry_media = QLabel("Kein Media ausgewaehlt")
+        self.lbl_entry_media.setWordWrap(True)
+        self.lbl_entry_media.setStyleSheet(f"color: {COLORS['text_muted']}; border: none;")
+        entry_layout.addWidget(self.lbl_entry_media)
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
         self.btn_send = ModernButton("Send", "primary")
@@ -1551,15 +1228,15 @@ class DashboardView(QWidget):
             return
         testtype = self.combo_testtype.currentText()
         self._is_fetching = True
-        source_label = "GW" if db.is_on_gateway_wifi() else "DB"
+        source_label = "GW" if db.Gateway.is_on_gateway_wifi() else "DB"
         # UI Feedback
-        self.status_indicator.setText(f"● FETCHING ({source_label})")
+        self.status_indicator.setText(f"â— FETCHING ({source_label})")
         self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['text_muted']}; font-weight: 800; font-size: 11px; margin-left: 10px; }}")
         def task():
             try:
                 # Dashboard should prefer DB data so uploaded files map to visible test_guid rows.
                 # Gateway remains a fallback inside fetch_test_data() on DB errors.
-                df, connected = db.fetch_test_data(testtype, limit=20, prefer_gateway=False)
+                df, connected = db.Dashboard.fetch_test_data(testtype, limit=20, prefer_gateway=False)
                 self.data_updated.emit(df, connected)
             except Exception as e:
                 print(f"Background Fetch Error: {e}")
@@ -1569,10 +1246,10 @@ class DashboardView(QWidget):
         """Processes the background result on the main thread."""
         self._is_fetching = False
         testtype = self.combo_testtype.currentText()
-        source_label = "GW" if db.is_on_gateway_wifi() else "DB"
+        source_label = "GW" if db.Gateway.is_on_gateway_wifi() else "DB"
         # Update Connection Status UI
         if not connected:
-            self.status_indicator.setText(f"● OFFLINE {source_label} (Click to Retry)")
+            self.status_indicator.setText(f"â— OFFLINE {source_label} (Click to Retry)")
             self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['danger']}; font-weight: 800; font-size: 11px; margin-left: 10px; }}")
             # Stop automatic retries as requested
             self.timer.stop()
@@ -1582,7 +1259,7 @@ class DashboardView(QWidget):
             self.kpi_last.value_label.setText("N/A")
             # Show connection error in table
             self.table.setRowCount(1)
-            item = QTableWidgetItem("Datenbankverbindung nicht verfügbar")
+            item = QTableWidgetItem("Datenbankverbindung nicht verfÃ¼gbar")
             item.setTextAlignment(Qt.AlignCenter)
             item.setForeground(QBrush(QColor(COLORS['danger'])))
             item.setFont(QFont(FONTS['ui'], 11, QFont.Bold))
@@ -1592,7 +1269,7 @@ class DashboardView(QWidget):
             self.table.setSpan(0, 0, 1, max(1, self.table.columnCount())) # Span across all columns
             return
         else:
-            self.status_indicator.setText(f"● LIVE ({source_label})")
+            self.status_indicator.setText(f"â— LIVE ({source_label})")
             self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['success']}; font-weight: 800; font-size: 11px; text-align: left; padding-left: 5px; }}")
             # Clear potential spans from error state
             self.table.clearSpans()
@@ -1600,36 +1277,20 @@ class DashboardView(QWidget):
         df = df.copy()
         df["Media"] = "Nein"
         if not df.empty:
-            guid_col_name = _find_guid_column_name(df.columns)
-            media_lookup = {}
+            guid_col_name = db.Parsing.find_guid_column_name(df.columns)
             if guid_col_name:
+                media_lookup = {}
                 unique_guids = []
                 for val in df[guid_col_name].tolist():
                     guid = "" if pd.isna(val) else str(val).strip()
-                    if guid and guid not in media_lookup:
+                    if guid and guid not in unique_guids:
                         unique_guids.append(guid)
                 if unique_guids:
-                    conn = None
                     try:
-                        conn = dbConnector.connection()
-                        conn.connect()
-                        for guid in unique_guids:
-                            has_media = False
-                            try:
-                                raw = conn.getFileListFromTest(guid)
-                                files_df = _to_dataframe(raw)
-                                has_media = not files_df.empty
-                            except Exception:
-                                has_media = False
-                            media_lookup[guid] = has_media
+                        media_lookup = db.Files.get_media_presence_map(unique_guids)
                     except Exception as exc:
+                        media_lookup = {}
                         print(f"Dashboard media lookup error: {exc}")
-                    finally:
-                        if conn:
-                            try:
-                                conn.disconnect()
-                            except Exception:
-                                pass
                 df["Media"] = df[guid_col_name].apply(
                     lambda v: "Ja" if media_lookup.get("" if pd.isna(v) else str(v).strip(), False) else "Nein"
                 )
@@ -1810,25 +1471,12 @@ class DashboardView(QWidget):
         if not test_guid:
             QMessageBox.warning(self, "Download", "Datensatz hat keine test_guid.")
             return
-        conn = None
         try:
-            conn = dbConnector.connection()
-            conn.connect()
-            raw = conn.getFileListFromTest(test_guid)
-            if isinstance(raw, tuple) and len(raw) >= 2 and int(raw[0]) != 0:
-                QMessageBox.warning(self, "Download", "Dateiliste konnte nicht geladen werden.")
-                return
-            file_df = _to_dataframe(raw)
+            file_df = db.Files.get_file_list_from_test(test_guid)
         except Exception as exc:
             print(f"Dashboard file list error: {exc}")
             QMessageBox.critical(self, "Download Fehler", f"Dateiliste konnte nicht geladen werden:\n{exc}")
             return
-        finally:
-            if conn:
-                try:
-                    conn.disconnect()
-                except Exception:
-                    pass
         if file_df.empty:
             QMessageBox.information(self, "Download", "Kein Media verfuegbar.")
             return
@@ -1879,11 +1527,8 @@ class DashboardView(QWidget):
         test_guid = "" if test_guid is None else str(test_guid).strip()
         self._download_media_for_row(item.row(), preferred_test_guid=test_guid)
     def _download_file_from_db(self, file_id: int, filename_hint: str):
-        conn = None
         try:
-            conn = dbConnector.connection()
-            conn.connect()
-            file_bytes = conn.downloadFile(int(file_id))
+            file_bytes = db.Files.download_file_bytes(int(file_id))
             if not file_bytes:
                 QMessageBox.warning(self, "Download", "Leere Datei oder Download fehlgeschlagen.")
                 return
@@ -1901,12 +1546,6 @@ class DashboardView(QWidget):
             QMessageBox.information(self, "Download", f"Datei gespeichert:\n{save_path}")
         except Exception as exc:
             QMessageBox.critical(self, "Download Fehler", f"Datei konnte nicht geladen werden:\n{exc}")
-        finally:
-            if conn:
-                try:
-                    conn.disconnect()
-                except Exception:
-                    pass
     def clear_entry_fields(self):
         self.le_barcode.clear()
         self.le_user.clear()
@@ -1915,77 +1554,103 @@ class DashboardView(QWidget):
         self.le_angle.clear()
         self.le_pos_name.clear()
         self.le_fov.clear()
+        self._clear_entry_media()
+    def _pick_entry_media(self):
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Media auswaehlen",
+            "",
+            "Alle Dateien (*.*)",
+        )
+        if not selected:
+            return
+        self._entry_media_path = selected
+        self.lbl_entry_media.setText(selected)
+        self.lbl_entry_media.setToolTip(selected)
+    def _clear_entry_media(self):
+        self._entry_media_path = ""
+        if hasattr(self, "lbl_entry_media"):
+            self.lbl_entry_media.setText("Kein Media ausgewaehlt")
+            self.lbl_entry_media.setToolTip("")
     def send_current_entry(self):
         testtype = self.combo_testtype.currentText()
-        barcode_str = self.le_barcode.text().strip()
-        if not barcode_str:
-            barcode_str = str(db.DUMMY_BARCODE)
-        user_str = self.le_user.text().strip() or "unknown"
-        payload = {}
-        if testtype == "kleberoboter":
-            payload["ok"] = self.cb_ok.isChecked()
-        elif testtype == "gitterschieber_tool":
-            payload["particle_count"] = self._safe_int(self.le_particles.text())
-            payload["justage_angle"] = self._safe_float(self.le_angle.text())
-        elif testtype == "stage_test":
-            payload["position"] = self.le_pos_name.text().strip()
-            payload["field_of_view"] = self._safe_float(self.le_fov.text())
-        if db.is_on_gateway_wifi():
-            try:
-                payload, ack = db.send_payload_gateway(
-                    device_id=testtype,
-                    barcode=barcode_str,
-                    payload=payload,
-                    user=user_str,
-                    start_time=datetime.datetime.now(datetime.timezone.utc),
-                    end_time=datetime.datetime.now(datetime.timezone.utc),
-                )
-            except Exception as e:
-                self.status_indicator.setText("● GATEWAY FAILED")
-                QMessageBox.critical(self, "Gateway Error", f"Senden ueber Gateway fehlgeschlagen:\n{e}")
-                return
-            if ack == "OK":
-                self.status_indicator.setText("● GATEWAY SENT")
+        media_path = (self._entry_media_path or "").strip()
+        is_gateway = db.Gateway.is_on_gateway_wifi()
+        raw_fields = {
+            "ok": self.cb_ok.isChecked(),
+            "particle_count": self.le_particles.text(),
+            "justage_angle": self.le_angle.text(),
+            "position": self.le_pos_name.text(),
+            "field_of_view": self.le_fov.text(),
+        }
+
+        self.btn_send.setEnabled(False)
+        self.btn_send.setText("Sending...")
+        self.status_indicator.setText("● SENDING")
+
+        def _finish_send_ui():
+            self.btn_send.setEnabled(True)
+            self.btn_send.setText("Send")
+
+        def on_success(result):
+            def on_done():
+                _finish_send_ui()
+                if result.get("transport") == "gateway":
+                    if result.get("media_ignored"):
+                        QMessageBox.information(
+                            self,
+                            "Media Hinweis",
+                            "Media-Upload im Dashboard ist nur im DB-Modus verfuegbar (nicht ueber Gateway).",
+                        )
+                    ack = result.get("ack")
+                    if ack == "OK":
+                        self.status_indicator.setText("● GATEWAY SENT")
+                        QTimer.singleShot(2000, lambda: self.status_indicator.setText("● LIVE"))
+                        self.update_data()
+                        self.clear_entry_fields()
+                    else:
+                        self.status_indicator.setText("● GATEWAY NO ACK")
+                        QMessageBox.warning(
+                            self,
+                            "Gateway Antwort",
+                            f"Unerwartete Gateway-Antwort: {ack!r}\nPayload: {result.get('message_payload')}",
+                        )
+                    return
+
+                self.status_indicator.setText("● SENT SUCCESS")
                 QTimer.singleShot(2000, lambda: self.status_indicator.setText("● LIVE"))
                 self.update_data()
                 self.clear_entry_fields()
-            else:
-                self.status_indicator.setText("● GATEWAY NO ACK")
-                QMessageBox.warning(
-                    self,
-                    "Gateway Antwort",
-                    f"Unerwartete Gateway-Antwort: {ack!r}\nPayload: {payload}",
-                )
-            return
-        try:
-            barcode_obj = miltenyiBarcode.mBarcode(barcode_str)
-        except Exception as e:
-            QMessageBox.warning(self, "Barcode Fehler", f"Konnte Barcode nicht erzeugen:\n{e}")
-            return
-        conn = None
-        try:
-            conn = dbConnector.connection()
-            conn.connect()
-            now = datetime.datetime.now()
-            conn.sendData(
-                now, now, 0,
-                testtype, payload,
-                barcode_obj, user_str
-            )
-            # Show success and refresh
-            self.status_indicator.setText("● SENT SUCCESS")
-            QTimer.singleShot(2000, lambda: self.status_indicator.setText("● LIVE"))
-            self.update_data()
-            self.clear_entry_fields()
-        except Exception as e:
-            self.status_indicator.setText("● SEND FAILED")
-            QMessageBox.critical(self, "Database Error", f"Failed to send data:\n{e}")
-        finally:
-            if conn:
-                try:
-                    conn.disconnect()
-                except Exception:
-                    pass
+
+            QMetaObject.invokeMethod(self, on_done)
+
+        def on_error(exc):
+            msg = str(exc)
+
+            def on_error_ui():
+                _finish_send_ui()
+                if is_gateway:
+                    self.status_indicator.setText("● GATEWAY FAILED")
+                    QMessageBox.critical(self, "Gateway Error", f"Senden ueber Gateway fehlgeschlagen:\n{msg}")
+                else:
+                    self.status_indicator.setText("● SEND FAILED")
+                    QMessageBox.critical(self, "Database Error", f"Failed to send data:\n{msg}")
+
+            QMetaObject.invokeMethod(self, on_error_ui)
+
+        db.Dashboard.send_dashboard_entry_from_raw_async(
+            testtype=testtype,
+            raw_fields=raw_fields,
+            barcode=self.le_barcode.text(),
+            user=self.le_user.text(),
+            media_path=media_path or None,
+            send_timeout_sec=10.0,
+            media_timeout_sec=30.0,
+            prefer_gateway=is_gateway,
+            on_success=on_success,
+            on_error=on_error,
+        )
+
     def send_current_entry_gateway(self):
         testtype = self.combo_testtype.currentText()
         if testtype != "kleberoboter":
@@ -2000,7 +1665,7 @@ class DashboardView(QWidget):
             barcode_str = str(db.DUMMY_BARCODE)
         result_val = bool(self.cb_ok.isChecked())
         try:
-            payload, ack = db.send_dummy_payload_gateway(
+            payload, ack = db.Gateway.send_dummy_payload_gateway(
                 device_id="kleberoboter",
                 barcode=int(barcode_str),
                 result=result_val,
@@ -2008,16 +1673,16 @@ class DashboardView(QWidget):
                 end_time=datetime.datetime.now(datetime.timezone.utc),
             )
         except Exception as e:
-            self.status_indicator.setText("● GATEWAY FAILED")
+            self.status_indicator.setText("â— GATEWAY FAILED")
             QMessageBox.critical(self, "Gateway Error", f"Senden ueber Gateway fehlgeschlagen:\n{e}")
             return
         if ack == "OK":
-            self.status_indicator.setText("● GATEWAY SENT")
-            QTimer.singleShot(2000, lambda: self.status_indicator.setText("● LIVE"))
+            self.status_indicator.setText("â— GATEWAY SENT")
+            QTimer.singleShot(2000, lambda: self.status_indicator.setText("â— LIVE"))
             self.update_data()
             self.clear_entry_fields()
         else:
-            self.status_indicator.setText("● GATEWAY NO ACK")
+            self.status_indicator.setText("â— GATEWAY NO ACK")
             QMessageBox.warning(
                 self,
                 "Gateway Antwort",
@@ -2067,7 +1732,7 @@ def frame_to_qpixmap(frame, target_size=None) -> QPixmap:
             qimg = QImage(frame.data, w, h, w, QImage.Format_Grayscale8)
         elif frame.ndim == 3:
             h, w, ch = frame.shape
-            # BGR zu RGB für QImage
+            # BGR zu RGB fÃ¼r QImage
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
         else:
@@ -2398,20 +2063,20 @@ class AutofocusView(QWidget):
         al.addWidget(self.btn_toggle_ref)
         self.btn_save_align_pdf = ModernButton("Save PDF", "ghost")
         self.btn_save_align_pdf.setMinimumHeight(30)
-        self.btn_save_align_pdf.clicked.connect(lambda: PdfModule.save_text_image_pdf(
+        self.btn_save_align_pdf.clicked.connect(lambda: local_storage.PdfModule.save_text_image_pdf(
             self,
-            lambda: PdfModule.qimage_to_rgb_array(self._last_qimage),
-            lambda: PdfModule.build_alignment_report(self._last_center, self._last_frame_size, self._laser),
+            lambda: local_storage.PdfModule.qimage_to_rgb_array(self._last_qimage),
+            lambda: local_storage.PdfModule.build_alignment_report(self._last_center, self._last_frame_size, self._laser),
             "autofocus_alignment",
             "Autofocus Alignment Report",
             db_test_type="gitterschieber_tool",
         ))
         al.addWidget(self.btn_save_align_pdf)
-        self.lbl_ref = QLabel("Ref: —")
-        self.lbl_dx = QLabel("dx: —")
-        self.lbl_dy = QLabel("dy: —")
-        self.lbl_dist = QLabel("dist: —")
-        self.lbl_align_status = QLabel("Status: —")
+        self.lbl_ref = QLabel("Ref: â€”")
+        self.lbl_dx = QLabel("dx: â€”")
+        self.lbl_dy = QLabel("dy: â€”")
+        self.lbl_dist = QLabel("dist: â€”")
+        self.lbl_align_status = QLabel("Status: â€”")
         for lbl in (self.lbl_ref, self.lbl_dx, self.lbl_dy, self.lbl_dist, self.lbl_align_status):
             lbl.setStyleSheet(
                 f"background: {COLORS['surface_light']}; border: 1px solid {COLORS['border']}; "
@@ -2479,7 +2144,7 @@ class AutofocusView(QWidget):
         if self._switch_timer.isActive():
             self._switch_timer.stop()
         self._switch_timer.start(500)
-        # Exposure neu lesen wenn möglich
+        # Exposure neu lesen wenn mÃ¶glich
         try:
             if idx >= 0:
                 curr, min_e, max_e = autofocus.get_exposure_limits(idx)
@@ -2556,7 +2221,7 @@ class AutofocusView(QWidget):
                 pass
             try:
                 self.btn_toggle_ref.setText("Save Justage")
-                self.lbl_ref.setText("Ref: —")
+                self.lbl_ref.setText("Ref: â€”")
             except Exception:
                 pass
         except Exception as exc:
@@ -2573,6 +2238,22 @@ class AutofocusView(QWidget):
         if self.cam_embed is not None:
             self.cam_embed.stop()
         super().hideEvent(event)
+    def shutdown(self):
+        try:
+            if self._switch_timer.isActive():
+                self._switch_timer.stop()
+        except Exception:
+            pass
+        self._shutdown_laser_controller()
+        try:
+            if self.cam_embed is not None:
+                self.cam_embed.stop()
+        except Exception:
+            pass
+        try:
+            autofocus.shutdown_all()
+        except Exception:
+            pass
     def _on_laser_frame(self, qimg: QImage):
         try:
             self._last_qimage = qimg
@@ -2645,7 +2326,7 @@ class AutofocusView(QWidget):
         else:
             dx = int(cx - w // 2)
             dy = int(cy - h // 2)
-            self.lbl_ref.setText("Ref: —")
+            self.lbl_ref.setText("Ref: â€”")
         dist = float(np.hypot(dx, dy))
         px_um = None
         if self._laser is not None:
@@ -2655,9 +2336,9 @@ class AutofocusView(QWidget):
             dy_um = dy * px_um
             dist_um = dist * px_um
             dist_mm = dist_um / 1000.0
-            self.lbl_dx.setText(f"dx: {dx:+d} px  ({dx_um:+.1f} µm)")
-            self.lbl_dy.setText(f"dy: {dy:+d} px  ({dy_um:+.1f} µm)")
-            self.lbl_dist.setText(f"dist: {dist:.2f} px  ({dist_um:.1f} µm · {dist_mm:.3f} mm)")
+            self.lbl_dx.setText(f"dx: {dx:+d} px  ({dx_um:+.1f} Âµm)")
+            self.lbl_dy.setText(f"dy: {dy:+d} px  ({dy_um:+.1f} Âµm)")
+            self.lbl_dist.setText(f"dist: {dist:.2f} px  ({dist_um:.1f} Âµm Â· {dist_mm:.3f} mm)")
         else:
             self.lbl_dx.setText(f"dx: {dx:+d} px")
             self.lbl_dy.setText(f"dy: {dy:+d} px")
@@ -2666,7 +2347,7 @@ class AutofocusView(QWidget):
         ok = (dist <= tol_px)
         color = "#2ecc71" if ok else "#ff2740"
         text = "OK" if ok else "ALIGN"
-        self.lbl_align_status.setText(f"Status: {text} (≤ {tol_px:.1f} px)")
+        self.lbl_align_status.setText(f"Status: {text} (â‰¤ {tol_px:.1f} px)")
         self.lbl_align_status.setStyleSheet(
             f"background: {COLORS['surface_light']}; border: 1px solid {COLORS['border']}; "
             f"border-radius: 6px; padding: 4px 6px; font-size: 11px; color: {color};"
@@ -2856,11 +2537,17 @@ class ZTriebView(QWidget):
             self._stop_event = threading.Event()
             self._dauer_future = self.executor.submit(self.controller.run_dauertest, self._stop_event)
             self.btn_dauer.setText("Stop Test Sequence")
-    def closeEvent(self, event):
+    def shutdown(self):
         if self._stop_event:
             self._stop_event.set()
-        self.executor.shutdown(wait=False)
-        self.controller.shutdown()
+        _shutdown_executor(self.executor)
+        try:
+            self.controller.shutdown()
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        self.shutdown()
         super().closeEvent(event)
 class StageControlView(QWidget):
     def __init__(self, parent=None):
@@ -2950,7 +2637,7 @@ class StageControlView(QWidget):
         self.btn_dauer.clicked.connect(self.toggle_endurance_test)
         btn_layout.addWidget(self.btn_dauer)
         row_btn = QHBoxLayout()
-        self.btn_open = ModernButton("Ordner öffnen", "ghost")
+        self.btn_open = ModernButton("Ordner Ã¶ffnen", "ghost")
         self.btn_open.clicked.connect(self._open_folder)
         self.btn_open.setEnabled(True)
         row_btn.addWidget(self.btn_open)
@@ -3007,11 +2694,11 @@ class StageControlView(QWidget):
         qa_info = QVBoxLayout()
         qa_lbl = QLabel("Dauertest QA")
         qa_lbl.setStyleSheet(f"color: {COLORS['success']}; font-weight: bold; font-size: 12px; border:none; background:transparent;")
-        qa_lim = QLabel(f"Limit: {resolve_stage.DUR_MAX_UM:.1f} µm")
+        qa_lim = QLabel(f"Limit: {resolve_stage.DUR_MAX_UM:.1f} Âµm")
         qa_lim.setStyleSheet(f"color: {COLORS['success']}; opacity: 0.8; font-size: 11px; border:none; background:transparent;")
         qa_info.addWidget(qa_lbl)
         qa_info.addWidget(qa_lim)
-        self.qa_val = QLabel("0.42 µm")
+        self.qa_val = QLabel("0.42 Âµm")
         self.qa_val.setStyleSheet(f"color: {COLORS['success']}; font-weight: 800; font-size: 18px; border:none; background:transparent;")
         qa_layout.addLayout(qa_info)
         qa_layout.addStretch()
@@ -3038,7 +2725,7 @@ class StageControlView(QWidget):
         self.line_x, = self.chart.ax.plot([], [], color=COLORS['primary'], linewidth=2, label="Fehler X")
         self.line_y, = self.chart.ax.plot([], [], color=COLORS['secondary'], linewidth=2, label="Fehler Y")
         self.chart.ax.set_xlabel("Zeit [min]", color=COLORS['text_muted'])
-        self.chart.ax.set_ylabel("Abweichung [µm]", color=COLORS['text_muted'])
+        self.chart.ax.set_ylabel("Abweichung [Âµm]", color=COLORS['text_muted'])
         # Chart Legend
         leg = self.chart.ax.legend(loc='upper right', facecolor=COLORS['surface'], edgecolor=COLORS['border'], labelcolor=COLORS['text'])
         leg.get_frame().set_linewidth(1)
@@ -3072,15 +2759,14 @@ class StageControlView(QWidget):
             else:
                 subprocess.run(['xdg-open', str(path.resolve())])
         except Exception as e:
-            QMessageBox.warning(self, "Ordner öffnen", f"Konnte Ordner nicht öffnen:\n{e}")
+            QMessageBox.warning(self, "Ordner Ã¶ffnen", f"Konnte Ordner nicht Ã¶ffnen:\n{e}")
     def _send_stage_db_event(self, user_id: str, event_label: str):
         """Log stage test starts into the kleberoboter DB without blocking the UI."""
         def _task():
-            conn = None
             try:
                 now = datetime.datetime.now()
-                if db.is_on_gateway_wifi():
-                    db.send_payload_gateway(
+                if db.Gateway.is_on_gateway_wifi():
+                    db.Gateway.send_payload_gateway(
                         device_id="kleberoboter",
                         barcode=str(db.DUMMY_BARCODE),
                         payload={"ok": True, "event": event_label},
@@ -3089,40 +2775,29 @@ class StageControlView(QWidget):
                         end_time=now,
                     )
                 else:
-                    conn = dbConnector.connection()
-                    conn.connect()
-                    barcode_obj = miltenyiBarcode.mBarcode(str(db.DUMMY_BARCODE))
-                    conn.sendData(
-                        now,
-                        now,
-                        0,
-                        "kleberoboter",
-                        {"ok": True, "event": event_label},
-                        barcode_obj,
-                        str(user_id),
+                    db.Dashboard.send_test_data(
+                        testtype="kleberoboter",
+                        payload={"ok": True, "event": event_label},
+                        user=str(user_id),
+                        barcode=str(db.DUMMY_BARCODE),
+                        start_time=now,
+                        end_time=now,
                     )
                 print(f"[StageControl] DB event sent: {event_label} (user {user_id})")
             except Exception as e:
                 print(f"[StageControl] DB event failed ({event_label}): {e}")
-            finally:
-                if conn:
-                    try:
-                        conn.disconnect()
-                    except Exception:
-                        pass
         threading.Thread(target=_task, daemon=True).start()
     def _send_gitterschieber_measurement(self, err_x_um: float, err_y_um: float):
         """Send live endurance measurements into gitterschieber_tool (particle_count + justage_angle)."""
         def _task():
-            conn = None
             try:
                 now = datetime.datetime.now()
                 payload = {
                     "particle_count": int(round(abs(err_x_um))),
                     "justage_angle": round(float(err_y_um), 3),
                 }
-                if db.is_on_gateway_wifi():
-                    db.send_payload_gateway(
+                if db.Gateway.is_on_gateway_wifi():
+                    db.Gateway.send_payload_gateway(
                         device_id="gitterschieber_tool",
                         barcode=str(db.DUMMY_BARCODE),
                         payload=payload,
@@ -3131,26 +2806,16 @@ class StageControlView(QWidget):
                         end_time=now,
                     )
                 else:
-                    conn = dbConnector.connection()
-                    conn.connect()
-                    barcode_obj = miltenyiBarcode.mBarcode(str(db.DUMMY_BARCODE))
-                    conn.sendData(
-                        now,
-                        now,
-                        0,
-                        "gitterschieber_tool",
-                        payload,
-                        barcode_obj,
-                        "stage_sync",
+                    db.Dashboard.send_test_data(
+                        testtype="gitterschieber_tool",
+                        payload=payload,
+                        user="stage_sync",
+                        barcode=str(db.DUMMY_BARCODE),
+                        start_time=now,
+                        end_time=now,
                     )
             except Exception as e:
                 print(f"[StageControl] DB sync failed: {e}")
-            finally:
-                if conn:
-                    try:
-                        conn.disconnect()
-                    except Exception:
-                        pass
         threading.Thread(target=_task, daemon=True).start()
     def _on_db_sync_toggled(self, checked: bool):
         LIVE_STAGE_BUS.set_active(bool(checked))
@@ -3166,7 +2831,7 @@ class StageControlView(QWidget):
             self._start_precision_test()
     def _start_precision_test(self):
         if self.dauer_running:
-            QMessageBox.warning(self, "Test läuft", "Der Dauertest läuft bereits.")
+            QMessageBox.warning(self, "Test lÃ¤uft", "Der Dauertest lÃ¤uft bereits.")
             return
         self._acquire_metadata()
         out_dir = self._ensure_run_dir()
@@ -3229,8 +2894,8 @@ class StageControlView(QWidget):
         msg = (
             f"Kalibriermessung beendet.\n"
             f"Daten gespeichert: lokal und in DB.\n"
-            f"Max. Abweichung: {self._meas_max_um:.2f} µm\n"
-            f"Limit: {self.MEAS_MAX_UM:.1f} µm -> {'OK' if meas_ok else 'FEHLER'}"
+            f"Max. Abweichung: {self._meas_max_um:.2f} Âµm\n"
+            f"Limit: {self.MEAS_MAX_UM:.1f} Âµm -> {'OK' if meas_ok else 'FEHLER'}"
         )
         QMessageBox.information(self, "Test Beendet", msg)
     # --- Endurance Test ---
@@ -3241,7 +2906,7 @@ class StageControlView(QWidget):
             self._start_endurance_test()
     def _start_endurance_test(self):
         if self.running:
-            QMessageBox.warning(self, "Test läuft", "Die Kalibriermessung läuft bereits.")
+            QMessageBox.warning(self, "Test lÃ¤uft", "Die Kalibriermessung lÃ¤uft bereits.")
             return
         if hasattr(self, "duration_hours"):
             self._duration_sec = int(float(self.duration_hours.currentText()) * 3600)
@@ -3265,7 +2930,7 @@ class StageControlView(QWidget):
         avail_range = max(1, min(avail_x, avail_y))
         small_step = max(500, int(avail_range * 0.01))
         small_radius = max(2000, int(avail_range * 0.05))
-        self.dauer_wrk = resolve_stage.CombinedTestWorker(
+        self.dauer_wrk = resolve_stage.ExtendedEnduranceTestWorker(
             self.sc,
             batch=self._batch,
             out_dir=out_dir,
@@ -3317,7 +2982,7 @@ class StageControlView(QWidget):
         y_pad = max(0.2, y_max * 0.15)
         self.chart.ax.set_ylim(-y_max - y_pad, y_max + y_pad)
         self.chart.draw_idle()
-        self.qa_val.setText(f"{max_err:.2f} µm")
+        self.qa_val.setText(f"{max_err:.2f} Âµm")
         limit = data.get("limit_um", resolve_stage.DUR_MAX_UM)
         if max_err > limit:
              self.qa_box.setStyleSheet(f"background-color: {COLORS['danger']}15; border: 1px solid {COLORS['danger']}40; border-radius: 12px;")
@@ -3378,8 +3043,8 @@ class StageControlView(QWidget):
         msg = (
             f"Dauertest beendet.\n"
             f"Daten gespeichert: lokal und in DB.\n"
-            f"Max. Abweichung: {self._dur_max_um:.2f} µm\n"
-            f"Limit: {limit:.1f} µm -> {'OK' if dur_ok else 'FEHLER'}"
+            f"Max. Abweichung: {self._dur_max_um:.2f} Âµm\n"
+            f"Limit: {limit:.1f} Âµm -> {'OK' if dur_ok else 'FEHLER'}"
         )
         QMessageBox.information(self, "Test Beendet", msg)
     def _on_thr_finished(self):
@@ -3389,6 +3054,36 @@ class StageControlView(QWidget):
         self.btn_start.set_variant("primary")
         self.btn_dauer.setText("Start Endurance Test")
         self.btn_dauer.set_variant("secondary")
+    def shutdown(self):
+        try:
+            if self.wrk:
+                self.wrk.stop()
+        except Exception:
+            pass
+        try:
+            if self.dauer_wrk:
+                self.dauer_wrk.stop()
+        except Exception:
+            pass
+        for thr in (self.thr, self.dauer_thr):
+            if thr is None:
+                continue
+            try:
+                thr.quit()
+                thr.wait(800)
+            except Exception:
+                pass
+        self.thr = None
+        self.wrk = None
+        self.dauer_thr = None
+        self.dauer_wrk = None
+        LIVE_STAGE_BUS.set_active(False)
+        _shutdown_executor(getattr(self, "executor", None))
+        try:
+            if self.sc is not None and hasattr(self.sc, "shutdown"):
+                self.sc.shutdown()
+        except Exception:
+            pass
     def _plot_and_save(self, axis, mot, enc, calc, spm, epm, out_dir: pathlib.Path, batch: str) -> pathlib.Path:
         diff, idx = enc - calc, np.linspace(0, 1, len(mot))
         fig = Figure(figsize=(12, 8), dpi=110, facecolor=COLORS['surface'])
@@ -3401,11 +3096,11 @@ class StageControlView(QWidget):
             ax.grid(True, color=COLORS['border'], linestyle='--', alpha=0.3)
             for spine in ax.spines.values():
                 spine.set_color(COLORS['border'])
-        ax1 = fig.add_subplot(221); style_ax(ax1); ax1.plot(idx, mot, color=COLORS['primary']); ax1.set_title(f"Motorschritte · {axis}")
-        ax2 = fig.add_subplot(222); style_ax(ax2); ax2.scatter(mot, diff, c=idx, cmap="gray"); ax2.set_title(f"Encoder-Delta · {axis}")
-        ax3 = fig.add_subplot(223); style_ax(ax3); ax3.plot(diff / epm * 1e6, color=COLORS['primary']); ax3.set_title("Delta (µm) vs Index")
-        ax4 = fig.add_subplot(224); style_ax(ax4); ax4.scatter(mot / spm * 1e3, diff / epm * 1e6, c=idx, cmap="gray"); ax4.set_title("Delta (µm) vs Weg")
-        fig.suptitle(f"{axis}-Achse – Messung · Charge: {batch}", color=COLORS['text'], fontweight="semibold")
+        ax1 = fig.add_subplot(221); style_ax(ax1); ax1.plot(idx, mot, color=COLORS['primary']); ax1.set_title(f"Motorschritte Â· {axis}")
+        ax2 = fig.add_subplot(222); style_ax(ax2); ax2.scatter(mot, diff, c=idx, cmap="gray"); ax2.set_title(f"Encoder-Delta Â· {axis}")
+        ax3 = fig.add_subplot(223); style_ax(ax3); ax3.plot(diff / epm * 1e6, color=COLORS['primary']); ax3.set_title("Delta (Âµm) vs Index")
+        ax4 = fig.add_subplot(224); style_ax(ax4); ax4.scatter(mot / spm * 1e3, diff / epm * 1e6, c=idx, cmap="gray"); ax4.set_title("Delta (Âµm) vs Weg")
+        fig.suptitle(f"{axis}-Achse â€“ Messung Â· Charge: {batch}", color=COLORS['text'], fontweight="semibold")
         fig.tight_layout()
         out_png = out_dir / f"{axis}_{batch}.png"
         fig.savefig(out_png)
@@ -3456,7 +3151,7 @@ class StageControlView(QWidget):
             pages.append({"type": "image_grid", "title": "Diagramme", "paths": chart_paths, "cols": 2})
         if image_paths:
             pages.append({"type": "image_grid", "title": "Bilder", "paths": image_paths, "cols": 2})
-        PdfModule.write_pdf(pdf_path, pages, db_test_type="gitterschieber_tool")
+        local_storage.PdfModule.write_pdf(pdf_path, pages, db_test_type="gitterschieber_tool")
     def _on_error(self, msg):
         QMessageBox.critical(self, "Error", msg)
         self.running = False
@@ -3900,6 +3595,27 @@ class BlazeStageTestView(QWidget):
         self._stop_live_tracking()
         self._close_live_cameras()
         super().hideEvent(event)
+    def shutdown(self):
+        self._stop_live_tracking()
+        self._close_live_cameras()
+        try:
+            self.backend_timer.stop()
+        except Exception:
+            pass
+        if self.worker_thread is not None:
+            try:
+                self.worker_thread.quit()
+                self.worker_thread.wait(1000)
+            except Exception:
+                pass
+        self.worker_thread = None
+        self.worker = None
+        try:
+            if self.backend is not None and hasattr(self.backend, "shutdown"):
+                self.backend.shutdown()
+        except Exception:
+            pass
+        _shutdown_executor(self.executor)
 class GitterschieberView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3907,6 +3623,7 @@ class GitterschieberView(QWidget):
         self._overlay_active = False
         self._last_frame = None
         self._last_overlay = None
+        self._manual_pdf_path = ""
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(15)
@@ -3942,6 +3659,40 @@ class GitterschieberView(QWidget):
         self.metric_particles = self.add_metric(ml, "Particle Count", "---", COLORS['primary'])
         metric_card.add_layout(ml)
         right_panel.addWidget(metric_card)
+        upload_card = Card("PDF Upload (DB)")
+        ul = QVBoxLayout()
+        ul.setSpacing(10)
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(8)
+        self.spin_manual_angle = QDoubleSpinBox()
+        self.spin_manual_angle.setRange(-360.0, 360.0)
+        self.spin_manual_angle.setDecimals(3)
+        self.spin_manual_angle.setSingleStep(0.1)
+        self.spin_manual_angle.setSuffix(" deg")
+        self.spin_manual_angle.setFixedHeight(30)
+        self.spin_manual_grid = QSpinBox()
+        self.spin_manual_grid.setRange(0, 1000000)
+        self.spin_manual_grid.setSingleStep(1)
+        self.spin_manual_grid.setFixedHeight(30)
+        form.addRow("Winkel", self.spin_manual_angle)
+        form.addRow("Gitter", self.spin_manual_grid)
+        ul.addLayout(form)
+        self.lbl_manual_pdf_path = QLabel("Kein PDF ausgewaehlt")
+        self.lbl_manual_pdf_path.setWordWrap(True)
+        self.lbl_manual_pdf_path.setStyleSheet(f"color: {COLORS['text_muted']}; border: none;")
+        ul.addWidget(self.lbl_manual_pdf_path)
+        upload_btn_row = QHBoxLayout()
+        upload_btn_row.setSpacing(8)
+        self.btn_manual_pick_pdf = ModernButton("PDF waehlen", "secondary")
+        self.btn_manual_pick_pdf.clicked.connect(self._pick_manual_pdf)
+        upload_btn_row.addWidget(self.btn_manual_pick_pdf)
+        self.btn_manual_upload = ModernButton("In DB laden", "primary")
+        self.btn_manual_upload.clicked.connect(self._upload_manual_pdf)
+        upload_btn_row.addWidget(self.btn_manual_upload)
+        ul.addLayout(upload_btn_row)
+        upload_card.add_layout(ul)
+        right_panel.addWidget(upload_card)
         right_panel.addStretch()
         layout.addLayout(right_panel, 1)
     def showEvent(self, event):
@@ -3993,7 +3744,7 @@ class GitterschieberView(QWidget):
             try:
                 angle = gitterschieber.MeasureSingleImageGratingAngle()
                 def update_ui():
-                    self.metric_angle.value_label.setText(f"{angle:.3f}°")
+                    self.metric_angle.value_label.setText(f"{angle:.3f}Â°")
                     self.btn_angle.setEnabled(True)
                     self.btn_angle.setText("Measure Angle")
                 QMetaObject.invokeMethod(self, update_ui)
@@ -4012,6 +3763,60 @@ class GitterschieberView(QWidget):
                 print(f"AF Error: {e}")
                 QMetaObject.invokeMethod(self, lambda: self.btn_af.setEnabled(True))
         self.executor.submit(task)
+    def _pick_manual_pdf(self):
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "PDF auswaehlen",
+            "",
+            "PDF Files (*.pdf);;All Files (*.*)",
+        )
+        if not selected:
+            return
+        self._manual_pdf_path = selected
+        self.lbl_manual_pdf_path.setText(selected)
+        self.lbl_manual_pdf_path.setToolTip(selected)
+    def _upload_manual_pdf(self):
+        pdf_path = (self._manual_pdf_path or "").strip()
+        if not pdf_path:
+            QMessageBox.warning(self, "PDF Upload", "Bitte zuerst ein PDF auswaehlen.")
+            return
+        pdf_file = pathlib.Path(pdf_path)
+        if not pdf_file.exists():
+            QMessageBox.warning(self, "PDF Upload", f"Datei nicht gefunden:\n{pdf_path}")
+            return
+        angle = float(self.spin_manual_angle.value())
+        grid = int(self.spin_manual_grid.value())
+        self.btn_manual_upload.setEnabled(False)
+        self.btn_manual_upload.setText("Upload...")
+        self.btn_manual_pick_pdf.setEnabled(False)
+        def task():
+            try:
+                guid = db.Uploads.upload_pdf_to_db_simple(
+                    str(pdf_file),
+                    particle_count=grid,
+                    justage_angle=angle,
+                    preferred_testtype="gitterschieber_tool",
+                    user="manual_pdf_upload",
+                )
+                _remember_last_pdf_upload(guid, "gitterschieber_tool")
+                def on_success():
+                    self.btn_manual_upload.setEnabled(True)
+                    self.btn_manual_upload.setText("In DB laden")
+                    self.btn_manual_pick_pdf.setEnabled(True)
+                    QMessageBox.information(
+                        self,
+                        "PDF Upload",
+                        f"PDF wurde erfolgreich hochgeladen.\nTest_GUID: {guid}",
+                    )
+                QMetaObject.invokeMethod(self, on_success)
+            except Exception as exc:
+                def on_error():
+                    self.btn_manual_upload.setEnabled(True)
+                    self.btn_manual_upload.setText("In DB laden")
+                    self.btn_manual_pick_pdf.setEnabled(True)
+                    QMessageBox.critical(self, "PDF Upload Fehler", str(exc))
+                QMetaObject.invokeMethod(self, on_error)
+        self.executor.submit(task)
     def add_metric(self, layout, label, value, color):
         container = QFrame()
         container.setStyleSheet(f"background-color: {COLORS['surface_light']}; border-radius: 12px; padding: 12px;")
@@ -4026,6 +3831,13 @@ class GitterschieberView(QWidget):
         layout.addWidget(container)
         container.value_label = v
         return container
+    def shutdown(self):
+        try:
+            if self.cam_embed is not None:
+                self.cam_embed.stop()
+        except Exception:
+            pass
+        _shutdown_executor(self.executor)
 class OptikkoerperView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -4097,7 +3909,7 @@ class OptikkoerperView(QWidget):
         save_layout.setSpacing(6)
         self.btn_save_optik_pdf = ModernButton("Save PDF", "ghost")
         self.btn_save_optik_pdf.setMinimumHeight(30)
-        self.btn_save_optik_pdf.clicked.connect(lambda: PdfModule.save_camera_pdf_capture(
+        self.btn_save_optik_pdf.clicked.connect(lambda: local_storage.PdfModule.save_camera_pdf_capture(
             self,
             lambda: self._frame_to_rgb(self.cam_embed._last_frame if self.cam_embed is not None else None),
             "optikkorper_capture",
@@ -4274,6 +4086,18 @@ class OptikkoerperView(QWidget):
                 btn.set_variant("primary")
             else:
                 btn.set_variant("secondary")
+    def shutdown(self):
+        try:
+            if self.cam_embed is not None:
+                self.cam_embed.stop()
+        except Exception:
+            pass
+        for cam in list(self._cams.values()):
+            try:
+                cam.shutdown()
+            except Exception:
+                pass
+        self._cams.clear()
 class IPCView(QWidget):
     """Graphical SPC view (connected to DB)."""
     def __init__(self, parent=None):
@@ -4332,14 +4156,14 @@ class IPCView(QWidget):
     def refresh_data(self):
         if not self.isVisible():
             return
-        source_label = "GW" if db.is_on_gateway_wifi() else "DB"
+        source_label = "GW" if db.Gateway.is_on_gateway_wifi() else "DB"
         self.lbl_ipc_source.setText(f"Source: {source_label}")
         source = self.combo_source.currentText()
         if source == "stage_test" and self._stage_live_active:
-            df, ok = db.fetch_test_data(
+            df, ok = db.Dashboard.fetch_test_data(
                 "gitterschieber_tool",
                 limit=200,
-                prefer_gateway=db.is_on_gateway_wifi(),
+                prefer_gateway=db.Gateway.is_on_gateway_wifi(),
             )
             if ok and df is not None:
                 df = self._filter_stage_df(df)
@@ -4348,10 +4172,10 @@ class IPCView(QWidget):
         def fetch_task():
             try:
                 # Fetch more data for statistics (e.g. 100)
-                df, ok = db.fetch_test_data(
+                df, ok = db.Dashboard.fetch_test_data(
                     source,
                     limit=100,
-                    prefer_gateway=db.is_on_gateway_wifi(),
+                    prefer_gateway=db.Gateway.is_on_gateway_wifi(),
                 )
                 if ok:
                     return df
@@ -4385,13 +4209,13 @@ class IPCView(QWidget):
                 if "justage_angle" in df.columns and "particle_count" in df.columns:
                     x = pd.to_numeric(df["particle_count"], errors='coerce').fillna(0)
                     y = pd.to_numeric(df["justage_angle"], errors='coerce').fillna(0)
-                    style(self.chart1.ax, "Angle vs Particles", "Particles", "Angle [°]")
+                    style(self.chart1.ax, "Angle vs Particles", "Particles", "Angle [Â°]")
                     self.chart1.ax.scatter(x, y, color=COLORS['primary'], alpha=0.7)
                     # Trend: Angle over time (index mostly if time is not parsed perfectly)
                     # Use index as proxy for time (assuming sorted desc, so we reverse)
                     y_trend = y.iloc[::-1].values # Newest is 0, so reverse to have history->new
                     x_trend = np.arange(len(y_trend))
-                    style(self.chart2.ax, "Angle Trend", "Sample Index", "Angle [°]")
+                    style(self.chart2.ax, "Angle Trend", "Sample Index", "Angle [Â°]")
                     self.chart2.ax.plot(x_trend, y_trend, '-o', color=COLORS['success'], markersize=4)
             elif source == "stage_test":
                 # Plot X vs Y coordinates of CAM1
@@ -4479,7 +4303,7 @@ class IPCView(QWidget):
             ax.set_xlabel(xl, color=COLORS['text_muted'])
             ax.set_ylabel(yl, color=COLORS['text_muted'])
             ax.grid(True, linestyle='--', alpha=0.3, color=COLORS['border'])
-        style(self.chart1.ax, "Echtzeit-Abweichung (X vs Y)", "Time [min]", "Error [µm]")
+        style(self.chart1.ax, "Echtzeit-Abweichung (X vs Y)", "Time [min]", "Error [Âµm]")
         self.chart1.ax.plot(list(t), list(x_vals), color=COLORS['primary'], linewidth=2, label="Fehler X")
         self.chart1.ax.plot(list(t), list(y_vals), color=COLORS['secondary'], linewidth=2, label="Fehler Y")
         self.chart1.ax.legend(loc='upper right', facecolor=COLORS['surface'], edgecolor=COLORS['border'], labelcolor=COLORS['text'])
@@ -4617,15 +4441,15 @@ class LaserscanView(QWidget):
             self.cam_embed = CameraWidget(self._get_frame, start_immediately=False)
             self.cam_embed.setObjectName("Laserscan_CamEmbed") # IMPORTANT FOR RESIZE
             card.add_widget(self.cam_embed)
-        workflow_card = Card("Workflow Übersicht")
+        workflow_card = Card("Workflow Ãœbersicht")
         workflow_card.set_compact(content_spacing=6)
         workflow_layout = QVBoxLayout()
         workflow_layout.setSpacing(6)
         steps = [
-            ("1. Wellenlänge / Check", "Ermittle die dominante Farbe der Laserlinie und vergleiche sie mit dem Sollwert. Passe Intensität oder Filter an, falls der Offset zu groß ist."),
-            ("2. Prisma Grobjustage", "Kamera anzeigen lassen, Messsequenz aufnehmen und Winkel + Toleranz einsehen. Nutze den resultierenden Mittelwert für erste Ausrichtung."),
-            ("3. FineJustage Linse Ausrichten", "Führe die Messsequenz durch und bewerte Linienbreite sowie Winkel der Fokuslinie. Wiederhole bis beide Werte im Toleranzbereich liegen."),
-            ("4. FineJustage Prisma", "Feinjustage der Prismaposition mit höherer Stichprobentiefe, Winkeltracking und engeren Toleranzen. Nur aktivieren, wenn alle Lens-Checks grün sind.")
+            ("1. WellenlÃ¤nge / Check", "Ermittle die dominante Farbe der Laserlinie und vergleiche sie mit dem Sollwert. Passe IntensitÃ¤t oder Filter an, falls der Offset zu groÃŸ ist."),
+            ("2. Prisma Grobjustage", "Kamera anzeigen lassen, Messsequenz aufnehmen und Winkel + Toleranz einsehen. Nutze den resultierenden Mittelwert fÃ¼r erste Ausrichtung."),
+            ("3. FineJustage Linse Ausrichten", "FÃ¼hre die Messsequenz durch und bewerte Linienbreite sowie Winkel der Fokuslinie. Wiederhole bis beide Werte im Toleranzbereich liegen."),
+            ("4. FineJustage Prisma", "Feinjustage der Prismaposition mit hÃ¶herer Stichprobentiefe, Winkeltracking und engeren Toleranzen. Nur aktivieren, wenn alle Lens-Checks grÃ¼n sind.")
         ]
         for title, desc in steps:
             lbl = QLabel(f"<b>{title}</b><br><span style='color:{COLORS['secondary']}; font-size:11px;'>{desc}</span>")
@@ -4661,7 +4485,7 @@ class LaserscanView(QWidget):
         self.spin_prisma_target_angle.setDecimals(2)
         self.spin_prisma_target_angle.setValue(0.0)
         self.spin_prisma_target_angle.setSingleStep(0.1)
-        self.spin_prisma_target_angle.setSuffix("°")
+        self.spin_prisma_target_angle.setSuffix("Â°")
         self.spin_prisma_target_angle.setFixedWidth(100)
         target_row.addWidget(self.spin_prisma_target_angle)
         target_row.addWidget(QLabel("Toleranz:"))
@@ -4670,7 +4494,7 @@ class LaserscanView(QWidget):
         self.spin_prisma_tolerance.setDecimals(2)
         self.spin_prisma_tolerance.setSingleStep(0.1)
         self.spin_prisma_tolerance.setValue(0.6)
-        self.spin_prisma_tolerance.setSuffix("°")
+        self.spin_prisma_tolerance.setSuffix("Â°")
         self.spin_prisma_tolerance.setFixedWidth(90)
         target_row.addWidget(self.spin_prisma_tolerance)
         target_row.addStretch()
@@ -4687,13 +4511,13 @@ class LaserscanView(QWidget):
         prism_layout.addWidget(self.lbl_prisma_delta)
         prism_layout.addWidget(self.lbl_prisma_status)
         prism_card.add_layout(prism_layout)
-        wavelength_card = Card("Wellenlänge / Check")
+        wavelength_card = Card("WellenlÃ¤nge / Check")
         wave_layout = QVBoxLayout()
         wave_layout.setContentsMargins(0, 0, 0, 0)
         wave_layout.setSpacing(8)
         wave_target_row = QHBoxLayout()
         wave_target_row.setSpacing(8)
-        wave_target_row.addWidget(QLabel("Zielwellenlänge:"))
+        wave_target_row.addWidget(QLabel("ZielwellenlÃ¤nge:"))
         self.spin_wave_target = QDoubleSpinBox()
         self.spin_wave_target.setRange(400.0, 800.0)
         self.spin_wave_target.setValue(633.0)
@@ -4709,10 +4533,10 @@ class LaserscanView(QWidget):
         self.spin_wave_tolerance.setFixedWidth(80)
         wave_target_row.addWidget(self.spin_wave_tolerance)
         wave_target_row.addStretch()
-        self.btn_wavelength_check = ModernButton("Wellenlänge prüfen", "primary")
+        self.btn_wavelength_check = ModernButton("WellenlÃ¤nge prÃ¼fen", "primary")
         self.btn_wavelength_check.setFixedHeight(32)
         self.btn_wavelength_check.clicked.connect(self._on_wavelength_check)
-        self.lbl_wave_value = QLabel("Wellenlänge: --- nm")
+        self.lbl_wave_value = QLabel("WellenlÃ¤nge: --- nm")
         self.lbl_wave_value.setStyleSheet(f"color: {COLORS['primary']}; font-weight: 600;")
         self.lbl_wave_status = QLabel("Status: Bereit")
         self.lbl_wave_status.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 600;")
@@ -4763,7 +4587,7 @@ class LaserscanView(QWidget):
         self.spin_line_angle_target.setRange(-90.0, 90.0)
         self.spin_line_angle_target.setDecimals(2)
         self.spin_line_angle_target.setValue(0.0)
-        self.spin_line_angle_target.setSuffix("°")
+        self.spin_line_angle_target.setSuffix("Â°")
         self.spin_line_angle_target.setFixedWidth(100)
         angle_row.addWidget(self.spin_line_angle_target)
         angle_row.addWidget(QLabel("Toleranz:"))
@@ -4771,7 +4595,7 @@ class LaserscanView(QWidget):
         self.spin_line_angle_tolerance.setRange(0.1, 20.0)
         self.spin_line_angle_tolerance.setDecimals(2)
         self.spin_line_angle_tolerance.setValue(5.0)
-        self.spin_line_angle_tolerance.setSuffix("°")
+        self.spin_line_angle_tolerance.setSuffix("Â°")
         self.spin_line_angle_tolerance.setFixedWidth(90)
         angle_row.addWidget(self.spin_line_angle_tolerance)
         angle_row.addStretch()
@@ -4819,7 +4643,7 @@ class LaserscanView(QWidget):
         self.spin_prisma_fine_target.setDecimals(2)
         self.spin_prisma_fine_target.setValue(0.0)
         self.spin_prisma_fine_target.setSingleStep(0.1)
-        self.spin_prisma_fine_target.setSuffix("°")
+        self.spin_prisma_fine_target.setSuffix("Â°")
         self.spin_prisma_fine_target.setFixedWidth(100)
         fine_target_row.addWidget(self.spin_prisma_fine_target)
         fine_target_row.addWidget(QLabel("Toleranz:"))
@@ -4827,7 +4651,7 @@ class LaserscanView(QWidget):
         self.spin_prisma_fine_tolerance.setRange(0.05, 5.0)
         self.spin_prisma_fine_tolerance.setDecimals(2)
         self.spin_prisma_fine_tolerance.setValue(0.3)
-        self.spin_prisma_fine_tolerance.setSuffix("°")
+        self.spin_prisma_fine_tolerance.setSuffix("Â°")
         self.spin_prisma_fine_tolerance.setFixedWidth(80)
         fine_target_row.addWidget(self.spin_prisma_fine_tolerance)
         fine_target_row.addStretch()
@@ -4862,7 +4686,7 @@ class LaserscanView(QWidget):
         self.lbl_laser_status.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 600;")
         laser_layout.addWidget(self.lbl_laser_status)
         intensity_row = QHBoxLayout()
-        self.lbl_laser_intensity = QLabel(f"Intensität: {self._laser_intensity}%")
+        self.lbl_laser_intensity = QLabel(f"IntensitÃ¤t: {self._laser_intensity}%")
         self.lbl_laser_intensity.setStyleSheet(f"font-size: 11px; color: {COLORS['secondary']};")
         intensity_row.addWidget(self.lbl_laser_intensity)
         intensity_row.addStretch()
@@ -4993,7 +4817,7 @@ class LaserscanView(QWidget):
     def _on_laser_intensity_changed(self, value: int):
         self._laser_intensity = max(0, min(100, int(value)))
         if self.lbl_laser_intensity is not None:
-            self.lbl_laser_intensity.setText(f"Intensität: {self._laser_intensity}%")
+            self.lbl_laser_intensity.setText(f"IntensitÃ¤t: {self._laser_intensity}%")
         self._apply_laser_intensity()
 
     def _apply_laser_state(self):
@@ -5100,9 +4924,9 @@ class LaserscanView(QWidget):
         is_ok = abs(delta) <= tolerance
         status_color = COLORS["success"] if is_ok else COLORS["danger"]
         if angle_label:
-            angle_label.setText(f"Winkel: {mean_angle:.2f}°")
+            angle_label.setText(f"Winkel: {mean_angle:.2f}Â°")
         if delta_label:
-            delta_label.setText(f"Abweichung: {delta:+.2f}° (Tol. +/-{tolerance:.2f}°)")
+            delta_label.setText(f"Abweichung: {delta:+.2f}Â° (Tol. +/-{tolerance:.2f}Â°)")
         if status_label:
             status_label.setText("Innerhalb Toleranz" if is_ok else "Toleranz verletzt")
             status_label.setStyleSheet(f"font-weight: 600; color: {status_color};")
@@ -5119,11 +4943,10 @@ class LaserscanView(QWidget):
  
     def _send_laser_db_payload(self, device_id: str, payload: dict, user_id: str = "laser_scan", async_send: bool = True):
         def _task():
-            conn = None
             try:
                 now = datetime.datetime.now()
-                if db.is_on_gateway_wifi():
-                    db.send_payload_gateway(
+                if db.Gateway.is_on_gateway_wifi():
+                    db.Gateway.send_payload_gateway(
                         device_id=device_id,
                         barcode=str(db.DUMMY_BARCODE),
                         payload=payload,
@@ -5132,27 +4955,17 @@ class LaserscanView(QWidget):
                         end_time=now,
                     )
                 else:
-                    conn = dbConnector.connection()
-                    conn.connect()
-                    barcode_obj = miltenyiBarcode.mBarcode(str(db.DUMMY_BARCODE))
-                    conn.sendData(
-                        now,
-                        now,
-                        0,
-                        device_id,
-                        payload,
-                        barcode_obj,
-                        user_id,
+                    db.Dashboard.send_test_data(
+                        testtype=device_id,
+                        payload=payload,
+                        user=user_id,
+                        barcode=str(db.DUMMY_BARCODE),
+                        start_time=now,
+                        end_time=now,
                     )
                 print(f"[Laserscan] DB payload sent ({device_id})")
             except Exception as exc:
                 print(f"[Laserscan] DB payload failed ({device_id}): {exc}")
-            finally:
-                if conn:
-                    try:
-                        conn.disconnect()
-                    except Exception:
-                        pass
         if async_send:
             threading.Thread(target=_task, daemon=True).start()
         else:
@@ -5166,7 +4979,7 @@ class LaserscanView(QWidget):
         path = base / f"{safe_title}_{ts}.pdf"
         pages = [{"type": "text", "title": title, "text": lines}]
         test_type = "laserscan_fine_lens" if category == "fine_lens" else "laserscan_fine_prisma" if category == "fine_prisma" else None
-        PdfModule.write_pdf(path, pages, db_test_type=test_type)
+        local_storage.PdfModule.write_pdf(path, pages, db_test_type=test_type)
         print(f"[Laserscan] Report saved: {path}")
         return path
 
@@ -5177,12 +4990,12 @@ class LaserscanView(QWidget):
             f"Zeitpunkt: {now}",
             "",
             f"Linienbreite: {width:.1f} px",
-            f"Zielbreite: {width_target:.1f} px ±{width_tol:.1f} px",
+            f"Zielbreite: {width_target:.1f} px Â±{width_tol:.1f} px",
             f"Abweichung: {width_delta:+.1f} px",
             "",
-            f"Winkel: {angle:.2f}°",
-            f"Zielwinkel: {angle_target:.2f}° ±{angle_tol:.2f}°",
-            f"Abweichung: {angle_delta:+.2f}°",
+            f"Winkel: {angle:.2f}Â°",
+            f"Zielwinkel: {angle_target:.2f}Â° Â±{angle_tol:.2f}Â°",
+            f"Abweichung: {angle_delta:+.2f}Â°",
             "",
             f"Status: {status_text}",
         ]
@@ -5207,9 +5020,9 @@ class LaserscanView(QWidget):
             f"Zeitpunkt: {now}",
             "",
             f"Messungen: {seq_count}",
-            f"Zielwinkel: {target:.2f}° ±{tolerance:.2f}°",
-            f"Gemessener Winkel: {mean_angle:.2f}°",
-            f"Abweichung: {delta:+.2f}°",
+            f"Zielwinkel: {target:.2f}Â° Â±{tolerance:.2f}Â°",
+            f"Gemessener Winkel: {mean_angle:.2f}Â°",
+            f"Abweichung: {delta:+.2f}Â°",
             "",
             f"Status: {status_text}",
         ]
@@ -5256,7 +5069,7 @@ class LaserscanView(QWidget):
         is_ok = abs(delta) <= tolerance
         status_color = COLORS["success"] if is_ok else COLORS["danger"]
         if self.lbl_wave_value:
-            self.lbl_wave_value.setText(f"Wellenlänge: {wavelength:.1f} nm")
+            self.lbl_wave_value.setText(f"WellenlÃ¤nge: {wavelength:.1f} nm")
         if self.lbl_wave_status:
             self.lbl_wave_status.setText("Innerhalb Toleranz" if is_ok else "Toleranz verletzt")
             self.lbl_wave_status.setStyleSheet(f"font-weight: 600; color: {status_color};")
@@ -5271,7 +5084,7 @@ class LaserscanView(QWidget):
 
     def _reset_wavelength_feedback(self, status_text, color):
         if self.lbl_wave_value:
-            self.lbl_wave_value.setText("Wellenlänge: --- nm")
+            self.lbl_wave_value.setText("WellenlÃ¤nge: --- nm")
         if self.lbl_wave_status:
             self.lbl_wave_status.setText(status_text)
             self.lbl_wave_status.setStyleSheet(f"font-weight: 600; color: {color};")
@@ -5313,9 +5126,9 @@ class LaserscanView(QWidget):
         if self.lbl_line_width_value:
             self.lbl_line_width_value.setText(f"Linienbreite: {width:.1f} px")
         if self.lbl_line_angle:
-            self.lbl_line_angle.setText(f"Winkel: {angle:.2f}°")
+            self.lbl_line_angle.setText(f"Winkel: {angle:.2f}Â°")
         if self.lbl_line_width_delta:
-            self.lbl_line_width_delta.setText(f"Breite Δ: {width_delta:+.1f} px | Winkel Δ: {angle_delta:+.2f}°")
+            self.lbl_line_width_delta.setText(f"Breite Î”: {width_delta:+.1f} px | Winkel Î”: {angle_delta:+.2f}Â°")
         if self.lbl_line_width_status:
             self.lbl_line_width_status.setText("Innerhalb Toleranz" if overall_ok else "Toleranz verletzt")
             self.lbl_line_width_status.setStyleSheet(f"font-weight: 600; color: {status_color};")
@@ -5378,6 +5191,18 @@ class LaserscanView(QWidget):
             self._cam = None
         self._expo_initialized = False
         super().hideEvent(event)
+    def shutdown(self):
+        try:
+            if self.cam_embed is not None:
+                self.cam_embed.stop()
+        except Exception:
+            pass
+        try:
+            if self._cam is not None:
+                self._cam.stop()
+                self._cam = None
+        except Exception:
+            pass
     
 class AddComponentDialog(QDialog):
     def __init__(self, tool_name, parent=None):
@@ -5684,7 +5509,7 @@ class StudioToolView(QWidget):
                 self.clear_layout(item.layout())
 # --- NAVIGATION SIDEBAR ---
 class SidebarButton(QPushButton):
-    def __init__(self, text, icon_char="•", parent=None):
+    def __init__(self, text, icon_char="â€¢", parent=None):
         super().__init__(text, parent)
         self.setCheckable(True)
         self.setAutoExclusive(True)
@@ -5722,30 +5547,75 @@ class _OllamaChatSignals(QObject):
     response_chunk = Signal(str)
     response_ready = Signal(str)
     response_error = Signal(str)
+    db_update_ready = Signal(object)
 
 
 class OllamaChatView(QWidget):
+    unread_count_changed = Signal(int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        self.model = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:3b")
+        self.model = MODEL_NAME
         self.ollama_chat_url = os.environ.get("OLLAMA_API_URL", "http://127.0.0.1:11434/api/chat")
+        self._ollama_host = self._derive_ollama_host(self.ollama_chat_url)
         self._request_timeout_s = max(20, int(os.environ.get("OLLAMA_REQUEST_TIMEOUT_S", "90")))
-        self._num_predict = max(64, int(os.environ.get("OLLAMA_NUM_PREDICT", "160")))
+        self._request_hard_timeout_s = max(
+            self._request_timeout_s + 10,
+            int(os.environ.get("OLLAMA_REQUEST_HARD_TIMEOUT_S", str(self._request_timeout_s * 3)))
+        )
+        self._network_timeout_s = max(60, int(os.environ.get("OLLAMA_NETWORK_TIMEOUT_S", "600")))
+        self._timeouts_enabled = os.environ.get("OLLAMA_ENABLE_TIMEOUTS", "0").strip().lower() in {"1", "true", "on", "yes"}
+        self._num_predict = max(128, int(os.environ.get("OLLAMA_NUM_PREDICT", "512")))
+        self._num_predict_procedure = max(
+            self._num_predict,
+            int(os.environ.get("OLLAMA_NUM_PREDICT_PROCEDURE", "896"))
+        )
         self._context_rows = max(10, int(os.environ.get("OLLAMA_CONTEXT_ROWS", "20")))
         self._stream_enabled = os.environ.get("OLLAMA_STREAM", "1").strip().lower() not in {"0", "false", "off", "no"}
         self._stream_text = ""
         self._active_bot_start = None
         self._active_bot_end = None
+        self._thinking_active = False
+        self._thinking_phase = 0
+        self._thinking_base_text = "Denke nach"
 
         self._signals = _OllamaChatSignals()
         self._signals.response_chunk.connect(self._on_response_chunk)
         self._signals.response_ready.connect(self._on_response_ready)
         self._signals.response_error.connect(self._on_response_error)
+        self._signals.db_update_ready.connect(self._on_db_update_ready)
         self._busy = False
+        self._notify_busy = False
+        self._first_open_done = False
+        self._db_watch_seeded = False
+        self._latest_test_signatures = {}
+        self._unread_alert_count = 0
+        self._doc_chunks_cache = None
+        self._doc_images_cache = None
+        self._last_user_prompt = ""
+        self._warmup_manager = OllamaWarmupManager(
+            model_name=self.model,
+            host=self._ollama_host,
+            keep_alive=os.environ.get("OLLAMA_KEEP_ALIVE", "24h"),
+        )
+        self._show_auto_db_summary = os.environ.get("OLLAMA_CHAT_AUTO_DB_SUMMARY", "0").strip().lower() in {"1", "true", "on", "yes"}
+        self._show_db_update_messages = os.environ.get("OLLAMA_CHAT_DB_UPDATE_MESSAGES", "0").strip().lower() in {"1", "true", "on", "yes"}
         self._req_timer = QTimer(self)
         self._req_timer.setSingleShot(True)
         self._req_timer.timeout.connect(self._on_request_timeout)
+        self._req_hard_timer = QTimer(self)
+        self._req_hard_timer.setSingleShot(True)
+        self._req_hard_timer.timeout.connect(self._on_request_hard_timeout)
+        self._thinking_timer = QTimer(self)
+        self._thinking_timer.setInterval(360)
+        self._thinking_timer.timeout.connect(self._on_thinking_tick)
+        self._warmup_status_timer = QTimer(self)
+        self._warmup_status_timer.setInterval(700)
+        self._warmup_status_timer.timeout.connect(self._update_info_label)
+        self._db_watch_timer = QTimer(self)
+        self._db_watch_timer.timeout.connect(self._poll_db_updates)
+        self._db_watch_timer.start(15000)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 18, 18, 18)
@@ -5759,12 +5629,62 @@ class OllamaChatView(QWidget):
         hl.setContentsMargins(14, 10, 14, 10)
         title = QLabel("Chat Assistant")
         title.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {COLORS['text']};")
-        self.info_lbl = QLabel(f"Model: {self.model} | Timeout: {self._request_timeout_s}s")
+        self.info_lbl = QLabel("")
         self.info_lbl.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
         hl.addWidget(title)
         hl.addStretch()
         hl.addWidget(self.info_lbl)
         root.addWidget(header)
+        self._warmup_manager.start_async()
+        self._warmup_status_timer.start()
+        self._update_info_label()
+
+        suggestion_card = QFrame()
+        suggestion_card.setStyleSheet(
+            f"background-color: {COLORS['surface']}; border: 1px solid {COLORS['border']}; border-radius: 10px;"
+        )
+        sl = QVBoxLayout(suggestion_card)
+        sl.setContentsMargins(10, 8, 10, 8)
+        sl.setSpacing(6)
+        suggestion_lbl = QLabel("Schnellvorschlaege")
+        suggestion_lbl.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px; font-weight: 700;")
+        sl.addWidget(suggestion_lbl)
+        suggestion_grid = QGridLayout()
+        suggestion_grid.setContentsMargins(0, 0, 0, 0)
+        suggestion_grid.setHorizontalSpacing(6)
+        suggestion_grid.setVerticalSpacing(6)
+        self._suggestions = [
+            ("Status Linien", "Gib mir den aktuellen Stand je Linie mit Risiken."),
+            ("Neue Tests", "Fasse die neuesten Tests pro Linie kurz zusammen."),
+            ("Auffaelligkeiten", "Welche Auffaelligkeiten gibt es in den letzten Daten?"),
+            ("Naechste Aktion", "Was ist die naechste sinnvolle Aktion fuer den Schichtleiter?"),
+            ("Autofokus Ablauf", "Wie fuehre ich den Autofokus am Collimator Schritt fuer Schritt durch?"),
+        ]
+        for idx, (label, prompt) in enumerate(self._suggestions):
+            btn = QPushButton(label)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setMinimumHeight(26)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            btn.setStyleSheet(
+                f"QPushButton {{"
+                f"background-color: {COLORS['surface_light']};"
+                f"color: {COLORS['text']};"
+                f"border: 1px solid {COLORS['border']};"
+                f"border-radius: 7px;"
+                f"padding: 4px 8px;"
+                f"font-size: 10px;"
+                f"font-weight: 600;"
+                f"}}"
+                f"QPushButton:hover {{ border: 1px solid {COLORS['primary']}; }}"
+            )
+            btn.clicked.connect(lambda _, p=prompt: self.prefill_and_send(p))
+            row = idx // 2
+            col = idx % 2
+            suggestion_grid.addWidget(btn, row, col)
+        suggestion_grid.setColumnStretch(0, 1)
+        suggestion_grid.setColumnStretch(1, 1)
+        sl.addLayout(suggestion_grid)
+        root.addWidget(suggestion_card)
 
         self.chat_log = QTextEdit()
         self.chat_log.setReadOnly(True)
@@ -5827,10 +5747,82 @@ class OllamaChatView(QWidget):
         self.input_line.setText(prompt)
         self._send_current_prompt()
 
+    def on_panel_opened(self):
+        self.mark_notifications_read()
+        if self._notify_busy:
+            return
+        self._notify_busy = True
+        initial = not self._first_open_done
+        self._first_open_done = True
+        include_summary = bool(initial and self._show_auto_db_summary)
+        threading.Thread(target=self._check_for_db_updates, args=(initial, include_summary), daemon=True).start()
+
+    def _derive_ollama_host(self, chat_url: str) -> str:
+        try:
+            parsed = urllib.parse.urlparse(chat_url or "")
+            if parsed.scheme and parsed.netloc:
+                return f"{parsed.scheme}://{parsed.netloc}"
+        except Exception:
+            pass
+        return "http://127.0.0.1:11434"
+
+    def _warmup_status_text(self) -> str:
+        if self._warmup_manager.is_ready():
+            return "bereit"
+        if self._warmup_manager.has_error():
+            return "nicht verfuegbar"
+        return "laeuft"
+
+    def _update_info_label(self):
+        timeout_label = "AUS" if not self._timeouts_enabled else f"{self._request_timeout_s}s/{self._request_hard_timeout_s}s"
+        warmup_label = self._warmup_status_text()
+        self.info_lbl.setText(f"Model: {self.model} | Warmup: {warmup_label} | Timeout: {timeout_label}")
+        if self._warmup_manager.is_finished():
+            self._warmup_status_timer.stop()
+
+    def is_assistant_ready(self) -> bool:
+        return self._warmup_manager.is_ready()
+
+    def mark_notifications_read(self):
+        if self._unread_alert_count != 0:
+            self._unread_alert_count = 0
+            self.unread_count_changed.emit(0)
+
+    def _poll_db_updates(self):
+        if self._notify_busy:
+            return
+        self._notify_busy = True
+        initial = not self._db_watch_seeded
+        self._db_watch_seeded = True
+        threading.Thread(target=self._check_for_db_updates, args=(initial, False), daemon=True).start()
+
     def _set_busy(self, busy: bool):
         self._busy = busy
         self.send_btn.setEnabled(not busy)
         self.input_line.setEnabled(not busy)
+        if not busy:
+            self._stop_thinking_animation()
+
+    def _start_thinking_animation(self, base_text: str = "Denke nach"):
+        self._thinking_base_text = base_text
+        self._thinking_phase = 0
+        self._thinking_active = True
+        self._thinking_timer.start()
+
+    def _stop_thinking_animation(self):
+        self._thinking_active = False
+        self._thinking_timer.stop()
+
+    def _on_thinking_tick(self):
+        if not self._thinking_active or not self._busy:
+            self._stop_thinking_animation()
+            return
+        if self._stream_text.strip():
+            self._stop_thinking_animation()
+            return
+        dots = "." * ((self._thinking_phase % 3) + 1)
+        self._thinking_phase += 1
+        self._replace_last_bot_line(f"{self._thinking_base_text}{dots}")
 
     def _append_chat(self, role: str, text: str):
         self.chat_log.append(f"{role}: {text}")
@@ -5843,11 +5835,15 @@ class OllamaChatView(QWidget):
         if not prompt:
             return
         self.input_line.clear()
+        self._last_user_prompt = prompt
         self._append_chat("Du", prompt)
         self._start_bot_response("Denke nach ...")
+        self._start_thinking_animation("Denke nach")
         self._stream_text = ""
         self._set_busy(True)
-        self._req_timer.start(self._request_timeout_s * 1000)
+        if self._timeouts_enabled:
+            self._req_timer.start(self._request_timeout_s * 1000)
+            self._req_hard_timer.start(self._request_hard_timeout_s * 1000)
         threading.Thread(target=self._request_ollama, args=(prompt,), daemon=True).start()
 
     def _start_bot_response(self, text: str):
@@ -5863,16 +5859,28 @@ class OllamaChatView(QWidget):
 
     def _request_ollama(self, prompt: str):
         db_context = ""
+        doc_context = ""
         try:
-            db_context = self._build_db_context(limit=self._context_rows)
-            answer = self._ask_ollama(prompt, db_context)
+            if self._is_today_modules_prompt(prompt):
+                answer = self._build_today_tested_modules_summary(force_fetch=True)
+                self._signals.response_ready.emit(answer)
+                return
+            if self._should_include_db_context(prompt):
+                db_context = self._build_db_context(limit=self._context_rows)
+            doc_context = self._build_doc_context(prompt, max_lines=24, max_chars=3200)
+            if self._is_db_summary_prompt(prompt):
+                answer = self._build_latest_tests_summary(force_fetch=True)
+            else:
+                answer = self._ask_ollama(prompt, db_context, doc_context)
+            answer = self._format_worker_friendly_answer(answer, prompt, db_context, doc_context)
             self._signals.response_ready.emit(answer)
         except Exception as exc:
-            if db_context:
-                fallback = (
-                    "Ollama ist aktuell nicht verfuegbar, aber DB-Zugriff funktioniert.\n\n"
-                    f"{db_context}\n\n"
-                    f"Fehlerdetails: {exc}"
+            if db_context or doc_context:
+                fallback = self._build_worker_procedure_fallback(
+                    prompt=prompt,
+                    db_context=db_context,
+                    doc_context=doc_context,
+                    error_text=str(exc),
                 )
                 self._signals.response_ready.emit(fallback)
                 return
@@ -5880,9 +5888,12 @@ class OllamaChatView(QWidget):
 
     def _on_response_ready(self, text: str):
         self._req_timer.stop()
+        self._req_hard_timer.stop()
+        self._stop_thinking_animation()
         if self._stream_text.strip():
             text = self._stream_text
         self._replace_last_bot_line(text)
+        self._append_relevant_images_for_prompt(self._last_user_prompt)
         self._stream_text = ""
         self._active_bot_start = None
         self._active_bot_end = None
@@ -5890,6 +5901,8 @@ class OllamaChatView(QWidget):
 
     def _on_response_error(self, error_text: str):
         self._req_timer.stop()
+        self._req_hard_timer.stop()
+        self._stop_thinking_animation()
         self._stream_text = ""
         msg = (
             "Ollama Anfrage fehlgeschlagen.\n"
@@ -5904,8 +5917,32 @@ class OllamaChatView(QWidget):
     def _on_request_timeout(self):
         if not self._busy:
             return
+        self._stop_thinking_animation()
+        partial = self._stream_text.strip()
+        if partial:
+            self._replace_last_bot_line(
+                f"{partial}\n\n(Hinweis: Antwort wurde wegen Zeitlimit unterbrochen. Bitte erneut senden.)"
+            )
+        else:
+            self._replace_last_bot_line("Zeitlimit erreicht. Bitte erneut senden.")
         self._stream_text = ""
-        self._replace_last_bot_line("Zeitlimit erreicht. Bitte erneut senden.")
+        self._active_bot_start = None
+        self._active_bot_end = None
+        self._set_busy(False)
+
+    def _on_request_hard_timeout(self):
+        if not self._busy:
+            return
+        self._stop_thinking_animation()
+        partial = self._stream_text.strip()
+        if partial:
+            self._replace_last_bot_line(
+                f"{partial}\n\n(Hinweis: Antwort wurde wegen Gesamt-Zeitlimit beendet. Bitte erneut senden.)"
+            )
+        else:
+            self._replace_last_bot_line("Gesamt-Zeitlimit erreicht. Bitte erneut senden.")
+        self._req_timer.stop()
+        self._stream_text = ""
         self._active_bot_start = None
         self._active_bot_end = None
         self._set_busy(False)
@@ -5915,8 +5952,26 @@ class OllamaChatView(QWidget):
             return
         if not chunk:
             return
+        self._stop_thinking_animation()
+        if self._timeouts_enabled:
+            # Keep timeout as an inactivity watchdog while streaming.
+            self._req_timer.start(self._request_timeout_s * 1000)
         self._stream_text += chunk
         self._replace_last_bot_line(self._stream_text)
+
+    def _on_db_update_ready(self, payload: object):
+        self._notify_busy = False
+        data = payload if isinstance(payload, dict) else {}
+        signatures = data.get("signatures", {})
+        if isinstance(signatures, dict):
+            self._latest_test_signatures.update(signatures)
+        new_count = int(data.get("new_count", 0) or 0)
+        if new_count > 0:
+            self._unread_alert_count += new_count
+            self.unread_count_changed.emit(self._unread_alert_count)
+        message = str(data.get("message", "")).strip()
+        if message and self._show_db_update_messages:
+            self._append_chat("System", message)
 
     def _replace_last_bot_line(self, text: str):
         if (
@@ -5935,6 +5990,213 @@ class OllamaChatView(QWidget):
             self._active_bot_start = None
             self._active_bot_end = None
         self.chat_log.verticalScrollBar().setValue(self.chat_log.verticalScrollBar().maximum())
+
+    def _check_for_db_updates(self, initial: bool, include_summary: bool = True):
+        snapshots = {}
+        signatures = {}
+        changed = []
+        for testtype in ("kleberoboter", "gitterschieber_tool", "stage_test"):
+            try:
+                df, connected = db.Dashboard.fetch_test_data(testtype, limit=1, prefer_gateway=False)
+            except Exception:
+                df, connected = pd.DataFrame(), False
+            if not connected:
+                df = pd.DataFrame()
+            snapshots[testtype] = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+            sig = self._build_test_signature(df)
+            signatures[testtype] = sig
+            if not initial and sig and self._latest_test_signatures.get(testtype) != sig:
+                changed.append(testtype)
+
+        message = ""
+        if initial and include_summary:
+            summary = self._build_latest_tests_summary_from_snapshots(snapshots)
+            if summary:
+                message = "Aktuelle Test-Zusammenfassung:\n" + summary
+        elif changed:
+            changed_text = ", ".join(changed)
+            summary = self._build_latest_tests_summary_from_snapshots(snapshots, only_types=changed)
+            message = f"Neue Tests erkannt: {changed_text}\n{summary}"
+
+        self._signals.db_update_ready.emit({
+            "signatures": signatures,
+            "message": message,
+            "new_count": len(changed),
+        })
+
+    def _build_test_signature(self, df: pd.DataFrame) -> str:
+        if df is None or df.empty:
+            return ""
+        row = df.iloc[0]
+        guid_col = db.Parsing.find_guid_column_name(df.columns)
+        guid = ""
+        if guid_col:
+            try:
+                raw_guid = row.get(guid_col, "")
+                guid = "" if pd.isna(raw_guid) else str(raw_guid).strip()
+            except Exception:
+                guid = ""
+        ts = self._latest_timestamp(df.head(1))
+        ts_text = ts.isoformat() if ts is not None else ""
+        if guid or ts_text:
+            return f"{guid}|{ts_text}"
+        parts = []
+        for col in list(df.columns)[:4]:
+            val = row.get(col, "")
+            if pd.isna(val):
+                continue
+            parts.append(f"{col}={val}")
+        return "|".join(parts)
+
+    def _summarize_test_row(self, testtype: str, df: pd.DataFrame) -> str:
+        if df is None or df.empty:
+            return f"- {testtype}: keine Daten verfuegbar."
+        row = df.iloc[0]
+        ts = self._latest_timestamp(df.head(1))
+        ts_text = ts.strftime("%Y-%m-%d %H:%M:%S") if ts is not None else "Zeitstempel unbekannt"
+
+        status_text = "Status unbekannt"
+        for col in ("ok", "result", "status"):
+            if col in df.columns:
+                raw = row.get(col, "")
+                if pd.isna(raw):
+                    continue
+                if isinstance(raw, (bool, np.bool_)):
+                    status_text = "OK" if bool(raw) else "FAIL"
+                else:
+                    status_text = str(raw)
+                break
+
+        extras = []
+        for key in ("barcodenummer", "barcode", "user", "Employee_ID"):
+            if key in df.columns:
+                val = row.get(key, "")
+                if pd.isna(val) or str(val).strip() == "":
+                    continue
+                extras.append(f"{key}={val}")
+                if len(extras) >= 2:
+                    break
+
+        numeric_added = 0
+        for col in df.columns:
+            if col in {"ok", "result", "status", "StartTest", "EndTest"}:
+                continue
+            try:
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    val = row.get(col, None)
+                    if pd.isna(val):
+                        continue
+                    extras.append(f"{col}={float(val):.3f}")
+                    numeric_added += 1
+                    if numeric_added >= 2:
+                        break
+            except Exception:
+                continue
+
+        extra_text = f" | {', '.join(extras)}" if extras else ""
+        return f"- {testtype}: {status_text}, {ts_text}{extra_text}"
+
+    def _build_latest_tests_summary_from_snapshots(self, snapshots: dict, only_types: list[str] | None = None) -> str:
+        lines = []
+        for testtype in ("kleberoboter", "gitterschieber_tool", "stage_test"):
+            if only_types and testtype not in only_types:
+                continue
+            df = snapshots.get(testtype, pd.DataFrame())
+            lines.append(self._summarize_test_row(testtype, df))
+        return "\n".join(lines).strip()
+
+    def _build_latest_tests_summary(self, force_fetch: bool = False) -> str:
+        snapshots = {}
+        if force_fetch:
+            for testtype in ("kleberoboter", "gitterschieber_tool", "stage_test"):
+                try:
+                    df, connected = db.Dashboard.fetch_test_data(testtype, limit=1, prefer_gateway=False)
+                except Exception:
+                    df, connected = pd.DataFrame(), False
+                snapshots[testtype] = df if connected else pd.DataFrame()
+        else:
+            host = self.window()
+            dashboard = getattr(host, "dashboard", None)
+            cache = {}
+            if dashboard is not None and hasattr(dashboard, "get_chat_data_cache"):
+                try:
+                    cache = dashboard.get_chat_data_cache()
+                except Exception:
+                    cache = {}
+            snapshots = cache if isinstance(cache, dict) else {}
+
+        summary = self._build_latest_tests_summary_from_snapshots(snapshots)
+        if not summary:
+            return "Keine Test-Zusammenfassung verfuegbar."
+        return summary
+
+    def _build_today_tested_modules_summary(self, force_fetch: bool = True) -> str:
+        today = datetime.datetime.now().date()
+        today_iso = today.isoformat()
+        per_type_limit = max(50, int(os.environ.get("OLLAMA_TODAY_FETCH_LIMIT", "300")))
+        tested = []
+        not_tested = []
+        unavailable = []
+
+        for testtype in ("kleberoboter", "gitterschieber_tool", "stage_test"):
+            if force_fetch:
+                try:
+                    df, connected = db.Dashboard.fetch_test_data(testtype, limit=per_type_limit, prefer_gateway=False)
+                except Exception:
+                    df, connected = pd.DataFrame(), False
+                if not connected:
+                    unavailable.append(testtype)
+                    continue
+            else:
+                host = self.window()
+                dashboard = getattr(host, "dashboard", None)
+                cache = {}
+                if dashboard is not None and hasattr(dashboard, "get_chat_data_cache"):
+                    try:
+                        cache = dashboard.get_chat_data_cache()
+                    except Exception:
+                        cache = {}
+                df = cache.get(testtype, pd.DataFrame()) if isinstance(cache, dict) else pd.DataFrame()
+
+            if df is None or df.empty:
+                not_tested.append(f"{testtype} (keine Daten)")
+                continue
+
+            ts_series = self._timestamp_series(df)
+            if ts_series.empty:
+                not_tested.append(f"{testtype} (kein Zeitstempel)")
+                continue
+
+            today_rows = ts_series[ts_series.dt.date == today]
+            if today_rows.empty:
+                last_ts = ts_series.max()
+                if pd.isna(last_ts):
+                    not_tested.append(f"{testtype} (kein gueltiger Zeitstempel)")
+                else:
+                    not_tested.append(f"{testtype} (letzter Test: {last_ts.strftime('%Y-%m-%d %H:%M:%S')})")
+                continue
+
+            first_ts = today_rows.min()
+            last_ts = today_rows.max()
+            tested.append(
+                f"{testtype}: {len(today_rows)} Test(s), erstes {first_ts.strftime('%H:%M:%S')}, letztes {last_ts.strftime('%H:%M:%S')}"
+            )
+
+        lines = [f"Heutige Auswertung ({today_iso}):"]
+        if tested:
+            lines.append("Getestete Baugruppen heute:")
+            lines.extend(f"- {line}" for line in tested)
+        else:
+            lines.append("Getestete Baugruppen heute: keine.")
+
+        if not_tested:
+            lines.append("Nicht heute getestet:")
+            lines.extend(f"- {line}" for line in not_tested)
+
+        if unavailable:
+            lines.append("Nicht erreichbar:")
+            lines.extend(f"- {line}" for line in unavailable)
+        return "\n".join(lines).strip()
 
     def _build_db_context(self, limit: int = 20) -> str:
         sections = []
@@ -6029,6 +6291,411 @@ class OllamaChatView(QWidget):
             return ""
         return "  letzte Zeilen:\n" + "\n".join(rows)
 
+    def _doc_search_dirs(self) -> list[pathlib.Path]:
+        return [pathlib.Path(__file__).resolve().parent, pathlib.Path.home() / "Downloads"]
+
+    def _iter_glob_paths(self, pattern: str):
+        seen = set()
+        for directory in self._doc_search_dirs():
+            if not directory.exists():
+                continue
+            for path in sorted(directory.glob(pattern)):
+                key = str(path.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield path
+
+    def _load_doc_chunks(self) -> list[dict]:
+        if isinstance(self._doc_chunks_cache, list):
+            return self._doc_chunks_cache
+        chunks = []
+        json_specs = [
+            ("anleitung", "*LaserScan Module*Anleitung*.extracted.json"),
+            ("checkliste", "*LaserScan Module*Checkliste*.extracted.json"),
+            ("autofokus", "*Collimator*.extracted.json"),
+            ("autofokus", "*Autofokus*.extracted.json"),
+        ]
+        for source_name, pattern in json_specs:
+            for path in self._iter_glob_paths(pattern):
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(raw, list):
+                    continue
+                for item in raw:
+                    if not isinstance(item, dict):
+                        continue
+                    text = str(item.get("text", "")).strip()
+                    if len(text) < 4:
+                        continue
+                    text = " ".join(text.split())
+                    if not text:
+                        continue
+                    chunks.append({
+                        "source": source_name,
+                        "text": text,
+                    })
+
+        docx_specs = [
+            ("anleitung", "*LaserScan*.docx"),
+            ("checkliste", "*Laser-Scan*Checkliste*.docx"),
+            ("autofokus", "MP120-083-009_MACSimaSeq_Collimator_v0.9 - Kopie.docx"),
+            ("autofokus", "*Collimator*.docx"),
+            ("autofokus", "*Autofokus*.docx"),
+        ]
+        for source_name, pattern in docx_specs:
+            for path in self._iter_glob_paths(pattern):
+                for text in self._extract_docx_text_blocks(path):
+                    chunks.append({
+                        "source": source_name,
+                        "text": text,
+                    })
+        self._doc_chunks_cache = chunks
+        return chunks
+
+    def _extract_docx_text_blocks(self, path: pathlib.Path) -> list[str]:
+        try:
+            with zipfile.ZipFile(path, "r") as zf:
+                xml_bytes = zf.read("word/document.xml")
+        except Exception:
+            return []
+        try:
+            root = ET.fromstring(xml_bytes)
+        except Exception:
+            return []
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        lines = []
+        for para in root.findall(".//w:p", ns):
+            parts = []
+            for node in para.findall(".//w:t", ns):
+                txt = "".join(node.itertext()).strip()
+                if txt:
+                    parts.append(txt)
+            if not parts:
+                continue
+            line = " ".join(parts)
+            line = " ".join(line.split())
+            if len(line) >= 4:
+                lines.append(line)
+        return lines
+
+    def _load_doc_images(self) -> list[dict]:
+        if isinstance(self._doc_images_cache, list):
+            return self._doc_images_cache
+        images = []
+        docx_specs = [
+            ("anleitung", "*LaserScan*.docx"),
+            ("checkliste", "*Laser-Scan*Checkliste*.docx"),
+            ("autofokus", "MP120-083-009_MACSimaSeq_Collimator_v0.9 - Kopie.docx"),
+            ("autofokus", "*Collimator*.docx"),
+            ("autofokus", "*Autofokus*.docx"),
+        ]
+        for source_name, pattern in docx_specs:
+            for path in self._iter_glob_paths(pattern):
+                images.extend(self._extract_docx_images(path, source_name))
+        self._doc_images_cache = images
+        return images
+
+    def _extract_docx_images(self, docx_path: pathlib.Path, source_name: str) -> list[dict]:
+        out = []
+        try:
+            with zipfile.ZipFile(docx_path, "r") as zf:
+                media_files = [n for n in zf.namelist() if n.startswith("word/media/")]
+                for name in media_files:
+                    ext = pathlib.Path(name).suffix.lower()
+                    if ext not in {".png", ".jpg", ".jpeg", ".bmp", ".gif"}:
+                        continue
+                    try:
+                        payload = zf.read(name)
+                    except Exception:
+                        continue
+                    if not payload:
+                        continue
+                    sig = hashlib.md5((str(docx_path) + "|" + name).encode("utf-8", errors="ignore")).hexdigest()
+                    cache_dir = pathlib.Path(tempfile.gettempdir()) / "resolve_tool_doc_images"
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    out_path = cache_dir / f"{sig}{ext}"
+                    if not out_path.exists():
+                        try:
+                            out_path.write_bytes(payload)
+                        except Exception:
+                            continue
+                    out.append({
+                        "source": source_name,
+                        "path": str(out_path),
+                        "doc_name": docx_path.name,
+                        "media_name": pathlib.Path(name).name,
+                    })
+        except Exception:
+            return []
+        return out
+
+    def _is_image_help_prompt(self, prompt: str) -> bool:
+        p = (prompt or "").strip().lower()
+        if not p:
+            return False
+        asks_images = any(t in p for t in ("bild", "bilder", "foto", "grafik", "abbildung", "zeigen", "anzeig"))
+        is_topic = any(t in p for t in ("autofokus", "autofocus", "fokus", "collimator", "kollimator", "laser scan", "laserscan", "scan modul", "scanmodul"))
+        return asks_images or is_topic
+
+    def _select_relevant_doc_images(self, prompt: str, max_images: int = 6) -> list[dict]:
+        p = (prompt or "").strip().lower()
+        if not p:
+            return []
+        images = self._load_doc_images()
+        if not images:
+            return []
+        prefer_autofokus = any(t in p for t in ("autofokus", "autofocus", "fokus", "collimator", "kollimator"))
+        prefer_scan = any(t in p for t in ("laser scan", "laserscan", "scan modul", "scanmodul", "line modul", "linemodul"))
+
+        scored = []
+        for item in images:
+            score = 0
+            src = str(item.get("source", "")).lower()
+            doc_name = str(item.get("doc_name", "")).lower()
+            media_name = str(item.get("media_name", "")).lower()
+            if prefer_autofokus and src == "autofokus":
+                score += 4
+            if prefer_scan and src in {"anleitung", "checkliste"}:
+                score += 4
+            if "collimator" in doc_name or "autofokus" in doc_name:
+                score += 1 if prefer_autofokus else 0
+            if "laserscan" in doc_name or "laser-scan" in doc_name:
+                score += 1 if prefer_scan else 0
+            if any(x in media_name for x in ("image", "abb", "fig", "grafik")):
+                score += 1
+            if score > 0:
+                scored.append((score, item))
+        if not scored:
+            scored = [(1, item) for item in images]
+        scored.sort(key=lambda it: (-it[0], str(it[1].get("doc_name", "")), str(it[1].get("media_name", ""))))
+        selected = []
+        seen = set()
+        for _, item in scored:
+            pth = str(item.get("path", ""))
+            if not pth or pth in seen:
+                continue
+            seen.add(pth)
+            selected.append(item)
+            if len(selected) >= max_images:
+                break
+        return selected
+
+    def _append_chat_image_gallery(self, role: str, title: str, images: list[dict]):
+        if not images:
+            return
+        cursor = self.chat_log.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        if not self.chat_log.document().isEmpty():
+            cursor.insertText("\n")
+        cursor.insertText(f"{role}: {title}\n")
+        max_w = max(180, min(260, self.chat_log.viewport().width() - 36))
+        for item in images:
+            path = str(item.get("path", "")).strip()
+            if not path:
+                continue
+            img = QImage(path)
+            if img.isNull():
+                continue
+            w = int(img.width())
+            h = int(img.height())
+            if w <= 0 or h <= 0:
+                continue
+            scale = min(1.0, float(max_w) / float(w))
+            fmt = QTextImageFormat()
+            fmt.setName(pathlib.Path(path).as_uri())
+            fmt.setWidth(int(w * scale))
+            fmt.setHeight(int(h * scale))
+            cursor.insertImage(fmt)
+            caption = f"{item.get('source', 'doku')} | {item.get('doc_name', '')} | {item.get('media_name', '')}"
+            cursor.insertText(f"\n{caption}\n\n")
+        self.chat_log.setTextCursor(cursor)
+        self.chat_log.verticalScrollBar().setValue(self.chat_log.verticalScrollBar().maximum())
+
+    def _append_relevant_images_for_prompt(self, prompt: str):
+        if not self._is_image_help_prompt(prompt):
+            return
+        images = self._select_relevant_doc_images(prompt, max_images=6)
+        if not images:
+            return
+        self._append_chat_image_gallery("Bot", "Passende Bilder aus den Arbeitsanweisungen:", images)
+
+    def _build_doc_context(self, prompt: str, max_lines: int = 24, max_chars: int = 3200) -> str:
+        p = (prompt or "").strip().lower()
+        if not p:
+            return ""
+        use_terms = (
+            "laser",
+            "scan",
+            "modul",
+            "linemodul",
+            "laserscan",
+            "fokus",
+            "autofokus",
+            "autofocus",
+            "kollimator",
+            "collimator",
+            "anleitung",
+            "checkliste",
+            "aufbau",
+            "montage",
+            "arbeitsschritt",
+            "justage",
+            "inbetriebnahme",
+        )
+        if not any(term in p for term in use_terms):
+            return ""
+        chunks = self._load_doc_chunks()
+        if not chunks:
+            return "DOKU-KONTEXT: Keine passende Anleitung/Checkliste gefunden."
+        tokens = re.findall(r"[a-zA-Z0-9_\\-]+", p)
+        keywords = {t for t in tokens if len(t) >= 4}
+        keywords.update({
+            "laser", "scan", "modul", "aufbau", "montage", "checkliste", "anleitung",
+            "fokus", "autofokus", "autofocus", "kollimator", "collimator",
+        })
+        scored = []
+        for chunk in chunks:
+            text_l = chunk["text"].lower()
+            score = 0
+            for kw in keywords:
+                if kw in text_l:
+                    score += 1
+            if score == 0 and ("arbeitsschritt" in text_l or "benoetigte" in text_l or "justage" in text_l):
+                score = 1
+            if score > 0:
+                scored.append((score, chunk["source"], chunk["text"]))
+        if not scored:
+            return "DOKU-KONTEXT: Anleitung/Checkliste geladen, aber keine passende Passage gefunden."
+        scored.sort(key=lambda it: (-it[0], len(it[2])))
+        lines = []
+        total_chars = 0
+        for _, source, text in scored:
+            line = f"- [{source}] {text}"
+            new_total = total_chars + len(line) + 1
+            if new_total > max_chars:
+                break
+            lines.append(line)
+            total_chars = new_total
+            if len(lines) >= max_lines:
+                break
+        if not lines:
+            return "DOKU-KONTEXT: Anleitung/Checkliste geladen, aber Kontextlimit erreicht."
+        return "DOKU-KONTEXT (Arbeitsanweisungen):\n" + "\n".join(lines)
+
+    def _extract_doc_points(self, doc_context: str) -> list[str]:
+        if not doc_context:
+            return []
+        points = []
+        seen = set()
+        for raw_line in doc_context.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("- "):
+                continue
+            text = line[2:].strip()
+            if text.startswith("["):
+                close_idx = text.find("]")
+                if close_idx >= 0:
+                    text = text[close_idx + 1:].strip()
+            text = " ".join(text.split())
+            if len(text) < 8:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            points.append(text)
+        return points
+
+    def _extract_cache_status_lines(self, db_context: str) -> list[str]:
+        lines = []
+        for raw_line in (db_context or "").splitlines():
+            line = raw_line.strip()
+            if not line.startswith("- "):
+                continue
+            if "nicht im Dashboard-Cache geladen" in line:
+                lines.append(line[2:].strip())
+        return lines
+
+    def _build_worker_procedure_fallback(self, prompt: str, db_context: str, doc_context: str, error_text: str) -> str:
+        points = self._extract_doc_points(doc_context)
+        cache_lines = self._extract_cache_status_lines(db_context)
+        if not self._is_procedure_prompt(prompt) or not points:
+            msg = "Ollama ist aktuell nicht verfuegbar."
+            if cache_lines:
+                msg += "\nDashboard-Status:\n" + "\n".join(f"- {line}" for line in cache_lines[:3])
+            msg += "\nBitte Ollama starten und erneut senden."
+            return msg
+
+        prep = []
+        steps = []
+        checks = []
+        safety = []
+        for text in points:
+            t = text.lower()
+            if any(k in t for k in ("arbeitmittel", "arbeitsmittel", "benoetigte", "python skripte", "justagevorrichtung", "inbetriebnahmeplatz")):
+                prep.append(text)
+            elif any(k in t for k in ("laserschutz", "ohne deckel", "staubkappe", "schutzring")):
+                safety.append(text)
+            elif any(k in t for k in ("pruefen", "messen", "scharf", "mittig", "abweichung", "funktion testen", "soll")):
+                checks.append(text)
+            else:
+                steps.append(text)
+
+        lines = [
+            "Kurzantwort: Aufbau und Justage sind mit Anleitung/Checkliste moeglich. Vorgehen unten in Werkreihenfolge.",
+            "",
+            "1) Vorbereitung",
+        ]
+        if prep:
+            lines.extend(f"- {t}" for t in prep[:5])
+        else:
+            lines.append("- Anleitung und Checkliste bereitlegen, benoetigte Vorrichtungen aufbauen.")
+
+        lines.append("")
+        lines.append("2) Montage und Ausrichtung")
+        step_items = steps[:7] if steps else points[:7]
+        for idx, item in enumerate(step_items, 1):
+            lines.append(f"{idx}. {item}")
+
+        lines.append("")
+        lines.append("3) Pruefpunkte / Abschluss")
+        if checks:
+            lines.extend(f"- {t}" for t in checks[:6])
+        else:
+            lines.append("- Fokus, Mittigkeit und Funktionstest gemaess Checkliste dokumentieren.")
+
+        if safety:
+            lines.append("")
+            lines.append("Sicherheits-Hinweis")
+            lines.extend(f"- {t}" for t in safety[:3])
+
+        if cache_lines:
+            lines.append("")
+            lines.append("Dashboard-Hinweis")
+            lines.extend(f"- {line}" for line in cache_lines[:3])
+
+        lines.append("")
+        lines.append("Hinweis: Offline-Antwort aus lokaler Doku, da Ollama nicht verfuegbar war.")
+        lines.append(f"Technik: {error_text}")
+        return "\n".join(lines).strip()
+
+    def _format_worker_friendly_answer(self, text: str, prompt: str, db_context: str, doc_context: str) -> str:
+        answer = (text or "").strip()
+        if not answer:
+            return answer
+        has_raw_doc_dump = ("DOKU-KONTEXT" in answer) or ("- [anleitung]" in answer.lower()) or ("- [checkliste]" in answer.lower())
+        if self._is_procedure_prompt(prompt) and has_raw_doc_dump:
+            return self._build_worker_procedure_fallback(
+                prompt=prompt,
+                db_context=db_context,
+                doc_context=doc_context,
+                error_text="Rohkontext-Ausgabe wurde fuer Werkerdarstellung bereinigt.",
+            )
+        return answer
+
     def _is_db_summary_prompt(self, prompt: str) -> bool:
         p = (prompt or "").strip().lower()
         if not p:
@@ -6041,6 +6708,11 @@ class OllamaChatView(QWidget):
             "letzte daten",
             "letzten daten",
             "neueste daten",
+            "zusammenfassung test",
+            "zusammenfassung tests",
+            "test zusammenfassung",
+            "tests zusammenfassen",
+            "fasse tests zusammen",
             "was sind die letzten daten",
             "wie sehen die letzten daten aus",
             "wie sehen die aktuellen daten aus",
@@ -6052,41 +6724,136 @@ class OllamaChatView(QWidget):
         if any(k in p for k in keywords):
             return True
         has_time_word = any(w in p for w in ("aktuell", "letzte", "letzten", "neueste", "latest", "current"))
-        has_data_word = any(w in p for w in ("daten", "testdaten", "tests", "db", "datenbank"))
+        has_data_word = any(w in p for w in ("daten", "testdaten", "tests", "db", "datenbank", "zusammenfassung"))
         return has_time_word and has_data_word
 
+    def _is_today_modules_prompt(self, prompt: str) -> bool:
+        p = (prompt or "").strip().lower()
+        if not p:
+            return False
+        has_today = any(w in p for w in ("heute", "heutige", "today"))
+        has_test = any(w in p for w in ("getest", "test", "baugruppe", "baugruppen", "linie", "linien"))
+        return has_today and has_test
+
+    def _should_include_db_context(self, prompt: str) -> bool:
+        p = (prompt or "").strip().lower()
+        if not p:
+            return False
+        if self._is_db_summary_prompt(p):
+            return True
+        db_keywords = (
+            "status",
+            "stand",
+            "linie",
+            "linien",
+            "test",
+            "tests",
+            "risiko",
+            "auffaellig",
+            "auffÃ¤ll",
+            "abweichung",
+            "trend",
+            "qualitaet",
+            "qualitÃ¤t",
+            "fehler",
+            "produktion",
+            "dashboard",
+            "cache",
+            "daten",
+            "datenbank",
+            "resulttype",
+            "testtype",
+            "employee_id",
+        )
+        if any(k in p for k in db_keywords):
+            return True
+        if self._is_procedure_prompt(p):
+            return False
+        return False
+
+    def _is_procedure_prompt(self, prompt: str) -> bool:
+        p = (prompt or "").strip().lower()
+        if not p:
+            return False
+        keywords = (
+            "wie baue",
+            "aufbauen",
+            "aufbau",
+            "montage",
+            "anleitung",
+            "checkliste",
+            "arbeitsschritt",
+            "inbetriebnahme",
+            "justage",
+            "autofokus",
+            "autofocus",
+            "fokus",
+            "kollimator",
+            "collimator",
+            "laser scan",
+            "laserscan",
+            "laser-line",
+            "linemodul",
+        )
+        return any(k in p for k in keywords)
+
     def _latest_timestamp(self, df: pd.DataFrame):
+        ts = self._timestamp_series(df)
+        if not ts.empty:
+            return ts.max().to_pydatetime()
+        return None
+
+    def _timestamp_series(self, df: pd.DataFrame):
+        if df is None or df.empty:
+            return pd.Series(dtype="datetime64[ns]")
         for col in ("StartTest", "EndTest", "timestamp", "datetime", "time", "date"):
             if col in df.columns:
                 try:
                     ts = pd.to_datetime(df[col], errors="coerce").dropna()
                     if not ts.empty:
-                        return ts.max().to_pydatetime()
+                        return ts
                 except Exception:
                     continue
-        return None
+        return pd.Series(dtype="datetime64[ns]")
 
-    def _ask_ollama(self, prompt: str, db_context: str) -> str:
+    def _ask_ollama(self, prompt: str, db_context: str, doc_context: str = "") -> str:
+        is_procedure = self._is_procedure_prompt(prompt)
+        if is_procedure:
+            answer_format = (
+                "Antwortformat (immer in dieser Struktur):\n"
+                "1) Kurzantwort (1 Satz)\n"
+                "2) Voraussetzungen/Arbeitsmittel (nur aus DOKU-KONTEXT)\n"
+                "3) Arbeitsschritte (nummeriert, kompakt)\n"
+                "4) Pruefpunkte/Abschluss (Checkliste)\n"
+                "5) Falls Kontext fehlt: klar benennen, was fehlt"
+            )
+        else:
+            answer_format = (
+                "Antwortformat (immer in dieser Struktur):\n"
+                "1) Lagebild (1-2 Saetze)\n"
+                "2) Aktueller Stand je Linie (kleberoboter, gitterschieber_tool, stage_test) als kurze Stichpunkte\n"
+                "3) Auffaelligkeiten/Risiken (nur wenn vorhanden, sonst 'Keine kritischen Auffaelligkeiten')\n"
+                "4) Naechste sinnvolle Aktion (1 konkrete Empfehlung)\n"
+                "Regel: Keine langen Rohdaten-Listen; nur die wichtigsten Kennzahlen/Zeitstempel nennen."
+            )
         system_prompt = (
             "Rolle: Du bist ein erfahrener Production Supervisor fuer Resolve Tools.\n"
             "Ziel: Antworte kurz, klar und entscheidungsorientiert.\n"
-            "Datenbasis: Verwende AUSSCHLIESSLICH den gelieferten DB-KONTEXT (Dashboard-Cache).\n"
-            "Wenn etwas nicht im Kontext steht, sage explizit: 'nicht im Dashboard-Cache vorhanden'.\n"
+            "Datenbasis: Verwende AUSSCHLIESSLICH den gelieferten DB-KONTEXT und DOKU-KONTEXT.\n"
+            "Wenn etwas nicht im Kontext steht, sage explizit: 'nicht im gelieferten Kontext vorhanden'.\n"
+            "Wenn die Frage nach Aufbau/Montage fragt, priorisiere DOKU-KONTEXT vor DB-KONTEXT.\n"
+            "Gib NIEMALS den rohen Kontext wieder (keine Ausgabe von 'DB-KONTEXT', 'DOKU-KONTEXT', '[anleitung]', '[checkliste]').\n"
             "Keine erfundenen IDs, Werte oder Ursachen.\n"
             "Sprache: Deutsch.\n"
-            "Antwortformat (immer in dieser Struktur):\n"
-            "1) Lagebild (1-2 Saetze)\n"
-            "2) Aktueller Stand je Linie (kleberoboter, gitterschieber_tool, stage_test) als kurze Stichpunkte\n"
-            "3) Auffaelligkeiten/Risiken (nur wenn vorhanden, sonst 'Keine kritischen Auffaelligkeiten')\n"
-            "4) Naechste sinnvolle Aktion (1 konkrete Empfehlung)\n"
-            "Regel: Keine langen Rohdaten-Listen; nur die wichtigsten Kennzahlen/Zeitstempel nennen."
+            f"{answer_format}"
         )
-        user_prompt = f"DB-KONTEXT:\n{db_context}\n\nFRAGE:\n{prompt}"
+        user_prompt = f"DB-KONTEXT:\n{db_context}\n\n{doc_context}\n\nFRAGE:\n{prompt}"
+        num_predict = self._num_predict_procedure if is_procedure else self._num_predict
         payload = {
             "model": self.model,
             "stream": self._stream_enabled,
             "options": {
-                "num_predict": self._num_predict,
+                "num_predict": num_predict,
             },
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -6099,7 +6866,7 @@ class OllamaChatView(QWidget):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=self._request_timeout_s) as resp:
+        with urllib.request.urlopen(req, timeout=self._network_timeout_s) as resp:
             if self._stream_enabled:
                 chunks = []
                 while True:
@@ -6203,15 +6970,20 @@ class MainWindow(QMainWindow):
         self.dashboard.btn_goto_ipc.clicked.connect(lambda: self.btn_ipc.click())
         wf_header = self._make_nav_section("WORKFLOWS")
         self.side_layout.addWidget(wf_header)
-        self.btn_ztrieb = add_nav("Z-Trieb", ZTriebView())
-        self.btn_af = add_nav("Autofocus", AutofocusView())
-        add_nav("Optikkorper", OptikkoerperView())
+        self.ztrieb_view = LazyView(ZTriebView, "Z-Trieb")
+        self.btn_ztrieb = add_nav("Z-Trieb", self.ztrieb_view)
+        self.af_view = LazyView(AutofocusView, "Autofocus")
+        self.btn_af = add_nav("Autofocus", self.af_view)
+        self.optik_view = LazyView(OptikkoerperView, "Optikkorper")
+        add_nav("Optikkorper", self.optik_view)
         self.stage_view = LazyView(StageControlView, "XY- Stage Resolve")
         add_nav("XY- Stage Resolve", self.stage_view)
         self.blaze_stage_view = LazyView(BlazeStageTestView, "XYZ Satge Blaze")
         add_nav("XYZ Satge Blaze", self.blaze_stage_view)
-        add_nav("Gitterschieber", GitterschieberView())
-        add_nav("Laserscan", LaserscanView())
+        self.gitterschieber_view = LazyView(GitterschieberView, "Gitterschieber")
+        add_nav("Gitterschieber", self.gitterschieber_view)
+        self.laserscan_view = LazyView(LaserscanView, "Laserscan")
+        add_nav("Laserscan", self.laserscan_view)
         # Load Dynamic Tools
         dynamic_tools = UI_CONFIG.get("dynamic_tools", {})
         if dynamic_tools:
@@ -6267,6 +7039,19 @@ class MainWindow(QMainWindow):
         self.btn_search_submit.setFixedHeight(32)
         self.btn_search_submit.setMinimumWidth(92)
         self.btn_search_submit.clicked.connect(self._handle_search_submit)
+        self.chat_badge = QLabel("")
+        self.chat_badge.setVisible(False)
+        self.chat_badge.setAlignment(Qt.AlignCenter)
+        self.chat_badge.setMinimumHeight(24)
+        self.chat_badge.setMinimumWidth(24)
+        self.chat_badge.setStyleSheet(
+            f"background-color: {COLORS['danger']};"
+            f"color: {COLORS['bg']};"
+            f"border-radius: 12px;"
+            f"font-size: 10px;"
+            f"font-weight: 800;"
+            f"padding: 0 6px;"
+        )
         self.btn_open_stage_folder = QToolButton()
         self.btn_open_stage_folder.setIcon(_make_folder_icon(COLORS['text_muted'], 16))
         self.btn_open_stage_folder.setToolTip("Stage-Ordner oeffnen")
@@ -6283,8 +7068,8 @@ class MainWindow(QMainWindow):
         hl.addStretch()
         hl.addWidget(self.search_bar)
         hl.addWidget(self.btn_search_submit)
+        hl.addWidget(self.chat_badge)
         hl.addWidget(self.btn_open_stage_folder)
-        self.search_bar.textChanged.connect(self._filter_navigation)
         self.search_bar.returnPressed.connect(self._handle_search_submit)
         content_col.addWidget(header)
         scroll = QScrollArea()
@@ -6317,6 +7102,19 @@ class MainWindow(QMainWindow):
         ph.setContentsMargins(10, 6, 6, 6)
         lbl_chat = QLabel("Chat")
         lbl_chat.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {COLORS['text']};")
+        self.chat_panel_badge = QLabel("")
+        self.chat_panel_badge.setVisible(False)
+        self.chat_panel_badge.setAlignment(Qt.AlignCenter)
+        self.chat_panel_badge.setMinimumHeight(20)
+        self.chat_panel_badge.setMinimumWidth(20)
+        self.chat_panel_badge.setStyleSheet(
+            f"background-color: {COLORS['danger']};"
+            f"color: {COLORS['bg']};"
+            f"border-radius: 10px;"
+            f"font-size: 10px;"
+            f"font-weight: 800;"
+            f"padding: 0 5px;"
+        )
         btn_close_chat = QToolButton()
         btn_close_chat.setText("Schliessen")
         btn_close_chat.setCursor(Qt.PointingHandCursor)
@@ -6332,10 +7130,12 @@ class MainWindow(QMainWindow):
         )
         btn_close_chat.clicked.connect(lambda: self._set_chat_panel_open(False))
         ph.addWidget(lbl_chat)
+        ph.addWidget(self.chat_panel_badge)
         ph.addStretch()
         ph.addWidget(btn_close_chat)
         panel_layout.addWidget(panel_header)
         self._ollama_chat_view = OllamaChatView(self._chat_panel)
+        self._ollama_chat_view.unread_count_changed.connect(self._on_chat_unread_changed)
         panel_layout.addWidget(self._ollama_chat_view, 1)
         main_layout.addWidget(self._chat_panel)
         # Init
@@ -6371,6 +7171,7 @@ class MainWindow(QMainWindow):
     def _handle_search_submit(self):
         text = self.search_bar.text().strip()
         if not text:
+            self._filter_navigation("")
             return
         lowered = text.lower()
         if lowered.startswith("/chat"):
@@ -6384,13 +7185,27 @@ class MainWindow(QMainWindow):
         else:
             self._open_ollama_chat(text)
         self.search_bar.clear()
+        self._filter_navigation("")
 
     def _open_ollama_chat(self, prompt: str):
         if self._ollama_chat_view is None:
             return
         self._set_chat_panel_open(True)
+        self._ollama_chat_view.on_panel_opened()
         if prompt:
             self._ollama_chat_view.prefill_and_send(prompt)
+
+    def _on_chat_unread_changed(self, count: int):
+        cnt = max(0, int(count))
+        if cnt <= 0:
+            self.chat_badge.setVisible(False)
+            self.chat_panel_badge.setVisible(False)
+            return
+        text = "99+" if cnt > 99 else str(cnt)
+        self.chat_badge.setText(text)
+        self.chat_panel_badge.setText(text)
+        self.chat_badge.setVisible(True)
+        self.chat_panel_badge.setVisible(True)
 
     def _set_chat_panel_open(self, open_panel: bool):
         if self._chat_panel is None:
@@ -6425,6 +7240,42 @@ class MainWindow(QMainWindow):
                 subprocess.run(['xdg-open', str(path.resolve())])
         except Exception as e:
             QMessageBox.warning(self, "Ordner oeffnen", f"Konnte Ordner nicht oeffnen:\n{e}")
+
+    def _iter_runtime_views(self):
+        seen = set()
+        for i in range(self.stack.count()):
+            widget = self.stack.widget(i)
+            if widget is None:
+                continue
+            target = widget
+            if isinstance(widget, LazyView):
+                target = widget.view
+                if target is None:
+                    continue
+            ident = id(target)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            yield target
+
+    def closeEvent(self, event):
+        for view in self._iter_runtime_views():
+            try:
+                shutdown_fn = getattr(view, "shutdown", None)
+                if callable(shutdown_fn):
+                    shutdown_fn()
+            except Exception:
+                pass
+            try:
+                view.close()
+            except Exception:
+                pass
+        try:
+            if self._ollama_chat_view is not None and hasattr(self._ollama_chat_view, "mark_notifications_read"):
+                self._ollama_chat_view.mark_notifications_read()
+        except Exception:
+            pass
+        super().closeEvent(event)
     def create_tool(self):
         name, ok = QInputDialog.getText(self, "New Custom Tool", "Enter tool name:")
         if ok and name:
@@ -6504,3 +7355,5 @@ if __name__ == "__main__":
     app.installEventFilter(app.studio_filter)
     window.showMaximized()
     sys.exit(app.exec())
+
+

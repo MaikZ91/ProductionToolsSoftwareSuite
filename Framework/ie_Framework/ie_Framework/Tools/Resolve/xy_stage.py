@@ -1,8 +1,8 @@
-#!/usr/bin/env python
+﻿#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 Stage-spezifische Logik ohne GUI-Elemente.
-Enthält PMAC-Bridge, Bewegungs-Helper und Dauertest-Worker.
+Contains PMAC bridge, motion helpers, and endurance-test workers.
 """
 from __future__ import annotations
 
@@ -17,6 +17,712 @@ import numpy as np
 from matplotlib.figure import Figure
 from PySide6.QtCore import QObject, Signal
 
+
+# ---------------------------------------------------------------------------
+# Calibration helper block
+# Contains helper functions for:
+# - reading PMAC status/config
+# - moving axes and reading encoders
+# - generating calibration motion sequences
+# PMAC connection/initialization stays wrapped in functions/worker flows
+# so importing this module does not trigger hardware access.
+# ---------------------------------------------------------------------------
+stageStatus = {}
+_pmac_real_backend = None
+_pmac_sim_backend = None
+_pmac_use_sim = False
+
+
+def connect_and_read_stage_config(uri: str = "tcp://127.0.0.1:5050", connect_pmac: bool = False):
+    """
+    Optionally connect to PMAC, print current stage status, and return X/Y config values.
+
+    This function:
+    - optionally calls `pmac_connect(uri)` when `connect_pmac=True`
+    - refreshes `stageStatus` via `pmac_get_stage_pos_info(...)`
+    - prints available stage status fields to the console
+    - reads and returns calibration-relevant X/Y PMAC configuration values
+
+    The code is wrapped in a function (instead of top-level module code)
+    so importing `xy_stage.py` does not trigger hardware access.
+    """
+    if connect_pmac:
+        res = pmac_connect(uri)
+        # Alternative IP for target hardware:
+        # ##res = pmac_connect("tcp://192.168.0.183:5050")
+        # res = pmac.print("Hello World !")
+
+    res = pmac_get_stage_pos_info(stageStatus)
+
+    if stageStatus.get("error"):
+        print("Something went wrong: ", stageStatus.get("error"))
+    else:
+        for key, label in (
+            ("xPos", "xPos"),
+            ("xPosEnc", "xPosEnc"),
+            ("yPos", "yPos"),
+            ("yPosEnc", "yPosEnc"),
+            ("zPos", "zPos"),
+            ("xPos_motorSteps", "xPos_motorSteps"),
+            ("yPos_motorSteps", "yPos_motorSteps"),
+            ("xPos_encoderSteps", "xPos_encoderSteps"),
+            ("yPos_encoderSteps", "yPos_encoderSteps"),
+            ("zPos_voiceCoilSteps", "zPos_voiceCoilSteps"),
+            ("zPos_samBoardSteps", "zPos_samBoardSteps"),
+        ):
+            if key in stageStatus:
+                print(f"{label}:    ", stageStatus[key])
+
+    # get config for x axis
+    limitLowStepsX = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/limitLowSteps")
+    limitHighStepsX = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/limitHighSteps")
+    homeStepPositionX = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/homeStepPosition")
+    stepsPerMeterX = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/stepsPerMeter")
+    encoderStepsPerMeterX = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/encoderStepsPerMeter")
+    encoderMinPositionX = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/encoderMinPosition")
+    encoderMaxPositionX = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/encoderMaxPosition")
+
+    # get config for Y axis
+    limitLowStepsY = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/limitLowSteps")
+    limitHighStepsY = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/limitHighSteps")
+    homeStepPositionY = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/homeStepPosition")
+    stepsPerMeterY = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/stepsPerMeter")
+    encoderStepsPerMeterY = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/encoderStepsPerMeter")
+    encoderMinPositionY = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/encoderMinPosition")
+    encoderMaxPositionY = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/encoderMaxPosition")
+
+    return (
+        limitLowStepsX, limitHighStepsX, homeStepPositionX, stepsPerMeterX, encoderStepsPerMeterX,
+        encoderMinPositionX, encoderMaxPositionX,
+        limitLowStepsY, limitHighStepsY, homeStepPositionY, stepsPerMeterY, encoderStepsPerMeterY,
+        encoderMinPositionY, encoderMaxPositionY,
+    )
+
+def moveXinsteps(motorsteps):
+    """Move X axis to an absolute motor-step position."""
+    pmac_set_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/X/stepPosition", int(motorsteps))
+
+
+def moveYinsteps(motorsteps):
+    """Move Y axis to an absolute motor-step position."""
+    pmac_set_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/Y/stepPosition", int(motorsteps))
+
+
+def get_current_pos():
+    """Liefert die aktuellen Motor-Sollpositionen in Steps (X, Y, Z)."""
+    x = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/X/stepPosition")
+    y = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/Y/stepPosition")
+    z = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/Z/stepPosition")
+    return x, y, z
+
+
+def getXencoder():
+    """Read and print the current X encoder position in encoder steps."""
+    res = pmac_get_stage_pos_info(stageStatus)
+    print("xPosEnc: ", stageStatus["xPos_encoderSteps"])
+    return stageStatus["xPos_encoderSteps"]
+
+
+def getYencoder():
+    """Read and print the current Y encoder position in encoder steps."""
+    res = pmac_get_stage_pos_info(stageStatus)
+    print("yPosEnc: ", stageStatus["yPos_encoderSteps"])
+    return stageStatus["yPos_encoderSteps"]
+
+
+def get_stage_encoders():
+    """Liefert die aktuellen Encoder-Istwerte (X, Y) in Encodersteps."""
+    st = {}
+    pmac_get_stage_pos_info(st)
+    return st["xPos_encoderSteps"], st["yPos_encoderSteps"]
+
+
+def motorsteps2encodersteps(motorStep, stepsPerMeter, encoderStepsPerMeter):
+    """Convert motor steps to expected encoder steps using axis calibration values."""
+    encodersteps = motorStep / stepsPerMeter * encoderStepsPerMeter
+    return encodersteps.astype(int)
+
+
+def meas_linear(StartMotorSteps, StopMotorSteps, Steps, stepsPerMeter, encoderStepsPerMeter):
+    """Generate linearly spaced motor-step targets and expected encoder values."""
+    motor_steps = np.linspace(StartMotorSteps, StopMotorSteps, Steps).astype(int)
+    calc_encoder = motorsteps2encodersteps(motor_steps, stepsPerMeter, encoderStepsPerMeter)
+    return motor_steps, calc_encoder
+
+
+def meas_random(StartMotorSteps, StopMotorSteps, Steps, stepsPerMeter, encoderStepsPerMeter):
+    """Generate random motor-step targets within a range and expected encoder values."""
+    motor_steps = np.random.uniform(StartMotorSteps, StopMotorSteps, Steps)
+    calc_encoder = motorsteps2encodersteps(motor_steps, stepsPerMeter, encoderStepsPerMeter)
+    return motor_steps, calc_encoder
+
+
+def meas_single_zickzack(StartMotorSteps, StopMotorSteps, Steps, stepsPerMeter, encoderStepsPerMeter):
+    """Generate one forward/backward sweep and expected encoder values."""
+    motor_steps = np.linspace(StartMotorSteps, StopMotorSteps, Steps).astype(int)
+    motor_steps_flipped = np.flipud(motor_steps)
+    motor_steps = np.append(motor_steps, motor_steps_flipped)
+    calc_encoder = motorsteps2encodersteps(motor_steps, stepsPerMeter, encoderStepsPerMeter)
+    return motor_steps, calc_encoder
+
+
+def meas_zickzack(StartMotorSteps, StopMotorSteps, Steps, repetitions, stepsPerMeter, encoderStepsPerMeter):
+    """Generate repeated forward/backward sweeps and expected encoder values."""
+    motor_steps = np.linspace(StartMotorSteps, StopMotorSteps, Steps).astype(int)
+    motor_steps_flipped = np.flipud(motor_steps)
+    onerepetition = np.append(motor_steps, motor_steps_flipped)
+    motor_steps = onerepetition
+    for i in range(repetitions):
+        motor_steps = np.append(motor_steps, onerepetition)
+    calc_encoder = motorsteps2encodersteps(motor_steps, stepsPerMeter, encoderStepsPerMeter)
+    return motor_steps, calc_encoder
+
+
+def meas_moving_zickzack(
+    StartMotorSteps,
+    StopMotorSteps,
+    Steps,
+    movingstep,
+    repetitions,
+    stepsPerMeter,
+    encoderStepsPerMeter,
+):
+    """Generate shifted repeated zig-zag sweeps and expected encoder values."""
+    linear = np.linspace(StartMotorSteps, StopMotorSteps, Steps).astype(int)
+    linear_flipped = np.flipud(linear)
+    onerepetition = np.append(linear, linear_flipped)
+    motor_steps = onerepetition
+    for i in range(repetitions):
+        motor_steps = np.append(motor_steps, onerepetition + (i + 1) * movingstep)
+    calc_encoder = motorsteps2encodersteps(motor_steps, stepsPerMeter, encoderStepsPerMeter)
+    return motor_steps, calc_encoder
+
+def meas_zigzag_linear(lo, hi, n, spm, epm):
+    """Zig-zag motion (forward/backward) including expected encoder values."""
+    mot = np.linspace(lo, hi, n).astype(int)
+    mot = np.r_[mot, mot[::-1]]
+    return mot, (mot / spm * epm).astype(int)
+
+
+def apply_calibration_steps_per_meter(sc, batch: str, x_spm: int, y_spm: int):
+    """Schreibt neue stepsPerMeter in PMAC und aktualisiert den StageController-Cache."""
+    try:
+        pmac_set_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/stepsPerMeter", int(x_spm))
+        pmac_set_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/stepsPerMeter", int(y_spm))
+        sc.steps_per_m["X"] = int(x_spm)
+        sc.steps_per_m["Y"] = int(y_spm)
+        print(f"[APPLIED][{batch}] stepsPerMeter: X = {x_spm}, Y = {y_spm}")
+    except Exception as e:
+        print(f"[WARN][{batch}] Konnte stepsPerMeter nicht schreiben:", e)
+
+def measure_axis_encoder_points(
+    axis: str,
+    motor_steps: np.ndarray,
+    home_x: int,
+    home_y: int,
+) -> np.ndarray:
+    """Move one axis through points and return encoder readings (simple/original style)."""
+    enc = np.zeros(len(motor_steps), dtype=float)
+    for i in range(len(motor_steps)):
+        ms = motor_steps[i]
+        if axis == "X":
+            moveXinsteps(ms)
+            enc[i] = getXencoder()
+        else:
+            moveYinsteps(ms)
+            enc[i] = getYencoder()
+    moveXinsteps(home_x)
+    moveYinsteps(home_y)
+    return enc
+
+def measure_axis_encoder_points_with_callbacks(
+    axis: str,
+    motor_steps: np.ndarray,
+    home_x: int,
+    home_y: int,
+    on_phase=None,
+    on_step=None,
+    batch: str = "NoBatch",
+) -> np.ndarray:
+    """Extended variant with progress callbacks for worker/UI usage."""
+    if on_phase is not None:
+        on_phase(f"Calibration {axis} Â· Batch: {batch}", len(motor_steps))
+    enc = np.zeros(len(motor_steps), dtype=float)
+    for i, ms in enumerate(motor_steps, 1):
+        if axis == "X":
+            moveXinsteps(ms)
+            enc[i - 1] = getXencoder()
+        else:
+            moveYinsteps(ms)
+            enc[i - 1] = getYencoder()
+        if on_step is not None:
+            on_step(i)
+    moveXinsteps(home_x)
+    moveYinsteps(home_y)
+    return enc
+
+def _ensure_pmac_sim_backend():
+    global _pmac_sim_backend
+    if _pmac_sim_backend is None:
+        _pmac_sim_backend = _DummyPMACBackend()
+    return _pmac_sim_backend
+
+
+def _pmac_fallback(reason: Exception | str):
+    """Switch to simulation backend after the first hardware failure."""
+    global _pmac_use_sim
+    if not _pmac_use_sim:
+        print(f"[WARN] PMAC fallback enabled ({reason}).")
+        _pmac_use_sim = True
+    return _ensure_pmac_sim_backend()
+
+
+def pmac_connect(uri: str):
+    """Connect through hardware backend, or simulation backend if needed."""
+    if _pmac_use_sim or _pmac_real_backend is None:
+        return _ensure_pmac_sim_backend().connect(uri)
+    try:
+        return _pmac_real_backend.connect(uri)
+    except Exception as exc:
+        return _pmac_fallback(exc).connect(uri)
+
+
+def pmac_get_param(path: str):
+    """Read a PMAC parameter with automatic simulation fallback."""
+    if _pmac_use_sim or _pmac_real_backend is None:
+        return _ensure_pmac_sim_backend().getParam(path)
+    try:
+        return _pmac_real_backend.getParam(path)
+    except Exception as exc:
+        return _pmac_fallback(exc).getParam(path)
+
+
+def pmac_set_param(path: str, value):
+    """Write a PMAC parameter with automatic simulation fallback."""
+    if _pmac_use_sim or _pmac_real_backend is None:
+        return _ensure_pmac_sim_backend().setParam(path, value)
+    try:
+        return _pmac_real_backend.setParam(path, value)
+    except Exception as exc:
+        return _pmac_fallback(exc).setParam(path, value)
+
+
+def pmac_get_stage_pos_info(status: dict):
+    """Read stage position/status with automatic simulation fallback."""
+    if _pmac_use_sim or _pmac_real_backend is None:
+        return _ensure_pmac_sim_backend().getStagePosInfo(status)
+    try:
+        return _pmac_real_backend.getStagePosInfo(status)
+    except Exception as exc:
+        return _pmac_fallback(exc).getStagePosInfo(status)
+    
+def sanitize_batch(s: str) -> str:
+    """Sanitize batch name for use in file paths."""
+    s = (s or "").strip()
+    if not s:
+        return "NoBatch"
+    s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
+    return s[:64] or "NoBatch"
+
+def build_calibration_motor_steps(
+    limitLowStepsX,
+    limitHighStepsX,
+    stepsPerMeterX,
+    encoderStepsPerMeterX,
+    limitLowStepsY,
+    limitHighStepsY,
+    stepsPerMeterY,
+    encoderStepsPerMeterY,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate sampling points for linear calibration."""
+    motorStepsX, _ = meas_linear(
+        limitLowStepsX + 1000,
+        limitHighStepsX - 1000,
+        20,
+        stepsPerMeterX,
+        encoderStepsPerMeterX,
+    )
+    motorStepsY, _ = meas_linear(
+        limitLowStepsY + 5000,
+        limitHighStepsY - 5000,
+        20,
+        stepsPerMeterY,
+        encoderStepsPerMeterY,
+    )
+    return motorStepsX, motorStepsY
+
+def fit_motorsteps_per_meter(enc: np.ndarray, motor_steps: np.ndarray, encoder_steps_per_meter: int):
+    """Lineare Regression: Encoderposition (m) auf Motorsteps abbilden."""
+    x = enc / encoder_steps_per_meter
+    y = motor_steps
+    coef = np.polyfit(x, y, 1)
+    return x, y, np.poly1d(coef), int(coef[0])
+
+def calibrate_x_y_original(
+    motorStepsX=None,
+    motorStepsY=None,
+    encoderStepsPerMeterX=None,
+    encoderStepsPerMeterY=None,
+    homeStepPositionX=None,
+    homeStepPositionY=None,
+):
+    """
+    Executes X/Y stage calibration.
+
+    Procedure:
+      - Move stage to predefined motor step positions
+      - Read encoder feedback at each position
+      - Compute linear regression (polyfit)
+      - Derive updated stepsPerMeter estimates
+
+    Returns:
+      Dictionary containing calibration results and measurement data.
+    """
+    if (
+        motorStepsX is None
+        or motorStepsY is None
+        or encoderStepsPerMeterX is None
+        or encoderStepsPerMeterY is None
+        or homeStepPositionX is None
+        or homeStepPositionY is None
+    ):
+        (
+            limitLowStepsX, limitHighStepsX, homeStepPositionX, stepsPerMeterX, encoderStepsPerMeterX,
+            encoderMinPositionX, encoderMaxPositionX,
+            limitLowStepsY, limitHighStepsY, homeStepPositionY, stepsPerMeterY, encoderStepsPerMeterY,
+            encoderMinPositionY, encoderMaxPositionY,
+        ) = connect_and_read_stage_config(connect_pmac=False)
+        motorStepsX, motorStepsY = build_calibration_motor_steps(
+            limitLowStepsX, limitHighStepsX, stepsPerMeterX, encoderStepsPerMeterX,
+            limitLowStepsY, limitHighStepsY, stepsPerMeterY, encoderStepsPerMeterY,
+        )
+
+    # --- X axis measurement ---
+    Enc = measure_axis_encoder_points(
+        "X",
+        motorStepsX,
+        homeStepPositionX,
+        homeStepPositionY,
+    )
+
+    xX = Enc / encoderStepsPerMeterX
+    yX = motorStepsX
+    coefX = np.polyfit(xX, yX, 1)
+    newMotorStepsPerMeterX = int(coefX[0])
+    fitX = np.poly1d(coefX)
+
+    # --- Y axis measurement ---
+    Enc = measure_axis_encoder_points(
+        "Y",
+        motorStepsY,
+        homeStepPositionX,
+        homeStepPositionY,
+    )
+
+    xY = Enc / encoderStepsPerMeterY
+    yY = motorStepsY
+    coefY = np.polyfit(xY, yY, 1)
+    newMotorStepsPerMeterY = int(coefY[0])
+    fitY = np.poly1d(coefY)
+
+    return {
+        "newMotorStepsPerMeterX": newMotorStepsPerMeterX,
+        "newMotorStepsPerMeterY": newMotorStepsPerMeterY,
+        "X": {"x": xX, "y": yX, "fit_y": fitX(xX)},
+        "Y": {"x": xY, "y": yY, "fit_y": fitY(xY)},
+    }
+
+
+# Backward-compatible alias used by older helper flows.
+calibrate_x_y = calibrate_x_y_original
+
+
+def calibrate_and_measure_org(sc=None, batch: str = "NoBatch"):
+    """Calibrate X/Y, apply updated stepsPerMeter, then run measurement."""
+    sc = sc or StageController()
+    batch = sanitize_batch(batch)
+
+    # 1) Calibration
+    calib = calibrate_x_y()
+
+    # 2) Apply calibration to PMAC (and controller cache)
+    apply_calibration_steps_per_meter(sc,batch,
+        calib["newMotorStepsPerMeterX"],
+        calib["newMotorStepsPerMeterY"],
+    )
+
+    # 3) Measurement using updated calibration
+    measurement = run_stage_measurement(sc, batch=batch)
+
+    return {"calib": calib, "measurement": measurement, "batch": batch}
+
+
+def run_stage_calibration(
+    sc,
+    batch: str = "NoBatch",
+    out_dir: pathlib.Path | None = None,
+    on_phase=None,
+    on_step=None,
+    on_calib=None,
+):
+    """Run linear X/Y calibration and apply new stepsPerMeter values."""
+    if out_dir is None:
+        raise ValueError("out_dir is required")
+    batch = sanitize_batch(batch)
+    (
+        limitLowStepsX, limitHighStepsX, homeStepPositionX, stepsPerMeterX, encoderStepsPerMeterX,
+        encoderMinPositionX, encoderMaxPositionX,
+        limitLowStepsY, limitHighStepsY, homeStepPositionY, stepsPerMeterY, encoderStepsPerMeterY,
+        encoderMinPositionY, encoderMaxPositionY,
+    ) = connect_and_read_stage_config(connect_pmac=False)
+
+    motorStepsX, motorStepsY = build_calibration_motor_steps(
+        limitLowStepsX, limitHighStepsX, stepsPerMeterX, encoderStepsPerMeterX,
+        limitLowStepsY, limitHighStepsY, stepsPerMeterY, encoderStepsPerMeterY,
+    )
+
+    enc_x = measure_axis_encoder_points_with_callbacks(
+        "X",
+        motorStepsX,
+        home_x=homeStepPositionX,
+        home_y=homeStepPositionY,
+        on_phase=on_phase,
+        on_step=on_step,
+        batch=batch,
+    )
+    x_fit, y_fit, poly_x, newMotorStepsPerMeterX = fit_motorsteps_per_meter(
+        enc_x, motorStepsX, encoderStepsPerMeterX
+    )
+    save_calibration_plot(out_dir, "X", batch, x_fit, y_fit, poly_x)
+
+    enc_y = measure_axis_encoder_points_with_callbacks(
+        "Y",
+        motorStepsY,
+        home_x=homeStepPositionX,
+        home_y=homeStepPositionY,
+        on_phase=on_phase,
+        on_step=on_step,
+        batch=batch,
+    )
+    x_fit, y_fit, poly_y, newMotorStepsPerMeterY = fit_motorsteps_per_meter(
+        enc_y, motorStepsY, encoderStepsPerMeterY
+    )
+    save_calibration_plot(out_dir, "Y", batch, x_fit, y_fit, poly_y)
+
+    apply_calibration_steps_per_meter(sc, batch, newMotorStepsPerMeterX, newMotorStepsPerMeterY)
+
+    calib_payload = {
+        "batch": batch,
+        "X_stepsPerMeter": int(newMotorStepsPerMeterX),
+        "Y_stepsPerMeter": int(newMotorStepsPerMeterY),
+    }
+    if on_calib is not None:
+        on_calib(calib_payload)
+
+    return {
+        "newMotorStepsPerMeterX": int(newMotorStepsPerMeterX),
+        "newMotorStepsPerMeterY": int(newMotorStepsPerMeterY),
+        "motorStepsX": motorStepsX,
+        "motorStepsY": motorStepsY,
+    }
+
+
+def calibrate_motorstepspermeter_reference_style(
+    axis: str = "yaxis",
+    confirm: bool = False,
+    apply_to_pmac: bool = True,
+    sc=None,
+    out_dir: pathlib.Path | None = None,
+    batch: str = "NoBatch",
+):
+    """Kalibrierung im Stil des Original-Skripts (gleicher Ablauf / gleiche Schleifenstruktur)."""
+    axis_raw = (axis or "yaxis").strip().lower()
+    axis_alias = {
+        "x": "xaxis",
+        "y": "yaxis",
+        "both": "both",
+        "xaxis": "xaxis",
+        "yaxis": "yaxis",
+    }
+    axisToBeBeMeasured = axis_alias.get(axis_raw)
+    if axisToBeBeMeasured is None:
+        raise ValueError("axis must be one of: 'xaxis', 'yaxis', 'x', 'y', 'both'")
+
+    if confirm:
+        value = input("---\n HomeStepPosition X and Y are set in the FM? [y/n] \n---").strip().lower()
+        if value != "y":
+            return {"stopped": True, "reason": "user_cancelled", "axis": axisToBeBeMeasured}
+
+    (
+        limitLowStepsX, limitHighStepsX, homeStepPositionX, stepsPerMeterX, encoderStepsPerMeterX,
+        encoderMinPositionX, encoderMaxPositionX,
+        limitLowStepsY, limitHighStepsY, homeStepPositionY, stepsPerMeterY, encoderStepsPerMeterY,
+        encoderMinPositionY, encoderMaxPositionY,
+    ) = connect_and_read_stage_config(connect_pmac=False)
+
+    # configure measurement (wie im Original)
+    saveName = "test_cal_encoder.txt"
+    _ = saveName  # aktuell nicht verwendet, bleibt nur fuer Wiedererkennbarkeit
+
+    # X measurements
+    motorStepsX, calcEncoder = meas_linear(
+        homeStepPositionX - 5 * 4388, homeStepPositionX + 5 * 4388, 20, stepsPerMeterX, encoderStepsPerMeterX
+    )
+    motorStepsY, calcEncoder = meas_linear(
+        homeStepPositionY - 5 * 4388, homeStepPositionY + 5 * 4388, 20, stepsPerMeterY, encoderStepsPerMeterY
+    )
+
+    motorStepsX, calcEncoder = meas_linear(
+        limitLowStepsX + 5000, limitHighStepsX - 5000, 20, stepsPerMeterX, encoderStepsPerMeterX
+    )
+    motorStepsY, calcEncoder = meas_linear(
+        limitLowStepsY + 5000, limitHighStepsY - 5000, 20, stepsPerMeterY, encoderStepsPerMeterY
+    )
+    _ = calcEncoder
+
+    batch = sanitize_batch(batch)
+    Enc = np.zeros(len(motorStepsX))
+    newMotorStepsPerMeterX = None
+    newMotorStepsPerMeterY = None
+    selected_loops = {"both": {0, 1}, "xaxis": {0}, "yaxis": {1}}[axisToBeBeMeasured]
+    out_path = pathlib.Path(out_dir) if out_dir is not None else None
+    if out_path is not None:
+        out_path.mkdir(parents=True, exist_ok=True)
+
+    # x und y loop (wie Original)
+    for k in range(2):
+        if k not in selected_loops:
+            continue
+
+        for i in range(len(motorStepsX)):
+            if k == 0:  # x loop
+                moveXinsteps(motorStepsX[i])
+                Enc[i] = getXencoder()
+            elif k == 1:  # y loop
+                moveYinsteps(motorStepsY[i])
+                Enc[i] = getYencoder()
+
+        moveXinsteps(homeStepPositionX)
+        moveYinsteps(homeStepPositionY)
+
+        if k == 0:
+            x = Enc / encoderStepsPerMeterX
+            y = motorStepsX
+            coef = np.polyfit(x, y, 1)
+            poly1d_fn = np.poly1d(coef)
+            newMotorStepsPerMeterX = int(coef[0])
+            print("MotorstepsPerMeterX: " + str(newMotorStepsPerMeterX))
+            if out_path is not None:
+                save_calibration_plot(out_path, "X", batch, x, y, poly1d_fn)
+
+        elif k == 1:
+            x = Enc / encoderStepsPerMeterY
+            y = motorStepsY
+            coef = np.polyfit(x, y, 1)
+            poly1d_fn = np.poly1d(coef)
+            newMotorStepsPerMeterY = int(coef[0])
+            print("MotorstepsPerMeterY: " + str(newMotorStepsPerMeterY))
+            if out_path is not None:
+                save_calibration_plot(out_path, "Y", batch, x, y, poly1d_fn)
+
+    if apply_to_pmac:
+        if newMotorStepsPerMeterX is not None:
+            pmac_set_param(
+                "ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/stepsPerMeter",
+                int(newMotorStepsPerMeterX),
+            )
+            if sc is not None:
+                sc.steps_per_m["X"] = int(newMotorStepsPerMeterX)
+        if newMotorStepsPerMeterY is not None:
+            pmac_set_param(
+                "ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/stepsPerMeter",
+                int(newMotorStepsPerMeterY),
+            )
+            if sc is not None:
+                sc.steps_per_m["Y"] = int(newMotorStepsPerMeterY)
+
+    return {
+        "stopped": False,
+        "axis": axisToBeBeMeasured,
+        "batch": batch,
+        "saveName": saveName,
+        "newMotorStepsPerMeterX": newMotorStepsPerMeterX,
+        "newMotorStepsPerMeterY": newMotorStepsPerMeterY,
+        "motorStepsX": motorStepsX,
+        "motorStepsY": motorStepsY,
+    }
+
+
+def run_stage_measurement(
+    sc,
+    batch: str = "NoBatch",
+    on_phase=None,
+    on_step=None,
+):
+    """Run X/Y zig-zag measurement and return plot data + max error."""
+    batch = sanitize_batch(batch)
+    plot_data = []
+    max_abs_um = 0.0
+
+    for ax in "XY":
+        spm, epm = sc.steps_per_m[ax], sc.enc_per_m[ax]
+        mot, calc = meas_zigzag_linear(sc.low_lim[ax], sc.high_lim[ax], 100, spm, epm)
+        if on_phase is not None:
+            on_phase(f"Measurement {ax} · Batch: {batch}", len(mot))
+        enc = np.zeros_like(mot)
+        for i, m in enumerate(mot, 1):
+            sc.move_abs(ax, int(m))
+            enc[i - 1] = sc.enc(ax)
+            if on_step is not None:
+                on_step(i)
+        diff_um = np.abs((enc - calc) / epm * 1e6)
+        max_abs_um = max(max_abs_um, float(np.max(diff_um)))
+        plot_data.append((ax, mot, enc, calc, spm, epm))
+        sc.move_abs(ax, sc.home_pos[ax])
+
+    return {"plots": plot_data, "meas_max_um": float(max_abs_um), "batch": batch}
+
+
+def run_stage_calibration_and_measurement(
+    sc,
+    batch: str = "NoBatch",
+    out_root: pathlib.Path | None = None,
+    on_phase=None,
+    on_step=None,
+    on_calib=None,
+):
+    """Orchestrate calibration first, then measurement, and return the combined payload."""
+    batch = sanitize_batch(batch)
+    if out_root is None:
+        out_root = DATA_ROOT
+    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    out = pathlib.Path(out_root) / batch / f"Run_{ts}"
+    out.mkdir(parents=True, exist_ok=True)
+
+    calib_info = run_stage_calibration(
+        sc,
+        batch=batch,
+        out_dir=out,
+        on_phase=on_phase,
+        on_step=on_step,
+        on_calib=on_calib,
+    )
+    meas_info = run_stage_measurement(
+        sc,
+        batch=batch,
+        on_phase=on_phase,
+        on_step=on_step,
+    )
+
+    return {
+        "out": out,
+        "plots": meas_info["plots"],
+        "calib": calib_info,
+        "batch": batch,
+        "meas_max_um": meas_info["meas_max_um"],
+    }
+
+    
 # ---------------------------------------------------------------------------
 # Basis/Defaults
 # ---------------------------------------------------------------------------
@@ -38,6 +744,7 @@ def resolve_data_root() -> pathlib.Path:
     if cwd_candidate not in candidates:
         candidates.append(cwd_candidate)
 
+    # Nimm den ersten bereits existierenden Pfad (Reihenfolge = PrioritÃ¤t).
     for path in candidates:
         try:
             if path.exists():
@@ -45,13 +752,14 @@ def resolve_data_root() -> pathlib.Path:
         except OSError:
             continue
 
+    # If nothing exists, create the preferred candidate.
     fallback = candidates[0] if candidates else (BASE_DIR / "Stage-Teststand")
     fallback.mkdir(parents=True, exist_ok=True)
     return fallback.resolve()
 
 
 DATA_ROOT = resolve_data_root()
-DUR_MAX_UM = 25.5    # Max. |Fehler| erlaubt im Dauertest (Live + Abschluss)
+DUR_MAX_UM = 25.5    # Max allowed |error| in endurance test (live + final check)
 
 # ---------------------------------------------------------------------------
 # PMAC Bridge (Hardware / Simulation)
@@ -64,7 +772,394 @@ except Exception as exc:  # pragma: no cover - hardware import fails during simu
 else:
     _PMAC_IMPORT_ERROR = None
 
+_pmac_real_backend = _pmac_module
+_pmac_use_sim = _pmac_module is None
+if _pmac_use_sim:
+    print("[INFO] Keine PMAC-Hardware gefunden - starte im Simulationsmodus.")
 
+
+# ---------------------------------------------------------------------------
+# Stage Controller + Worker
+# ---------------------------------------------------------------------------
+class StageController:
+    """
+    Thin PMAC/Dummy backend adapter used by the Resolve Production Tool.
+
+    Responsibilities:
+    - establish a PMAC connection (or simulation fallback)
+    - cache axis configuration values that are read often during tests
+    - provide simple absolute moves and encoder reads for X/Y
+
+    Notes:
+    - Axis names are expected as uppercase strings ("X", "Y").
+    - `status` stores the latest result from `pmac_get_stage_pos_info(...)`.
+    - Config values are cached at init to reduce repeated PMAC reads during loops.
+      If PMAC config is changed externally, create a new controller or refresh
+      the relevant cached dictionaries manually.
+    """
+    def __init__(self, uri="tcp://127.0.0.1:5050"):
+        """
+        Connect to the stage backend and cache calibration/limit parameters.
+
+        Parameters:
+        - `uri`: PMAC endpoint, defaults to local bridge on port 5050.
+        """
+        # `pmac_connect` transparently falls back to the in-memory dummy backend
+        # when no hardware backend is available or the first PMAC call fails.
+        self.conn, self.status = pmac_connect(uri), {}
+
+        # Prime `self.status` once so downstream reads can immediately access
+        # encoder/status keys without an extra explicit refresh.
+        self.refresh()
+
+        # PMAC config root for per-axis static-ish values used in calibration and
+        # endurance test target generation.
+        root = "ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/"
+        g = lambda a, k: pmac_get_param(f"{root}{a}/{k}")
+
+        # Cached conversion factors:
+        # - steps_per_m: motor steps -> meters
+        # - enc_per_m: encoder steps -> meters
+        self.steps_per_m = {a: g(a,"stepsPerMeter") for a in "XY"}
+        self.enc_per_m   = {a: g(a,"encoderStepsPerMeter") for a in "XY"}
+
+        # Cached travel limits and home positions used by current test workers.
+        self.low_lim     = {a: g(a,"limitLowSteps") for a in "XY"}
+        self.high_lim    = {a: g(a,"limitHighSteps") for a in "XY"}
+        self.home_pos    = {a: g(a,"homeStepPosition") for a in "XY"}
+
+    def refresh(self):
+        """
+        Refresh the current PMAC stage status into `self.status`.
+
+        This updates encoder-related keys like:
+        - `xPos_encoderSteps`
+        - `yPos_encoderSteps`
+        """
+        pmac_get_stage_pos_info(self.status)
+
+    def move_abs(self, a, s):
+        """
+        Move one axis to an absolute motor-step target.
+
+        Parameters:
+        - `a`: axis name ("X" or "Y")
+        - `s`: absolute target in motor steps
+        """
+        pmac_set_param(f"ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/{a}/stepPosition", int(s))
+
+    def enc(self, a):
+        """
+        Return the latest encoder position for one axis in encoder steps.
+
+        A fresh status read is performed before returning the value.
+        """
+        self.refresh()
+        return self.status[f"{a.lower()}Pos_encoderSteps"]
+
+class TestWorker(QObject):
+    new_phase = Signal(str, int)
+    step      = Signal(int)
+    done      = Signal(dict)
+    error     = Signal(str)
+    calib     = Signal(dict)
+
+    def __init__(self, sc, batch: str = "NoBatch"):
+        super().__init__()
+        self.sc = sc
+        self.batch = sanitize_batch(batch)
+        self._meas_max_um = None
+        self._stop_requested = False
+
+    def stop(self):
+        """
+        Compatibility stop hook used by the GUI.
+
+        The precision run is not yet fully interruptible inside all low-level
+        calibration/move loops, but this prevents AttributeError and allows
+        future cooperative checks to key off `_stop_requested`.
+        """
+        self._stop_requested = True
+
+    def run(self):
+        try:
+            result = run_stage_calibration_and_measurement(
+                self.sc,
+                batch=self.batch,
+                out_root=DATA_ROOT,
+                on_phase=self.new_phase.emit,
+                on_step=self.step.emit,
+                on_calib=self.calib.emit,
+            )
+            self._meas_max_um = float(result.get("meas_max_um", 0.0))
+            self.done.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
+
+class ExtendedEnduranceTestWorker(QObject):
+    """Endurance-test worker with alternating small/large random moves."""
+    update   = Signal(dict)
+    finished = Signal(dict)
+    error    = Signal(str)
+
+    def __init__(
+        self,
+        sc,
+        batch: str = "NoBatch",
+        out_dir: pathlib.Path | None = None,
+        center_x: int = 0,
+        center_y: int = 0,
+        small_step: int = 500,
+        small_radius: int = 2000,
+        small_phase_sec: float = 120.0,
+        large_phase_sec: float = 30.0,
+        dwell_small: float = 0.2,
+        dwell_large: float = 0.1,
+        limit_um: float = DUR_MAX_UM,
+        stop_at_ts: float | None = None,
+    ):
+        super().__init__()
+        self.sc = sc
+        self.batch = sanitize_batch(batch)
+        self.out_dir = out_dir
+        self.center_x = int(center_x)
+        self.center_y = int(center_y)
+        self.small_step = int(max(1, small_step))
+        self.small_radius = int(max(1, small_radius))
+        self.small_phase_sec = float(small_phase_sec)
+        self.large_phase_sec = float(large_phase_sec)
+        self.dwell_small = float(dwell_small)
+        self.dwell_large = float(dwell_large)
+        self.limit_um = float(limit_um)
+        self.max_abs_um = 0.0
+        self._running = True
+        self.start_ts = time.time()
+        self.stop_at_ts = float(stop_at_ts) if stop_at_ts else None
+
+        self.pos_infodict={"x_counter":[],"y_counter":[],"Time [min]":[],
+                           "x_position [m]":[],"y_position [m]":[],
+                           "pos_error_x [m]":[],"pos_error_y [m]":[]}
+        base_name = f"{self.batch}_combined_values.csv"
+        self.savefile = (self.out_dir / base_name) if self.out_dir else pathlib.Path(base_name)
+
+    def stop(self):
+        """Requests a clean stop."""
+        self._running = False
+
+    def _clamp(self, axis: str, val: int) -> int:
+        """Clamp target positions strictly to configured axis limits."""
+        lo = self.sc.low_lim[axis]
+        hi = self.sc.high_lim[axis]
+        return int(min(max(val, lo), hi))
+
+    def _log_move(self, phase: str, idx: int, total: int, tx: int, ty: int, move_idx: int, dwell: float):
+        """Execute one move, measure encoder values, and emit an update."""
+        self.sc.move_abs('X', tx)
+        self.sc.move_abs('Y', ty)
+        time.sleep(dwell)
+
+        # Compute position error from encoder actual value and expected motor position:
+        # (EncoderSteps / EncPerMeter) - (MotorSteps / StepsPerMeter)
+        x_enc, y_enc = get_stage_encoders()
+        spm_x = self.sc.steps_per_m['X']; spm_y = self.sc.steps_per_m['Y']
+        epm_x = self.sc.enc_per_m['X'];   epm_y = self.sc.enc_per_m['Y']
+        err_x = (x_enc/epm_x) - (tx/spm_x)
+        err_y = (y_enc/epm_y) - (ty/spm_y)
+        err_um = max(abs(err_x), abs(err_y)) * 1e6
+        self.max_abs_um = max(self.max_abs_um, float(err_um))
+        runtime = round((time.time()-self.start_ts)/60, 2)
+
+        self.pos_infodict["Time [min]"].append(runtime)
+        self.pos_infodict["x_counter"].append(move_idx)
+        self.pos_infodict["y_counter"].append(move_idx)
+        self.pos_infodict["x_position [m]"].append(round(x_enc/epm_x,6))
+        self.pos_infodict["y_position [m]"].append(round(y_enc/epm_y,6))
+        self.pos_infodict["pos_error_x [m]"].append(round(err_x,8))
+        self.pos_infodict["pos_error_y [m]"].append(round(err_y,8))
+
+        self.update.emit({
+            "phase": phase,
+            "idx": idx,
+            "total": total,
+            "target_x": tx,
+            "target_y": ty,
+            "err_um": err_um,
+            "max_abs_um": float(self.max_abs_um),
+            "limit_um": float(self.limit_um),
+            "t": runtime,
+            "ex": err_x,
+            "ey": err_y,
+            "batch": self.batch,
+        })
+
+    def run(self):
+        """Run the endurance test, log values, and save the CSV at the end."""
+        try:
+            move_idx = 0
+            phase = "Kleine Amplituden"
+            small_idx = 0
+            large_idx = 0
+            now = time.time()
+            target_stop = self.stop_at_ts or float("inf")
+
+            while self._running and now < target_stop:
+                # Phases alternate by time between local and global movement.
+                phase_duration = self.small_phase_sec if phase == "Kleine Amplituden" else self.large_phase_sec
+                dwell = self.dwell_small if phase == "Kleine Amplituden" else self.dwell_large
+                phase_end = min(target_stop, now + phase_duration)
+                # Rough progress estimate within the current phase.
+                est_total = max(1, int(max(1.0, (phase_end - now) / max(0.01, dwell))))
+
+                while self._running and (time.time() < phase_end):
+                    if phase == "Kleine Amplituden":
+                        small_idx += 1
+                        # Random offset around the center, quantized to `small_step`.
+                        dx_raw = int(np.random.randint(-self.small_radius, self.small_radius + 1))
+                        dy_raw = int(np.random.randint(-self.small_radius, self.small_radius + 1))
+                        dx = int(round(dx_raw / self.small_step)) * self.small_step
+                        dy = int(round(dy_raw / self.small_step)) * self.small_step
+                        tx = self._clamp('X', self.center_x + dx)
+                        ty = self._clamp('Y', self.center_y + dy)
+                        move_idx += 1
+                        self._log_move("Kleine Amplituden", small_idx, est_total, tx, ty, move_idx, dwell)
+                    else:
+                        large_idx += 1
+                        tx = int(np.random.randint(self.sc.low_lim['X'], self.sc.high_lim['X'] + 1))
+                        ty = int(np.random.randint(self.sc.low_lim['Y'], self.sc.high_lim['Y'] + 1))
+                        move_idx += 1
+                        self._log_move("GroÃŸe Amplituden", large_idx, est_total, tx, ty, move_idx, dwell)
+                    if self.stop_at_ts and time.time() >= self.stop_at_ts:
+                        break
+                now = time.time()
+                phase = "GroÃŸe Amplituden" if phase == "Kleine Amplituden" else "Kleine Amplituden"
+
+            # Return to center if not aborted
+            if self._running:
+                try:
+                    self.sc.move_abs('X', self.center_x)
+                    self.sc.move_abs('Y', self.center_y)
+                except Exception:
+                    pass
+        except Exception as exc:
+            self.error.emit(str(exc))
+            return
+        finally:
+            try:
+                self.sc.move_abs('X', self.center_x)
+                self.sc.move_abs('Y', self.center_y)
+            except Exception:
+                pass
+
+        # Save results
+        try:
+            save_stage_test(str(self.savefile), self.pos_infodict, batch=self.batch)
+        except Exception as exc:
+            self.error.emit(str(exc))
+            return
+
+        self.finished.emit({
+            "out": str(self.savefile),
+            "batch": self.batch,
+            "out_dir": str(self.out_dir) if self.out_dir else "",
+            "dur_max_um": float(self.max_abs_um),
+            "limit_um": float(self.limit_um),
+        })
+
+
+# Backward compatibility for older callers.
+CombinedTestWorker = ExtendedEnduranceTestWorker
+
+# Legacy random endurance worker intentionally disabled.
+# The Resolve Production Tool currently uses `ExtendedEnduranceTestWorker`.
+# `DauertestWorker` remains here as commented legacy reference (do not delete).
+#
+# class DauertestWorker(QObject):
+#     update   = Signal(dict)
+#     finished = Signal(dict)
+#
+#     def __init__(self, sc, batch: str = "NoBatch",
+#                  stop_at_ts: float | None = None,
+#                  start_ts: float | None = None,
+#                  out_dir: pathlib.Path | None = None,
+#                  dur_limit_um: float = DUR_MAX_UM):
+#         super().__init__()
+#         self.sc = sc
+#         self._running = True
+#         self.batch = sanitize_batch(batch)
+#         self.stop_at_ts = stop_at_ts
+#         self.start_ts   = start_ts or time.time()
+#         self.out_dir    = out_dir
+#         self.dur_limit_um = float(dur_limit_um)
+#         self.max_abs_um = 0.0
+#
+#     def stop(self):
+#         self._running = False
+#
+#     def run(self):
+#         pos_infodict = {"x_counter": [], "y_counter": [], "Time [min]": [],
+#                         "x_position [m]": [], "y_position [m]": [],
+#                         "pos_error_x [m]": [], "pos_error_y [m]": []}
+#         base_name = f"{self.batch}_dauertest_values.csv"
+#         savefile = (self.out_dir / base_name) if self.out_dir else pathlib.Path(base_name)
+#
+#         start = self.start_ts
+#         x_low = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/limitLowSteps")
+#         x_high = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/limitHighSteps")
+#         x_spm = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/stepsPerMeter")
+#         x_epm = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/encoderStepsPerMeter")
+#         y_low = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/limitLowSteps")
+#         y_high = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/limitHighSteps")
+#         y_spm = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/stepsPerMeter")
+#         y_epm = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/encoderStepsPerMeter")
+#         x_count = y_count = 0
+#         try:
+#             while self._running and (self.stop_at_ts is None or time.time() < self.stop_at_ts):
+#                 cx, cy, _ = get_current_pos()
+#                 if np.random.rand() >= 0.5:
+#                     ny = cy
+#                     nx = int(x_low + np.random.rand() * (x_high - x_low))
+#                     x_count += 1
+#                 else:
+#                     nx = cx
+#                     ny = int(y_low + np.random.rand() * (y_high - y_low))
+#                     y_count += 1
+#                 self.sc.move_abs('X', nx)
+#                 self.sc.move_abs('Y', ny)
+#
+#                 runtime = round((time.time() - start) / 60, 2)
+#                 x_enc, y_enc = get_stage_encoders()
+#                 ex = (x_enc / x_epm) - (nx / x_spm)
+#                 ey = (y_enc / y_epm) - (ny / y_spm)
+#
+#                 cur_max_um = max(abs(ex), abs(ey)) * 1e6
+#                 if cur_max_um > self.max_abs_um:
+#                     self.max_abs_um = cur_max_um
+#
+#                 self.update.emit({"t": runtime, "ex": ex, "ey": ey,
+#                                   "batch": self.batch,
+#                                   "limit_um": self.dur_limit_um,
+#                                   "max_abs_um": self.max_abs_um})
+#
+#                 pos_infodict["Time [min]"].append(runtime)
+#                 pos_infodict["x_counter"].append(x_count)
+#                 pos_infodict["y_counter"].append(y_count)
+#                 pos_infodict["x_position [m]"].append(round(x_enc / x_epm, 6))
+#                 pos_infodict["y_position [m]"].append(round(y_enc / y_epm, 6))
+#                 pos_infodict["pos_error_x [m]"].append(round(ex, 8))
+#                 pos_infodict["pos_error_y [m]"].append(round(ey, 8))
+#
+#                 time.sleep(0.2)
+#         finally:
+#             save_stage_test(str(savefile), pos_infodict, batch=self.batch)
+#             self.finished.emit({
+#                 "out": str(savefile),
+#                 "batch": self.batch,
+#                 "out_dir": str(self.out_dir) if self.out_dir else "",
+#                 "dur_max_um": float(self.max_abs_um),
+#                 "limit_um": float(self.dur_limit_um)
+#             })
+
+#Dummy 
 class _DummyPMACBackend:
     """Minimal in-memory replacement so the GUI works without a PMAC."""
 
@@ -91,6 +1186,7 @@ class _DummyPMACBackend:
             return None, None
 
     def _update_encoder(self, axis: str):
+        # Encoderposition wird aus der Motorposition und der Achskalibrierung abgeleitet.
         steps_per_m = float(self._config[axis].get("stepsPerMeter") or 1.0)
         enc_per_m = float(self._config[axis].get("encoderStepsPerMeter") or steps_per_m)
         step_pos = float(self._state.get(axis, 0))
@@ -134,92 +1230,15 @@ class _DummyPMACBackend:
         })
         return status
 
-
-class _PmacBridge:
-    """Proxy that falls back to the dummy backend if hardware is absent."""
-
-    def __init__(self, real_module):
-        self._real = real_module
-        self._sim = _DummyPMACBackend()
-        self._use_sim = real_module is None
-        if self._use_sim:
-            print("[INFO] Keine PMAC-Hardware gefunden – starte im Simulationsmodus.")
-
-    @property
-    def is_simulated(self) -> bool:
-        return self._use_sim or self._real is None
-
-    def _fallback(self, reason: Exception | str):
-        if not self._use_sim:
-            print(f"[WARN] PMAC-Fallback aktiviert ({reason}).")
-            self._use_sim = True
-        return self._sim
-
-    def connect(self, uri: str):
-        if self._use_sim or self._real is None:
-            return self._sim.connect(uri)
-        try:
-            return self._real.connect(uri)
-        except Exception as exc:
-            return self._fallback(exc).connect(uri)
-
-    def getParam(self, path: str):
-        if self._use_sim or self._real is None:
-            return self._sim.getParam(path)
-        try:
-            return self._real.getParam(path)
-        except Exception as exc:
-            return self._fallback(exc).getParam(path)
-
-    def setParam(self, path: str, value):
-        if self._use_sim or self._real is None:
-            return self._sim.setParam(path, value)
-        try:
-            return self._real.setParam(path, value)
-        except Exception as exc:
-            return self._fallback(exc).setParam(path, value)
-
-    def getStagePosInfo(self, status: dict):
-        if self._use_sim or self._real is None:
-            return self._sim.getStagePosInfo(status)
-        try:
-            return self._real.getStagePosInfo(status)
-        except Exception as exc:
-            return self._fallback(exc).getStagePosInfo(status)
-
-
-pmac = _PmacBridge(_pmac_module)
-
-# ---------------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------------
-def sanitize_batch(s: str) -> str:
-    s = (s or "").strip()
-    if not s:
-        return "NoBatch"
-    s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
-    return s[:64] or "NoBatch"
-
-
-def get_current_pos():
-    x = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/X/stepPosition")
-    y = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/Y/stepPosition")
-    z = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/Z/stepPosition")
-    return x, y, z
-
-
-def get_stage_encoders():
-    st = {}
-    pmac.getStagePosInfo(st)
-    return st["xPos_encoderSteps"], st["yPos_encoderSteps"]
-
 def _safe_last(values, default=0.0):
     try:
         return float(values[-1]) if values else default
     except Exception:
         return default
 
+
 def _max_abs_um_from_errors(pos_infodict: dict) -> float:
+    """Compute the maximum absolute value of all logged position errors in Âµm."""
     max_abs = 0.0
     for key in ("pos_error_x [m]", "pos_error_y [m]"):
         vals = pos_infodict.get(key, [])
@@ -230,6 +1249,34 @@ def _max_abs_um_from_errors(pos_infodict: dict) -> float:
                 continue
     return max_abs * 1e6
 
+#GUI
+# Minimal styling / display helpers (kept near plotting functions)
+BG        = "#0b0b0f"
+BG_ELEV   = "#121218"
+FG_MUTED  = "#9ea0a6"
+BORDER    = "#222230"
+
+def _style_ax(ax):
+    ax.set_facecolor(BG)
+    for spine in ax.spines.values():
+        spine.set_color(BORDER)
+        spine.set_linewidth(0.8)
+    ax.grid(True)
+    ax.tick_params(colors=FG_MUTED, labelsize=10)
+
+
+def save_calibration_plot(out_dir: pathlib.Path, axis: str, batch: str, x, y, poly1d_fn):
+    """Save the calibration plot for one axis as PNG."""
+    fig = Figure(figsize=(7.2, 5), dpi=110, facecolor=BG_ELEV)
+    ax = fig.add_subplot(111)
+    _style_ax(ax)
+    ax.plot(x, y, "o", label=f"Samples Â· {batch}")
+    ax.plot(x, poly1d_fn(x), "--", label="Fit")
+    ax.set_title(f"Measured Motorsteps in {axis}-Axis Â· Charge: {batch}")
+    ax.set_xlabel("Encodersteps [m]")
+    ax.set_ylabel("Motorsteps [steps]")
+    ax.legend()
+    fig.savefig(out_dir / f"calib_{axis.lower()}_{batch}.png")
 def _build_stage_test_report_text(batch: str, csv_name: str, pos_infodict: dict) -> str:
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     n_points = len(pos_infodict.get("Time [min]", []))
@@ -244,14 +1291,14 @@ def _build_stage_test_report_text(batch: str, csv_name: str, pos_infodict: dict)
         f"Zeitpunkt: {now}\n"
         f"Charge: {batch}\n"
         f"CSV: {csv_name}\n"
-        f"Messpunkte: {n_points}\n\n"
-        "Letzte Werte:\n"
+        f"Samples: {n_points}\n\n"
+        "Latest values:\n"
         f"  Zeit [min]: {last_time:.2f}\n"
         f"  X Position [m]: {last_x:.6f}\n"
         f"  Y Position [m]: {last_y:.6f}\n"
-        f"  Fehler X [um]: {last_ex * 1e6:.2f}\n"
-        f"  Fehler Y [um]: {last_ey * 1e6:.2f}\n\n"
-        f"Max |Fehler| [um]: {max_abs_um:.2f}\n"
+        f"  Error X [um]: {last_ex * 1e6:.2f}\n"
+        f"  Error Y [um]: {last_ey * 1e6:.2f}\n\n"
+        f"Max |Error| [um]: {max_abs_um:.2f}\n"
     )
 
 
@@ -265,24 +1312,27 @@ def _build_stage_test_report_plot(pos_infodict: dict) -> Figure | None:
         t = np.asarray(time_vals, dtype=float)
     except Exception:
         return None
+    # Create plot without GUI canvas so export also works inside the worker.
     fig = Figure(figsize=(11.0, 6.2), dpi=110, facecolor=BG_ELEV)
     ax = fig.add_subplot(111)
     _style_ax(ax)
     if err_x:
-        ax.plot(t, np.asarray(err_x, dtype=float) * 1e6, label="Fehler X")
+        ax.plot(t, np.asarray(err_x, dtype=float) * 1e6, label="Error X")
     if err_y:
-        ax.plot(t, np.asarray(err_y, dtype=float) * 1e6, label="Fehler Y")
-    ax.axhline(DUR_MAX_UM, color="#ff5b5b", linestyle="--", linewidth=1, label=f"Limit {DUR_MAX_UM:.1f} µm")
+        ax.plot(t, np.asarray(err_y, dtype=float) * 1e6, label="Error Y")
+    ax.axhline(DUR_MAX_UM, color="#ff5b5b", linestyle="--", linewidth=1, label=f"Limit {DUR_MAX_UM:.1f} Âµm")
     ax.axhline(-DUR_MAX_UM, color="#ff5b5b", linestyle="--", linewidth=1)
-    ax.set_title("Positionsfehler über Zeit")
+    ax.set_title("Position error over time")
     ax.set_xlabel("Zeit [min]")
-    ax.set_ylabel("Abweichung [µm]")
+    ax.set_ylabel("Abweichung [Âµm]")
     ax.legend()
     fig.tight_layout()
     return fig
 
 
 def save_stage_test(savefile_name, pos_infodict, batch: str = "NoBatch", write_pdf: bool = True):
+    """Save CSV (and optionally PDF) for a stage test run."""
+    # Prefix CSV file with timestamp to avoid name collisions.
     now = datetime.datetime.now()
     dt_string = now.strftime("%Y-%m-%d_%H-%M-%S")
     pth = pathlib.Path(savefile_name)
@@ -305,6 +1355,7 @@ def save_stage_test(savefile_name, pos_infodict, batch: str = "NoBatch", write_p
     print(f"Saved {savename}")
     if write_pdf:
         try:
+            # PDF export is optional and must not block test completion.
             from pdf_module import PdfModule
             pdf_path = savename.with_suffix(".pdf")
             text = _build_stage_test_report_text(batch, savename.name, pos_infodict)
@@ -316,444 +1367,3 @@ def save_stage_test(savefile_name, pos_infodict, batch: str = "NoBatch", write_p
             print(f"Saved {pdf_path}")
         except Exception as exc:
             print(f"[WARN] PDF export failed: {exc}")
-
-
-def moveXinsteps(motorsteps):
-    pmac.setParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/X/stepPosition", int(motorsteps))
-
-
-def moveYinsteps(motorsteps):
-    pmac.setParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/Y/stepPosition", int(motorsteps))
-
-
-def getXencoder():
-    st = {}
-    pmac.getStagePosInfo(st)
-    return st["xPos_encoderSteps"]
-
-
-def getYencoder():
-    st = {}
-    pmac.getStagePosInfo(st)
-    return st["yPos_encoderSteps"]
-
-
-def motorsteps2encodersteps(motorStep, stepsPerMeter, encoderStepsPerMeter):
-    return (motorStep / stepsPerMeter * encoderStepsPerMeter).astype(int)
-
-
-def meas_linear(StartMotorSteps, StopMotorSteps, Steps, stepsPerMeter, encoderStepsPerMeter):
-    motor_steps = np.linspace(StartMotorSteps, StopMotorSteps, Steps).astype(int)
-    calc_encoder = motorsteps2encodersteps(motor_steps, stepsPerMeter, encoderStepsPerMeter)
-    return motor_steps, calc_encoder
-
-
-# ---------------------------------------------------------------------------
-# Stage Controller + Worker
-# ---------------------------------------------------------------------------
-class StageController:
-    def __init__(self, uri="tcp://127.0.0.1:5050"):
-        self.conn, self.status = pmac.connect(uri), {}
-        self.refresh()
-        root = "ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/"
-        g = lambda a,k: pmac.getParam(f"{root}{a}/{k}")
-        self.steps_per_m = {a: g(a,"stepsPerMeter") for a in "XY"}
-        self.enc_per_m   = {a: g(a,"encoderStepsPerMeter") for a in "XY"}
-        self.low_lim     = {a: g(a,"limitLowSteps") for a in "XY"}
-        self.high_lim    = {a: g(a,"limitHighSteps") for a in "XY"}
-        self.home_pos    = {a: g(a,"homeStepPosition") for a in "XY"}
-
-    def refresh(self):
-        pmac.getStagePosInfo(self.status)
-
-    def move_abs(self, a, s):
-        pmac.setParam(f"ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeState/{a}/stepPosition", int(s))
-
-    def enc(self, a):
-        self.refresh()
-        return self.status[f"{a.lower()}Pos_encoderSteps"]
-
-
-# Minimal Styling (keine GUI-Abhängigkeiten)
-BG        = "#0b0b0f"
-BG_ELEV   = "#121218"
-FG_MUTED  = "#9ea0a6"
-BORDER    = "#222230"
-
-
-def _style_ax(ax):
-    ax.set_facecolor(BG)
-    for spine in ax.spines.values():
-        spine.set_color(BORDER)
-        spine.set_linewidth(0.8)
-    ax.grid(True)
-    ax.tick_params(colors=FG_MUTED, labelsize=10)
-
-
-class TestWorker(QObject):
-    new_phase = Signal(str, int)
-    step      = Signal(int)
-    done      = Signal(dict)
-    error     = Signal(str)
-    calib     = Signal(dict)
-
-    def __init__(self, sc, batch: str = "NoBatch"):
-        super().__init__()
-        self.sc = sc
-        self.batch = sanitize_batch(batch)
-        self._meas_max_um = None
-
-    def _calibrate_like_reference(self, out_dir: pathlib.Path):
-        limitLowStepsX  = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/limitLowSteps")
-        limitHighStepsX = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/limitHighSteps")
-        homeStepPositionX = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/homeStepPosition")
-        stepsPerMeterX  = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/stepsPerMeter")
-        encoderStepsPerMeterX = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/encoderStepsPerMeter")
-
-        limitLowStepsY  = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/limitLowSteps")
-        limitHighStepsY = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/limitHighSteps")
-        homeStepPositionY = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/homeStepPosition")
-        stepsPerMeterY  = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/stepsPerMeter")
-        encoderStepsPerMeterY = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/encoderStepsPerMeter")
-
-        motorStepsX, _ = meas_linear(limitLowStepsX+1000, limitHighStepsX-1000, 20, stepsPerMeterX, encoderStepsPerMeterX)
-        motorStepsY, _ = meas_linear(limitLowStepsY+5000, limitHighStepsY-5000, 20, stepsPerMeterY, encoderStepsPerMeterY)
-
-        self.new_phase.emit(f"Kalibrierung X · Charge: {self.batch}", len(motorStepsX))
-        Enc = np.zeros(len(motorStepsX), dtype=float)
-        for i, ms in enumerate(motorStepsX, 1):
-            moveXinsteps(ms); Enc[i-1] = getXencoder(); self.step.emit(i)
-
-        moveXinsteps(homeStepPositionX); moveYinsteps(homeStepPositionY)
-
-        x = Enc / encoderStepsPerMeterX; y = motorStepsX
-        coef = np.polyfit(x, y, 1); poly1d_fn = np.poly1d(coef)
-        newMotorStepsPerMeterX = int(coef[0])
-
-        fig = Figure(figsize=(7.2,5), dpi=110, facecolor=BG_ELEV)
-        ax  = fig.add_subplot(111); _style_ax(ax)
-        ax.plot(x, y, "o", label=f"Messpunkte · {self.batch}")
-        ax.plot(x, poly1d_fn(x), "--", label="Fit")
-        ax.set_title(f"Measured Motorsteps in X-Axis · Charge: {self.batch}")
-        ax.set_xlabel("Encodersteps [m]"); ax.set_ylabel("Motorsteps [steps]"); ax.legend()
-        fig.savefig(out_dir / f"calib_x_{self.batch}.png")
-
-        self.new_phase.emit(f"Kalibrierung Y · Charge: {self.batch}", len(motorStepsY))
-        Enc = np.zeros(len(motorStepsY), dtype=float)
-        for i, ms in enumerate(motorStepsY, 1):
-            moveYinsteps(ms); Enc[i-1] = getYencoder(); self.step.emit(i)
-
-        moveXinsteps(homeStepPositionX); moveYinsteps(homeStepPositionY)
-
-        x = Enc / encoderStepsPerMeterY; y = motorStepsY
-        coef = np.polyfit(x, y, 1); poly1d_fn = np.poly1d(coef)
-        newMotorStepsPerMeterY = int(coef[0])
-
-        fig = Figure(figsize=(7.2,5), dpi=110, facecolor=BG_ELEV)
-        ax  = fig.add_subplot(111); _style_ax(ax)
-        ax.plot(x, y, "o", label=f"Messpunkte · {self.batch}")
-        ax.plot(x, poly1d_fn(x), "--", label="Fit")
-        ax.set_title(f"Measured Motorsteps in Y-Axis · Charge: {self.batch}")
-        ax.set_xlabel("Encodersteps [m]"); ax.set_ylabel("Motorsteps [steps]"); ax.legend()
-        fig.savefig(out_dir / f"calib_y_{self.batch}.png")
-
-        try:
-            pmac.setParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/stepsPerMeter", int(newMotorStepsPerMeterX))
-            pmac.setParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/stepsPerMeter", int(newMotorStepsPerMeterY))
-            self.sc.steps_per_m['X'] = int(newMotorStepsPerMeterX); self.sc.steps_per_m['Y'] = int(newMotorStepsPerMeterY)
-            print(f"[APPLIED][{self.batch}] stepsPerMeter: X = {newMotorStepsPerMeterX}, Y = {newMotorStepsPerMeterY}")
-        except Exception as e:
-            print(f"[WARN][{self.batch}] Konnte stepsPerMeter nicht schreiben:", e)
-
-        self.calib.emit({
-            "batch": self.batch,
-            "X_stepsPerMeter": int(newMotorStepsPerMeterX),
-            "Y_stepsPerMeter": int(newMotorStepsPerMeterY)
-        })
-
-        return {
-            "newMotorStepsPerMeterX": int(newMotorStepsPerMeterX),
-            "newMotorStepsPerMeterY": int(newMotorStepsPerMeterY),
-            "motorStepsX": motorStepsX, "motorStepsY": motorStepsY
-        }
-
-    @staticmethod
-    def _zigzag(lo, hi, n, spm, epm):
-        mot = np.linspace(lo, hi, n).astype(int)
-        mot = np.r_[mot, mot[::-1]]
-        return mot, (mot / spm * epm).astype(int)
-
-    def run(self):
-        try:
-            S = self.sc
-            ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            out = (DATA_ROOT / self.batch / f"Run_{ts}")
-            out.mkdir(parents=True, exist_ok=True)
-            plot_data = []
-            calib_info = self._calibrate_like_reference(out_dir=out)
-
-            max_abs_um = 0.0
-
-            for ax in "XY":
-                spm, epm = S.steps_per_m[ax], S.enc_per_m[ax]
-                mot, calc = self._zigzag(S.low_lim[ax], S.high_lim[ax], 100, spm, epm)
-                self.new_phase.emit(f"Messung {ax} · Charge: {self.batch}", len(mot))
-                enc = np.zeros_like(mot)
-                for i, m in enumerate(mot, 1):
-                    S.move_abs(ax, int(m)); enc[i-1] = S.enc(ax); self.step.emit(i)
-                diff_um = np.abs((enc - calc) / epm * 1e6)
-                max_abs_um = max(max_abs_um, float(np.max(diff_um)))
-                plot_data.append((ax, mot, enc, calc, spm, epm))
-                S.move_abs(ax, S.home_pos[ax])
-
-            self._meas_max_um = max_abs_um
-            self.done.emit({"out": out, "plots": plot_data, "calib": calib_info,
-                            "batch": self.batch, "meas_max_um": max_abs_um})
-        except Exception as e:
-            self.error.emit(str(e))
-
-
-class DauertestWorker(QObject):
-    update   = Signal(dict)
-    finished = Signal(dict)
-
-    def __init__(self, sc, batch: str = "NoBatch",
-                 stop_at_ts: float | None = None,
-                 start_ts: float | None = None,
-                 out_dir: pathlib.Path | None = None,
-                 dur_limit_um: float = DUR_MAX_UM):
-        super().__init__()
-        self.sc = sc
-        self._running = True
-        self.batch = sanitize_batch(batch)
-        self.stop_at_ts = stop_at_ts
-        self.start_ts   = start_ts or time.time()
-        self.out_dir    = out_dir
-        self.dur_limit_um = float(dur_limit_um)
-        self.max_abs_um = 0.0
-
-    def stop(self):
-        self._running=False
-
-    def run(self):
-        pos_infodict={"x_counter":[],"y_counter":[],"Time [min]":[],
-                      "x_position [m]":[],"y_position [m]":[],
-                      "pos_error_x [m]":[],"pos_error_y [m]":[]}
-        base_name = f"{self.batch}_dauertest_values.csv"
-        savefile = (self.out_dir / base_name) if self.out_dir else pathlib.Path(base_name)
-
-        start=self.start_ts
-        x_low=pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/limitLowSteps")
-        x_high=pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/limitHighSteps")
-        x_spm=pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/stepsPerMeter")
-        x_epm=pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/encoderStepsPerMeter")
-        y_low=pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/limitLowSteps")
-        y_high=pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/limitHighSteps")
-        y_spm=pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/stepsPerMeter")
-        y_epm=pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/encoderStepsPerMeter")
-        x_count=y_count=0
-        try:
-            while self._running and (self.stop_at_ts is None or time.time() < self.stop_at_ts):
-                cx,cy,_=get_current_pos()
-                if np.random.rand()>=0.5:
-                    ny=cy; nx=int(x_low+np.random.rand()*(x_high-x_low)); x_count+=1
-                else:
-                    nx=cx; ny=int(y_low+np.random.rand()*(y_high-y_low)); y_count+=1
-                self.sc.move_abs('X',nx); self.sc.move_abs('Y',ny)
-
-                runtime=round((time.time()-start)/60,2)
-                x_enc,y_enc=get_stage_encoders()
-                ex=(x_enc/x_epm) - (nx/x_spm)
-                ey=(y_enc/y_epm) - (ny/y_spm)
-
-                cur_max_um = max(abs(ex), abs(ey)) * 1e6
-                if cur_max_um > self.max_abs_um:
-                    self.max_abs_um = cur_max_um
-
-                self.update.emit({"t":runtime,"ex":ex,"ey":ey,
-                                  "batch":self.batch,
-                                  "limit_um": self.dur_limit_um,
-                                  "max_abs_um": self.max_abs_um})
-
-                pos_infodict["Time [min]"].append(runtime)
-                pos_infodict["x_counter"].append(x_count)
-                pos_infodict["y_counter"].append(y_count)
-                pos_infodict["x_position [m]"].append(round(x_enc/x_epm,6))
-                pos_infodict["y_position [m]"].append(round(y_enc/y_epm,6))
-                pos_infodict["pos_error_x [m]"].append(round(ex,8))
-                pos_infodict["pos_error_y [m]"].append(round(ey,8))
-
-                time.sleep(0.2)
-        finally:
-            save_stage_test(str(savefile), pos_infodict, batch=self.batch)
-            self.finished.emit({
-                "out": str(savefile),
-                "batch": self.batch,
-                "out_dir": str(self.out_dir) if self.out_dir else "",
-                "dur_max_um": float(self.max_abs_um),
-                "limit_um": float(self.dur_limit_um)
-            })
-
-
-class CombinedTestWorker(QObject):
-    update   = Signal(dict)
-    finished = Signal(dict)
-    error    = Signal(str)
-
-    def __init__(
-        self,
-        sc,
-        *,
-        batch: str = "NoBatch",
-        out_dir: pathlib.Path | None = None,
-        center_x: int = 0,
-        center_y: int = 0,
-        small_step: int = 500,
-        small_radius: int = 2000,
-        small_phase_sec: float = 120.0,
-        large_phase_sec: float = 30.0,
-        dwell_small: float = 0.2,
-        dwell_large: float = 0.1,
-        limit_um: float = DUR_MAX_UM,
-        stop_at_ts: float | None = None,
-    ):
-        super().__init__()
-        self.sc = sc
-        self.batch = sanitize_batch(batch)
-        self.out_dir = out_dir
-        self.center_x = int(center_x)
-        self.center_y = int(center_y)
-        self.small_step = int(max(1, small_step))
-        self.small_radius = int(max(1, small_radius))
-        self.small_phase_sec = float(small_phase_sec)
-        self.large_phase_sec = float(large_phase_sec)
-        self.dwell_small = float(dwell_small)
-        self.dwell_large = float(dwell_large)
-        self.limit_um = float(limit_um)
-        self.max_abs_um = 0.0
-        self._running = True
-        self.start_ts = time.time()
-        self.stop_at_ts = float(stop_at_ts) if stop_at_ts else None
-
-        self.pos_infodict={"x_counter":[],"y_counter":[],"Time [min]":[],
-                           "x_position [m]":[],"y_position [m]":[],
-                           "pos_error_x [m]":[],"pos_error_y [m]":[]}
-        base_name = f"{self.batch}_combined_values.csv"
-        self.savefile = (self.out_dir / base_name) if self.out_dir else pathlib.Path(base_name)
-
-    def stop(self):
-        self._running = False
-
-    def _clamp(self, axis: str, val: int) -> int:
-        lo = self.sc.low_lim[axis]
-        hi = self.sc.high_lim[axis]
-        return int(min(max(val, lo), hi))
-
-    def _log_move(self, phase: str, idx: int, total: int, tx: int, ty: int, move_idx: int, dwell: float):
-        self.sc.move_abs('X', tx)
-        self.sc.move_abs('Y', ty)
-        time.sleep(dwell)
-
-        # Nutze gleiche Fehlerberechnung wie im Referenz-Dauertest:
-        # (EncoderSteps / EncPerMeter) - (MotorSteps / StepsPerMeter)
-        x_enc, y_enc = get_stage_encoders()
-        spm_x = self.sc.steps_per_m['X']; spm_y = self.sc.steps_per_m['Y']
-        epm_x = self.sc.enc_per_m['X'];   epm_y = self.sc.enc_per_m['Y']
-        err_x = (x_enc/epm_x) - (tx/spm_x)
-        err_y = (y_enc/epm_y) - (ty/spm_y)
-        err_um = max(abs(err_x), abs(err_y)) * 1e6
-        self.max_abs_um = max(self.max_abs_um, float(err_um))
-        runtime = round((time.time()-self.start_ts)/60, 2)
-
-        self.pos_infodict["Time [min]"].append(runtime)
-        self.pos_infodict["x_counter"].append(move_idx)
-        self.pos_infodict["y_counter"].append(move_idx)
-        self.pos_infodict["x_position [m]"].append(round(x_enc/epm_x,6))
-        self.pos_infodict["y_position [m]"].append(round(y_enc/epm_y,6))
-        self.pos_infodict["pos_error_x [m]"].append(round(err_x,8))
-        self.pos_infodict["pos_error_y [m]"].append(round(err_y,8))
-
-        self.update.emit({
-            "phase": phase,
-            "idx": idx,
-            "total": total,
-            "target_x": tx,
-            "target_y": ty,
-            "err_um": err_um,
-            "max_abs_um": float(self.max_abs_um),
-            "limit_um": float(self.limit_um),
-            "t": runtime,
-            "ex": err_x,
-            "ey": err_y,
-            "batch": self.batch,
-        })
-
-    def run(self):
-        try:
-            move_idx = 0
-            phase = "Kleine Amplituden"
-            small_idx = 0
-            large_idx = 0
-            now = time.time()
-            target_stop = self.stop_at_ts or float("inf")
-
-            while self._running and now < target_stop:
-                phase_duration = self.small_phase_sec if phase == "Kleine Amplituden" else self.large_phase_sec
-                dwell = self.dwell_small if phase == "Kleine Amplituden" else self.dwell_large
-                phase_end = min(target_stop, now + phase_duration)
-                # rough estimate for progress in this phase
-                est_total = max(1, int(max(1.0, (phase_end - now) / max(0.01, dwell))))
-
-                while self._running and (time.time() < phase_end):
-                    if phase == "Kleine Amplituden":
-                        small_idx += 1
-                        dx_raw = int(np.random.randint(-self.small_radius, self.small_radius + 1))
-                        dy_raw = int(np.random.randint(-self.small_radius, self.small_radius + 1))
-                        dx = int(round(dx_raw / self.small_step)) * self.small_step
-                        dy = int(round(dy_raw / self.small_step)) * self.small_step
-                        tx = self._clamp('X', self.center_x + dx)
-                        ty = self._clamp('Y', self.center_y + dy)
-                        move_idx += 1
-                        self._log_move("Kleine Amplituden", small_idx, est_total, tx, ty, move_idx, dwell)
-                    else:
-                        large_idx += 1
-                        tx = int(np.random.randint(self.sc.low_lim['X'], self.sc.high_lim['X'] + 1))
-                        ty = int(np.random.randint(self.sc.low_lim['Y'], self.sc.high_lim['Y'] + 1))
-                        move_idx += 1
-                        self._log_move("Große Amplituden", large_idx, est_total, tx, ty, move_idx, dwell)
-                    if self.stop_at_ts and time.time() >= self.stop_at_ts:
-                        break
-                now = time.time()
-                phase = "Große Amplituden" if phase == "Kleine Amplituden" else "Kleine Amplituden"
-
-            # Zurück zur Mitte, wenn nicht abgebrochen
-            if self._running:
-                try:
-                    self.sc.move_abs('X', self.center_x)
-                    self.sc.move_abs('Y', self.center_y)
-                except Exception:
-                    pass
-        except Exception as exc:
-            self.error.emit(str(exc))
-            return
-        finally:
-            try:
-                self.sc.move_abs('X', self.center_x)
-                self.sc.move_abs('Y', self.center_y)
-            except Exception:
-                pass
-
-        # Save results
-        try:
-            save_stage_test(str(self.savefile), self.pos_infodict, batch=self.batch)
-        except Exception as exc:
-            self.error.emit(str(exc))
-            return
-
-        self.finished.emit({
-            "out": str(self.savefile),
-            "batch": self.batch,
-            "out_dir": str(self.out_dir) if self.out_dir else "",
-            "dur_max_um": float(self.max_abs_um),
-            "limit_um": float(self.limit_um),
-        })
