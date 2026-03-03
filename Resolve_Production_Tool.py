@@ -2699,31 +2699,6 @@ class StageControlView(QWidget):
         status_card = Card("QA-Status")
         status_card.set_compact()
         sl = QVBoxLayout()
-        wf_header = QHBoxLayout()
-        wf_header.addWidget(QLabel("Workflow"))
-        wf_header.addStretch()
-        self.lbl_workflow_badge = QLabel("BEREIT")
-        self.lbl_workflow_badge.setStyleSheet(
-            f"padding: 4px 10px; border-radius: 10px; font-weight: 800; "
-            f"color: {COLORS['text_muted']}; background-color: {hex_to_rgba(COLORS['border'], 0.25)};"
-        )
-        wf_header.addWidget(self.lbl_workflow_badge)
-        sl.addLayout(wf_header)
-        self.workflow_step_labels = []
-        step_row = QHBoxLayout()
-        step_row.setSpacing(6)
-        for text in ("1 Kalibrierung", "2 Messung", "3 Dauertest"):
-            lbl = QLabel(text)
-            lbl.setAlignment(Qt.AlignCenter)
-            lbl.setStyleSheet(
-                f"padding: 5px 8px; border-radius: 8px; font-size: 11px; font-weight: 700; "
-                f"border: 1px solid {hex_to_rgba(COLORS['border'], 0.7)}; color: {COLORS['text_muted']}; "
-                f"background-color: {hex_to_rgba(COLORS['surface_light'], 0.75)};"
-            )
-            lbl.setMinimumHeight(26)
-            self.workflow_step_labels.append(lbl)
-            step_row.addWidget(lbl)
-        sl.addLayout(step_row)
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Kalibrierung (X/Y)"))
         self.lbl_calib = QLabel("--- / ---")
@@ -2873,83 +2848,60 @@ class StageControlView(QWidget):
 
     def _set_workflow_state(self, state: str):
         self._workflow_state = state
-        state_cfg = {
-            "idle": ("BEREIT", COLORS["text_muted"], COLORS["border"]),
-            "calib_running": ("KALIBRIERUNG LÄUFT", COLORS["primary"], COLORS["primary"]),
-            "calib_done": ("KALIBRIERT", COLORS["success"], COLORS["success"]),
-            "meas_running": ("MESSUNG LÄUFT", COLORS["primary"], COLORS["primary"]),
-            "meas_done": ("GEMESSEN", COLORS["success"], COLORS["success"]),
-            "dur_running": ("DAUERTEST LÄUFT", COLORS["primary"], COLORS["primary"]),
-            "finished": ("ABGESCHLOSSEN", COLORS["success"], COLORS["success"]),
-            "error": ("FEHLER", COLORS["danger"], COLORS["danger"]),
-        }
-        text, fg, bg = state_cfg.get(state, state_cfg["idle"])
-        self.lbl_workflow_badge.setText(text)
-        self.lbl_workflow_badge.setStyleSheet(
-            f"padding: 4px 10px; border-radius: 10px; font-weight: 800; "
-            f"color: {fg}; background-color: {hex_to_rgba(bg, 0.16)}; border: 1px solid {hex_to_rgba(bg, 0.4)};"
-        )
-        self._update_workflow_stepper()
-
-    def _update_workflow_stepper(self):
-        states = [("calib_done", "calib_running"), ("meas_done", "meas_running"), ("finished", "dur_running")]
-        for idx, lbl in enumerate(self.workflow_step_labels):
-            done_state, run_state = states[idx]
-            if idx == 2 and self._workflow_state in {"meas_done", "calib_done", "idle"}:
-                color = COLORS["text_muted"]
-                bg = COLORS["surface_light"]
-            elif self._workflow_state == run_state:
-                color = COLORS["primary"]
-                bg = COLORS["primary"]
-            elif self._workflow_state in {"error"}:
-                color = COLORS["danger"]
-                bg = COLORS["danger"]
-            elif done_state == "calib_done" and self._calib_done_for_run:
-                color = COLORS["success"]
-                bg = COLORS["success"]
-            elif done_state == "meas_done" and self._meas_done_for_run:
-                color = COLORS["success"]
-                bg = COLORS["success"]
-            elif done_state == "finished" and self._workflow_state == "finished":
-                color = COLORS["success"]
-                bg = COLORS["success"]
-            else:
-                color = COLORS["text_muted"]
-                bg = COLORS["surface_light"]
-            lbl.setStyleSheet(
-                f"padding: 5px 8px; border-radius: 8px; font-size: 11px; font-weight: 700; "
-                f"border: 1px solid {hex_to_rgba(bg, 0.45)}; color: {color}; background-color: {hex_to_rgba(bg, 0.18)};"
-            )
+        self._refresh_stage_buttons()
 
     def _refresh_stage_buttons(self):
         busy = bool(self.running or self.dauer_running)
         if self._active_stage_step == "calib" and self.running:
-            self.btn_calib.setText("Kalibrierung stoppen")
+            self.btn_calib.setText("Kalibrierung laeuft - Stop")
             self.btn_calib.set_variant("danger")
             self.btn_calib.setEnabled(True)
             self.btn_measure.setEnabled(False)
             self.btn_dauer.setEnabled(False)
             return
         if self._active_stage_step == "meas" and self.running:
-            self.btn_measure.setText("Messung stoppen")
+            self.btn_measure.setText("Messung laeuft - Stop")
             self.btn_measure.set_variant("danger")
             self.btn_measure.setEnabled(True)
             self.btn_calib.setEnabled(False)
             self.btn_dauer.setEnabled(False)
             return
         if self.dauer_running:
-            self.btn_dauer.setText("Dauertest stoppen")
+            self.btn_dauer.setText("Dauertest laeuft - Stop")
             self.btn_dauer.set_variant("danger")
             self.btn_dauer.setEnabled(True)
             self.btn_calib.setEnabled(False)
             self.btn_measure.setEnabled(False)
             return
-        self.btn_calib.setText("Kalibrierung starten")
-        self.btn_calib.set_variant("primary")
-        self.btn_measure.setText("Messung starten")
-        self.btn_measure.set_variant("secondary")
-        self.btn_dauer.setText("Dauertest starten")
-        self.btn_dauer.set_variant("ghost")
+
+        if self._calib_done_for_run:
+            self.btn_calib.setText("Kalibrierung OK")
+            self.btn_calib.set_variant("secondary")
+        else:
+            self.btn_calib.setText("Kalibrierung starten")
+            self.btn_calib.set_variant("primary")
+
+        if self._meas_done_for_run:
+            self.btn_measure.setText("Messung OK")
+            self.btn_measure.set_variant("secondary")
+        else:
+            self.btn_measure.setText("Messung starten")
+            self.btn_measure.set_variant("secondary")
+
+        if self._workflow_state == "finished":
+            dur_ok = (
+                self._dur_max_um is not None and
+                float(self._dur_max_um) <= float(resolve_stage.DUR_MAX_UM)
+            )
+            self.btn_dauer.setText("Dauertest OK" if dur_ok else "Dauertest FAIL")
+            self.btn_dauer.set_variant("secondary" if dur_ok else "danger")
+        elif self._workflow_state == "error":
+            self.btn_dauer.setText("Dauertest Fehler")
+            self.btn_dauer.set_variant("danger")
+        else:
+            self.btn_dauer.setText("Dauertest starten")
+            self.btn_dauer.set_variant("ghost")
+
         self.btn_calib.setEnabled(not busy)
         self.btn_measure.setEnabled(not busy)
         self.btn_dauer.setEnabled(not busy)
