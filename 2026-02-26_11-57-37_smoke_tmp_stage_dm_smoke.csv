@@ -1,0 +1,2 @@
+batch,x_counter,y_counter,Time [min],x_position [m],y_position [m],pos_error_x [m],pos_error_y [m]
+smoke,1,1,0.1,0.0,0.0,0.0,0.0

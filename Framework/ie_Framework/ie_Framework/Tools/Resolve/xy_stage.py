@@ -6,7 +6,6 @@ Contains PMAC bridge, motion helpers, and endurance-test workers.
 """
 from __future__ import annotations
 
-import csv
 import datetime
 import os
 import pathlib
@@ -14,8 +13,8 @@ import re
 import time
 
 import numpy as np
-from matplotlib.figure import Figure
 from PySide6.QtCore import QObject, Signal
+from data_management import save_calibration_plot, save_stage_test
 
 
 # ---------------------------------------------------------------------------
@@ -42,15 +41,9 @@ def connect_and_read_stage_config(uri: str = "tcp://127.0.0.1:5050", connect_pma
     - refreshes `stageStatus` via `pmac_get_stage_pos_info(...)`
     - prints available stage status fields to the console
     - reads and returns calibration-relevant X/Y PMAC configuration values
-
-    The code is wrapped in a function (instead of top-level module code)
-    so importing `xy_stage.py` does not trigger hardware access.
     """
     if connect_pmac:
         res = pmac_connect(uri)
-        # Alternative IP for target hardware:
-        # ##res = pmac_connect("tcp://192.168.0.183:5050")
-        # res = pmac.print("Hello World !")
 
     res = pmac_get_stage_pos_info(stageStatus)
 
@@ -1052,7 +1045,12 @@ class ExtendedEnduranceTestWorker(QObject):
 
         # Save results
         try:
-            save_stage_test(str(self.savefile), self.pos_infodict, batch=self.batch)
+            save_stage_test(
+                str(self.savefile),
+                self.pos_infodict,
+                batch=self.batch,
+                dur_max_um=DUR_MAX_UM,
+            )
         except Exception as exc:
             self.error.emit(str(exc))
             return
@@ -1064,100 +1062,6 @@ class ExtendedEnduranceTestWorker(QObject):
             "dur_max_um": float(self.max_abs_um),
             "limit_um": float(self.limit_um),
         })
-
-
-# Backward compatibility for older callers.
-CombinedTestWorker = ExtendedEnduranceTestWorker
-
-# Legacy random endurance worker intentionally disabled.
-# The Resolve Production Tool currently uses `ExtendedEnduranceTestWorker`.
-# `DauertestWorker` remains here as commented legacy reference (do not delete).
-#
-# class DauertestWorker(QObject):
-#     update   = Signal(dict)
-#     finished = Signal(dict)
-#
-#     def __init__(self, sc, batch: str = "NoBatch",
-#                  stop_at_ts: float | None = None,
-#                  start_ts: float | None = None,
-#                  out_dir: pathlib.Path | None = None,
-#                  dur_limit_um: float = DUR_MAX_UM):
-#         super().__init__()
-#         self.sc = sc
-#         self._running = True
-#         self.batch = sanitize_batch(batch)
-#         self.stop_at_ts = stop_at_ts
-#         self.start_ts   = start_ts or time.time()
-#         self.out_dir    = out_dir
-#         self.dur_limit_um = float(dur_limit_um)
-#         self.max_abs_um = 0.0
-#
-#     def stop(self):
-#         self._running = False
-#
-#     def run(self):
-#         pos_infodict = {"x_counter": [], "y_counter": [], "Time [min]": [],
-#                         "x_position [m]": [], "y_position [m]": [],
-#                         "pos_error_x [m]": [], "pos_error_y [m]": []}
-#         base_name = f"{self.batch}_dauertest_values.csv"
-#         savefile = (self.out_dir / base_name) if self.out_dir else pathlib.Path(base_name)
-#
-#         start = self.start_ts
-#         x_low = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/limitLowSteps")
-#         x_high = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/limitHighSteps")
-#         x_spm = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/stepsPerMeter")
-#         x_epm = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/encoderStepsPerMeter")
-#         y_low = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/limitLowSteps")
-#         y_high = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/limitHighSteps")
-#         y_spm = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/stepsPerMeter")
-#         y_epm = pmac.getParam("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/encoderStepsPerMeter")
-#         x_count = y_count = 0
-#         try:
-#             while self._running and (self.stop_at_ts is None or time.time() < self.stop_at_ts):
-#                 cx, cy, _ = get_current_pos()
-#                 if np.random.rand() >= 0.5:
-#                     ny = cy
-#                     nx = int(x_low + np.random.rand() * (x_high - x_low))
-#                     x_count += 1
-#                 else:
-#                     nx = cx
-#                     ny = int(y_low + np.random.rand() * (y_high - y_low))
-#                     y_count += 1
-#                 self.sc.move_abs('X', nx)
-#                 self.sc.move_abs('Y', ny)
-#
-#                 runtime = round((time.time() - start) / 60, 2)
-#                 x_enc, y_enc = get_stage_encoders()
-#                 ex = (x_enc / x_epm) - (nx / x_spm)
-#                 ey = (y_enc / y_epm) - (ny / y_spm)
-#
-#                 cur_max_um = max(abs(ex), abs(ey)) * 1e6
-#                 if cur_max_um > self.max_abs_um:
-#                     self.max_abs_um = cur_max_um
-#
-#                 self.update.emit({"t": runtime, "ex": ex, "ey": ey,
-#                                   "batch": self.batch,
-#                                   "limit_um": self.dur_limit_um,
-#                                   "max_abs_um": self.max_abs_um})
-#
-#                 pos_infodict["Time [min]"].append(runtime)
-#                 pos_infodict["x_counter"].append(x_count)
-#                 pos_infodict["y_counter"].append(y_count)
-#                 pos_infodict["x_position [m]"].append(round(x_enc / x_epm, 6))
-#                 pos_infodict["y_position [m]"].append(round(y_enc / y_epm, 6))
-#                 pos_infodict["pos_error_x [m]"].append(round(ex, 8))
-#                 pos_infodict["pos_error_y [m]"].append(round(ey, 8))
-#
-#                 time.sleep(0.2)
-#         finally:
-#             save_stage_test(str(savefile), pos_infodict, batch=self.batch)
-#             self.finished.emit({
-#                 "out": str(savefile),
-#                 "batch": self.batch,
-#                 "out_dir": str(self.out_dir) if self.out_dir else "",
-#                 "dur_max_um": float(self.max_abs_um),
-#                 "limit_um": float(self.dur_limit_um)
-#             })
 
 #Dummy 
 class _DummyPMACBackend:
@@ -1230,140 +1134,3 @@ class _DummyPMACBackend:
         })
         return status
 
-def _safe_last(values, default=0.0):
-    try:
-        return float(values[-1]) if values else default
-    except Exception:
-        return default
-
-
-def _max_abs_um_from_errors(pos_infodict: dict) -> float:
-    """Compute the maximum absolute value of all logged position errors in Âµm."""
-    max_abs = 0.0
-    for key in ("pos_error_x [m]", "pos_error_y [m]"):
-        vals = pos_infodict.get(key, [])
-        for val in vals:
-            try:
-                max_abs = max(max_abs, abs(float(val)))
-            except Exception:
-                continue
-    return max_abs * 1e6
-
-#GUI
-# Minimal styling / display helpers (kept near plotting functions)
-BG        = "#0b0b0f"
-BG_ELEV   = "#121218"
-FG_MUTED  = "#9ea0a6"
-BORDER    = "#222230"
-
-def _style_ax(ax):
-    ax.set_facecolor(BG)
-    for spine in ax.spines.values():
-        spine.set_color(BORDER)
-        spine.set_linewidth(0.8)
-    ax.grid(True)
-    ax.tick_params(colors=FG_MUTED, labelsize=10)
-
-
-def save_calibration_plot(out_dir: pathlib.Path, axis: str, batch: str, x, y, poly1d_fn):
-    """Save the calibration plot for one axis as PNG."""
-    fig = Figure(figsize=(7.2, 5), dpi=110, facecolor=BG_ELEV)
-    ax = fig.add_subplot(111)
-    _style_ax(ax)
-    ax.plot(x, y, "o", label=f"Samples Â· {batch}")
-    ax.plot(x, poly1d_fn(x), "--", label="Fit")
-    ax.set_title(f"Measured Motorsteps in {axis}-Axis Â· Charge: {batch}")
-    ax.set_xlabel("Encodersteps [m]")
-    ax.set_ylabel("Motorsteps [steps]")
-    ax.legend()
-    fig.savefig(out_dir / f"calib_{axis.lower()}_{batch}.png")
-def _build_stage_test_report_text(batch: str, csv_name: str, pos_infodict: dict) -> str:
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    n_points = len(pos_infodict.get("Time [min]", []))
-    last_time = _safe_last(pos_infodict.get("Time [min]", []), 0.0)
-    last_x = _safe_last(pos_infodict.get("x_position [m]", []), 0.0)
-    last_y = _safe_last(pos_infodict.get("y_position [m]", []), 0.0)
-    last_ex = _safe_last(pos_infodict.get("pos_error_x [m]", []), 0.0)
-    last_ey = _safe_last(pos_infodict.get("pos_error_y [m]", []), 0.0)
-    max_abs_um = _max_abs_um_from_errors(pos_infodict)
-    return (
-        "Stage Test Report (PMAC)\n\n"
-        f"Zeitpunkt: {now}\n"
-        f"Charge: {batch}\n"
-        f"CSV: {csv_name}\n"
-        f"Samples: {n_points}\n\n"
-        "Latest values:\n"
-        f"  Zeit [min]: {last_time:.2f}\n"
-        f"  X Position [m]: {last_x:.6f}\n"
-        f"  Y Position [m]: {last_y:.6f}\n"
-        f"  Error X [um]: {last_ex * 1e6:.2f}\n"
-        f"  Error Y [um]: {last_ey * 1e6:.2f}\n\n"
-        f"Max |Error| [um]: {max_abs_um:.2f}\n"
-    )
-
-
-def _build_stage_test_report_plot(pos_infodict: dict) -> Figure | None:
-    time_vals = pos_infodict.get("Time [min]", [])
-    err_x = pos_infodict.get("pos_error_x [m]", [])
-    err_y = pos_infodict.get("pos_error_y [m]", [])
-    if not time_vals or (not err_x and not err_y):
-        return None
-    try:
-        t = np.asarray(time_vals, dtype=float)
-    except Exception:
-        return None
-    # Create plot without GUI canvas so export also works inside the worker.
-    fig = Figure(figsize=(11.0, 6.2), dpi=110, facecolor=BG_ELEV)
-    ax = fig.add_subplot(111)
-    _style_ax(ax)
-    if err_x:
-        ax.plot(t, np.asarray(err_x, dtype=float) * 1e6, label="Error X")
-    if err_y:
-        ax.plot(t, np.asarray(err_y, dtype=float) * 1e6, label="Error Y")
-    ax.axhline(DUR_MAX_UM, color="#ff5b5b", linestyle="--", linewidth=1, label=f"Limit {DUR_MAX_UM:.1f} Âµm")
-    ax.axhline(-DUR_MAX_UM, color="#ff5b5b", linestyle="--", linewidth=1)
-    ax.set_title("Position error over time")
-    ax.set_xlabel("Zeit [min]")
-    ax.set_ylabel("Abweichung [Âµm]")
-    ax.legend()
-    fig.tight_layout()
-    return fig
-
-
-def save_stage_test(savefile_name, pos_infodict, batch: str = "NoBatch", write_pdf: bool = True):
-    """Save CSV (and optionally PDF) for a stage test run."""
-    # Prefix CSV file with timestamp to avoid name collisions.
-    now = datetime.datetime.now()
-    dt_string = now.strftime("%Y-%m-%d_%H-%M-%S")
-    pth = pathlib.Path(savefile_name)
-    out_dir = pth.parent if str(pth.parent) not in ("", ".") else pathlib.Path(".")
-    base = pth.name
-    savename = out_dir / f"{dt_string}_{batch}_{base}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    with open(savename, "w+", newline="") as savefile:
-        writer = csv.writer(savefile)
-        writer.writerow(["batch","x_counter","y_counter","Time [min]",
-                         "x_position [m]","y_position [m]","pos_error_x [m]","pos_error_y [m]"])
-        for i in range(len(pos_infodict["x_counter"])):
-            writer.writerow([
-                batch,
-                pos_infodict["x_counter"][i], pos_infodict["y_counter"][i],
-                pos_infodict["Time [min]"][i],
-                pos_infodict["x_position [m]"][i], pos_infodict["y_position [m]"][i],
-                pos_infodict["pos_error_x [m]"][i], pos_infodict["pos_error_y [m]"][i]
-            ])
-    print(f"Saved {savename}")
-    if write_pdf:
-        try:
-            # PDF export is optional and must not block test completion.
-            from pdf_module import PdfModule
-            pdf_path = savename.with_suffix(".pdf")
-            text = _build_stage_test_report_text(batch, savename.name, pos_infodict)
-            pages = [{"type": "text", "title": "Stage Test Report", "text": text}]
-            fig = _build_stage_test_report_plot(pos_infodict)
-            if fig is not None:
-                pages.append(fig)
-            PdfModule.write_pdf(pdf_path, pages)
-            print(f"Saved {pdf_path}")
-        except Exception as exc:
-            print(f"[WARN] PDF export failed: {exc}")

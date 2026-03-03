@@ -1,4 +1,5 @@
 from __future__ import annotations
+import csv
 import datetime
 import io
 import json
@@ -393,6 +394,156 @@ class PdfModule:
             "image": image,
         }], db_test_type=db_test_type)
         QMessageBox.information(parent, "PDF gespeichert", f"Report gespeichert:\n{path_str}")
+
+
+# ---------------------------------------------------------------------------
+# Stage test data/report helpers (used by Resolve xy_stage)
+# ---------------------------------------------------------------------------
+_STAGE_BG = "#0b0b0f"
+_STAGE_BG_ELEV = "#121218"
+_STAGE_FG_MUTED = "#9ea0a6"
+_STAGE_BORDER = "#222230"
+
+
+def _style_stage_ax(ax):
+    ax.set_facecolor(_STAGE_BG)
+    for spine in ax.spines.values():
+        spine.set_color(_STAGE_BORDER)
+        spine.set_linewidth(0.8)
+    ax.grid(True)
+    ax.tick_params(colors=_STAGE_FG_MUTED, labelsize=10)
+
+
+def _safe_last(values, default=0.0):
+    try:
+        return float(values[-1]) if values else default
+    except Exception:
+        return default
+
+
+def _max_abs_um_from_errors(pos_infodict: dict) -> float:
+    max_abs = 0.0
+    for key in ("pos_error_x [m]", "pos_error_y [m]"):
+        vals = pos_infodict.get(key, [])
+        for val in vals:
+            try:
+                max_abs = max(max_abs, abs(float(val)))
+            except Exception:
+                continue
+    return max_abs * 1e6
+
+
+def save_calibration_plot(out_dir: pathlib.Path, axis: str, batch: str, x, y, poly1d_fn):
+    """Save the calibration plot for one axis as PNG."""
+    out_dir = pathlib.Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig = Figure(figsize=(7.2, 5), dpi=110, facecolor=_STAGE_BG_ELEV)
+    ax = fig.add_subplot(111)
+    _style_stage_ax(ax)
+    ax.plot(x, y, "o", label=f"Samples · {batch}")
+    ax.plot(x, poly1d_fn(x), "--", label="Fit")
+    ax.set_title(f"Measured Motorsteps in {axis}-Axis · Charge: {batch}")
+    ax.set_xlabel("Encodersteps [m]")
+    ax.set_ylabel("Motorsteps [steps]")
+    ax.legend()
+    fig.savefig(out_dir / f"calib_{axis.lower()}_{batch}.png")
+
+
+def _build_stage_test_report_text(batch: str, csv_name: str, pos_infodict: dict) -> str:
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    n_points = len(pos_infodict.get("Time [min]", []))
+    last_time = _safe_last(pos_infodict.get("Time [min]", []), 0.0)
+    last_x = _safe_last(pos_infodict.get("x_position [m]", []), 0.0)
+    last_y = _safe_last(pos_infodict.get("y_position [m]", []), 0.0)
+    last_ex = _safe_last(pos_infodict.get("pos_error_x [m]", []), 0.0)
+    last_ey = _safe_last(pos_infodict.get("pos_error_y [m]", []), 0.0)
+    max_abs_um = _max_abs_um_from_errors(pos_infodict)
+    return (
+        "Stage Test Report (PMAC)\n\n"
+        f"Zeitpunkt: {now}\n"
+        f"Charge: {batch}\n"
+        f"CSV: {csv_name}\n"
+        f"Samples: {n_points}\n\n"
+        "Latest values:\n"
+        f"  Zeit [min]: {last_time:.2f}\n"
+        f"  X Position [m]: {last_x:.6f}\n"
+        f"  Y Position [m]: {last_y:.6f}\n"
+        f"  Error X [um]: {last_ex * 1e6:.2f}\n"
+        f"  Error Y [um]: {last_ey * 1e6:.2f}\n\n"
+        f"Max |Error| [um]: {max_abs_um:.2f}\n"
+    )
+
+
+def _build_stage_test_report_plot(pos_infodict: dict, dur_max_um: float = 25.5) -> Figure | None:
+    time_vals = pos_infodict.get("Time [min]", [])
+    err_x = pos_infodict.get("pos_error_x [m]", [])
+    err_y = pos_infodict.get("pos_error_y [m]", [])
+    if not time_vals or (not err_x and not err_y):
+        return None
+    try:
+        t = np.asarray(time_vals, dtype=float)
+    except Exception:
+        return None
+
+    fig = Figure(figsize=(11.0, 6.2), dpi=110, facecolor=_STAGE_BG_ELEV)
+    ax = fig.add_subplot(111)
+    _style_stage_ax(ax)
+    if err_x:
+        ax.plot(t, np.asarray(err_x, dtype=float) * 1e6, label="Error X")
+    if err_y:
+        ax.plot(t, np.asarray(err_y, dtype=float) * 1e6, label="Error Y")
+    ax.axhline(dur_max_um, color="#ff5b5b", linestyle="--", linewidth=1, label=f"Limit {dur_max_um:.1f} µm")
+    ax.axhline(-dur_max_um, color="#ff5b5b", linestyle="--", linewidth=1)
+    ax.set_title("Position error over time")
+    ax.set_xlabel("Zeit [min]")
+    ax.set_ylabel("Abweichung [µm]")
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
+
+def save_stage_test(
+    savefile_name,
+    pos_infodict,
+    batch: str = "NoBatch",
+    write_pdf: bool = True,
+    dur_max_um: float = 25.5,
+):
+    """Save CSV (and optionally PDF) for a stage test run."""
+    now = datetime.datetime.now()
+    dt_string = now.strftime("%Y-%m-%d_%H-%M-%S")
+    pth = pathlib.Path(savefile_name)
+    out_dir = pth.parent if str(pth.parent) not in ("", ".") else pathlib.Path(".")
+    base = pth.name
+    savename = out_dir / f"{dt_string}_{batch}_{base}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with open(savename, "w+", newline="") as savefile:
+        writer = csv.writer(savefile)
+        writer.writerow([
+            "batch", "x_counter", "y_counter", "Time [min]",
+            "x_position [m]", "y_position [m]", "pos_error_x [m]", "pos_error_y [m]"
+        ])
+        for i in range(len(pos_infodict["x_counter"])):
+            writer.writerow([
+                batch,
+                pos_infodict["x_counter"][i], pos_infodict["y_counter"][i],
+                pos_infodict["Time [min]"][i],
+                pos_infodict["x_position [m]"][i], pos_infodict["y_position [m]"][i],
+                pos_infodict["pos_error_x [m]"][i], pos_infodict["pos_error_y [m]"][i],
+            ])
+    print(f"Saved {savename}")
+    if write_pdf:
+        try:
+            pdf_path = savename.with_suffix(".pdf")
+            text = _build_stage_test_report_text(batch, savename.name, pos_infodict)
+            pages = [{"type": "text", "title": "Stage Test Report", "text": text}]
+            fig = _build_stage_test_report_plot(pos_infodict, dur_max_um=dur_max_um)
+            if fig is not None:
+                pages.append(fig)
+            PdfModule.write_pdf(pdf_path, pages)
+            print(f"Saved {pdf_path}")
+        except Exception as exc:
+            print(f"[WARN] PDF export failed: {exc}")
 
 
 @dataclass

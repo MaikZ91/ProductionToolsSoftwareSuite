@@ -1,4 +1,4 @@
-﻿# --- Snap/GIO Modul-Konflikte entschÃ¤rfen (vor allen anderen Imports) ---
+﻿# --- Snap/GIO Modul-Konflikte entschärfen (vor allen anderen Imports) ---
 import os as _os
 _os.environ.pop("GIO_MODULE_DIR", None)
 import datetime
@@ -1029,7 +1029,7 @@ class DashboardView(QWidget):
         self.combo_testtype.currentIndexChanged.connect(self.trigger_refresh)
         self.combo_testtype.setFixedHeight(28)
         self.combo_testtype.setFixedWidth(190)
-        self.status_indicator = QPushButton("â— LIVE")
+        self.status_indicator = QPushButton("● LIVE")
         self.status_indicator.setCursor(Qt.PointingHandCursor)
         self.status_indicator.clicked.connect(self.trigger_refresh)
         self.status_indicator.setStyleSheet(
@@ -1230,7 +1230,7 @@ class DashboardView(QWidget):
         self._is_fetching = True
         source_label = "GW" if db.Gateway.is_on_gateway_wifi() else "DB"
         # UI Feedback
-        self.status_indicator.setText(f"â— FETCHING ({source_label})")
+        self.status_indicator.setText(f"● FETCHING ({source_label})")
         self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['text_muted']}; font-weight: 800; font-size: 11px; margin-left: 10px; }}")
         def task():
             try:
@@ -1249,7 +1249,7 @@ class DashboardView(QWidget):
         source_label = "GW" if db.Gateway.is_on_gateway_wifi() else "DB"
         # Update Connection Status UI
         if not connected:
-            self.status_indicator.setText(f"â— OFFLINE {source_label} (Click to Retry)")
+            self.status_indicator.setText(f"● OFFLINE {source_label} (Click to Retry)")
             self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['danger']}; font-weight: 800; font-size: 11px; margin-left: 10px; }}")
             # Stop automatic retries as requested
             self.timer.stop()
@@ -1259,7 +1259,7 @@ class DashboardView(QWidget):
             self.kpi_last.value_label.setText("N/A")
             # Show connection error in table
             self.table.setRowCount(1)
-            item = QTableWidgetItem("Datenbankverbindung nicht verfÃ¼gbar")
+            item = QTableWidgetItem("Datenbankverbindung nicht verfügbar")
             item.setTextAlignment(Qt.AlignCenter)
             item.setForeground(QBrush(QColor(COLORS['danger'])))
             item.setFont(QFont(FONTS['ui'], 11, QFont.Bold))
@@ -1269,7 +1269,7 @@ class DashboardView(QWidget):
             self.table.setSpan(0, 0, 1, max(1, self.table.columnCount())) # Span across all columns
             return
         else:
-            self.status_indicator.setText(f"â— LIVE ({source_label})")
+            self.status_indicator.setText(f"● LIVE ({source_label})")
             self.status_indicator.setStyleSheet(f"QPushButton {{ background: transparent; border: none; color: {COLORS['success']}; font-weight: 800; font-size: 11px; text-align: left; padding-left: 5px; }}")
             # Clear potential spans from error state
             self.table.clearSpans()
@@ -1673,16 +1673,16 @@ class DashboardView(QWidget):
                 end_time=datetime.datetime.now(datetime.timezone.utc),
             )
         except Exception as e:
-            self.status_indicator.setText("â— GATEWAY FAILED")
+            self.status_indicator.setText("● GATEWAY FAILED")
             QMessageBox.critical(self, "Gateway Error", f"Senden ueber Gateway fehlgeschlagen:\n{e}")
             return
         if ack == "OK":
-            self.status_indicator.setText("â— GATEWAY SENT")
-            QTimer.singleShot(2000, lambda: self.status_indicator.setText("â— LIVE"))
+            self.status_indicator.setText("● GATEWAY SENT")
+            QTimer.singleShot(2000, lambda: self.status_indicator.setText("● LIVE"))
             self.update_data()
             self.clear_entry_fields()
         else:
-            self.status_indicator.setText("â— GATEWAY NO ACK")
+            self.status_indicator.setText("● GATEWAY NO ACK")
             QMessageBox.warning(
                 self,
                 "Gateway Antwort",
@@ -1732,7 +1732,7 @@ def frame_to_qpixmap(frame, target_size=None) -> QPixmap:
             qimg = QImage(frame.data, w, h, w, QImage.Format_Grayscale8)
         elif frame.ndim == 3:
             h, w, ch = frame.shape
-            # BGR zu RGB fÃ¼r QImage
+            # BGR zu RGB für QImage
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
         else:
@@ -2072,11 +2072,11 @@ class AutofocusView(QWidget):
             db_test_type="gitterschieber_tool",
         ))
         al.addWidget(self.btn_save_align_pdf)
-        self.lbl_ref = QLabel("Ref: â€”")
-        self.lbl_dx = QLabel("dx: â€”")
-        self.lbl_dy = QLabel("dy: â€”")
-        self.lbl_dist = QLabel("dist: â€”")
-        self.lbl_align_status = QLabel("Status: â€”")
+        self.lbl_ref = QLabel("Ref: —")
+        self.lbl_dx = QLabel("dx: —")
+        self.lbl_dy = QLabel("dy: —")
+        self.lbl_dist = QLabel("dist: —")
+        self.lbl_align_status = QLabel("Status: —")
         for lbl in (self.lbl_ref, self.lbl_dx, self.lbl_dy, self.lbl_dist, self.lbl_align_status):
             lbl.setStyleSheet(
                 f"background: {COLORS['surface_light']}; border: 1px solid {COLORS['border']}; "
@@ -2144,7 +2144,7 @@ class AutofocusView(QWidget):
         if self._switch_timer.isActive():
             self._switch_timer.stop()
         self._switch_timer.start(500)
-        # Exposure neu lesen wenn mÃ¶glich
+        # Exposure neu lesen wenn möglich
         try:
             if idx >= 0:
                 curr, min_e, max_e = autofocus.get_exposure_limits(idx)
@@ -2221,7 +2221,7 @@ class AutofocusView(QWidget):
                 pass
             try:
                 self.btn_toggle_ref.setText("Save Justage")
-                self.lbl_ref.setText("Ref: â€”")
+                self.lbl_ref.setText("Ref: —")
             except Exception:
                 pass
         except Exception as exc:
@@ -2326,7 +2326,7 @@ class AutofocusView(QWidget):
         else:
             dx = int(cx - w // 2)
             dy = int(cy - h // 2)
-            self.lbl_ref.setText("Ref: â€”")
+            self.lbl_ref.setText("Ref: —")
         dist = float(np.hypot(dx, dy))
         px_um = None
         if self._laser is not None:
@@ -2336,9 +2336,9 @@ class AutofocusView(QWidget):
             dy_um = dy * px_um
             dist_um = dist * px_um
             dist_mm = dist_um / 1000.0
-            self.lbl_dx.setText(f"dx: {dx:+d} px  ({dx_um:+.1f} Âµm)")
-            self.lbl_dy.setText(f"dy: {dy:+d} px  ({dy_um:+.1f} Âµm)")
-            self.lbl_dist.setText(f"dist: {dist:.2f} px  ({dist_um:.1f} Âµm Â· {dist_mm:.3f} mm)")
+            self.lbl_dx.setText(f"dx: {dx:+d} px  ({dx_um:+.1f} µm)")
+            self.lbl_dy.setText(f"dy: {dy:+d} px  ({dy_um:+.1f} µm)")
+            self.lbl_dist.setText(f"dist: {dist:.2f} px  ({dist_um:.1f} µm · {dist_mm:.3f} mm)")
         else:
             self.lbl_dx.setText(f"dx: {dx:+d} px")
             self.lbl_dy.setText(f"dy: {dy:+d} px")
@@ -2347,7 +2347,7 @@ class AutofocusView(QWidget):
         ok = (dist <= tol_px)
         color = "#2ecc71" if ok else "#ff2740"
         text = "OK" if ok else "ALIGN"
-        self.lbl_align_status.setText(f"Status: {text} (â‰¤ {tol_px:.1f} px)")
+        self.lbl_align_status.setText(f"Status: {text} (≤ {tol_px:.1f} px)")
         self.lbl_align_status.setStyleSheet(
             f"background: {COLORS['surface_light']}; border: 1px solid {COLORS['border']}; "
             f"border-radius: 6px; padding: 4px 6px; font-size: 11px; color: {color};"
@@ -2637,7 +2637,7 @@ class StageControlView(QWidget):
         self.btn_dauer.clicked.connect(self.toggle_endurance_test)
         btn_layout.addWidget(self.btn_dauer)
         row_btn = QHBoxLayout()
-        self.btn_open = ModernButton("Ordner Ã¶ffnen", "ghost")
+        self.btn_open = ModernButton("Ordner öffnen", "ghost")
         self.btn_open.clicked.connect(self._open_folder)
         self.btn_open.setEnabled(True)
         row_btn.addWidget(self.btn_open)
@@ -2694,11 +2694,11 @@ class StageControlView(QWidget):
         qa_info = QVBoxLayout()
         qa_lbl = QLabel("Dauertest QA")
         qa_lbl.setStyleSheet(f"color: {COLORS['success']}; font-weight: bold; font-size: 12px; border:none; background:transparent;")
-        qa_lim = QLabel(f"Limit: {resolve_stage.DUR_MAX_UM:.1f} Âµm")
+        qa_lim = QLabel(f"Limit: {resolve_stage.DUR_MAX_UM:.1f} µm")
         qa_lim.setStyleSheet(f"color: {COLORS['success']}; opacity: 0.8; font-size: 11px; border:none; background:transparent;")
         qa_info.addWidget(qa_lbl)
         qa_info.addWidget(qa_lim)
-        self.qa_val = QLabel("0.42 Âµm")
+        self.qa_val = QLabel("0.42 µm")
         self.qa_val.setStyleSheet(f"color: {COLORS['success']}; font-weight: 800; font-size: 18px; border:none; background:transparent;")
         qa_layout.addLayout(qa_info)
         qa_layout.addStretch()
@@ -2725,7 +2725,7 @@ class StageControlView(QWidget):
         self.line_x, = self.chart.ax.plot([], [], color=COLORS['primary'], linewidth=2, label="Fehler X")
         self.line_y, = self.chart.ax.plot([], [], color=COLORS['secondary'], linewidth=2, label="Fehler Y")
         self.chart.ax.set_xlabel("Zeit [min]", color=COLORS['text_muted'])
-        self.chart.ax.set_ylabel("Abweichung [Âµm]", color=COLORS['text_muted'])
+        self.chart.ax.set_ylabel("Abweichung [µm]", color=COLORS['text_muted'])
         # Chart Legend
         leg = self.chart.ax.legend(loc='upper right', facecolor=COLORS['surface'], edgecolor=COLORS['border'], labelcolor=COLORS['text'])
         leg.get_frame().set_linewidth(1)
@@ -2759,7 +2759,7 @@ class StageControlView(QWidget):
             else:
                 subprocess.run(['xdg-open', str(path.resolve())])
         except Exception as e:
-            QMessageBox.warning(self, "Ordner Ã¶ffnen", f"Konnte Ordner nicht Ã¶ffnen:\n{e}")
+            QMessageBox.warning(self, "Ordner öffnen", f"Konnte Ordner nicht öffnen:\n{e}")
     def _send_stage_db_event(self, user_id: str, event_label: str):
         """Log stage test starts into the kleberoboter DB without blocking the UI."""
         def _task():
@@ -2831,7 +2831,7 @@ class StageControlView(QWidget):
             self._start_precision_test()
     def _start_precision_test(self):
         if self.dauer_running:
-            QMessageBox.warning(self, "Test lÃ¤uft", "Der Dauertest lÃ¤uft bereits.")
+            QMessageBox.warning(self, "Test läuft", "Der Dauertest läuft bereits.")
             return
         self._acquire_metadata()
         out_dir = self._ensure_run_dir()
@@ -2894,8 +2894,8 @@ class StageControlView(QWidget):
         msg = (
             f"Kalibriermessung beendet.\n"
             f"Daten gespeichert: lokal und in DB.\n"
-            f"Max. Abweichung: {self._meas_max_um:.2f} Âµm\n"
-            f"Limit: {self.MEAS_MAX_UM:.1f} Âµm -> {'OK' if meas_ok else 'FEHLER'}"
+            f"Max. Abweichung: {self._meas_max_um:.2f} µm\n"
+            f"Limit: {self.MEAS_MAX_UM:.1f} µm -> {'OK' if meas_ok else 'FEHLER'}"
         )
         QMessageBox.information(self, "Test Beendet", msg)
     # --- Endurance Test ---
@@ -2906,7 +2906,7 @@ class StageControlView(QWidget):
             self._start_endurance_test()
     def _start_endurance_test(self):
         if self.running:
-            QMessageBox.warning(self, "Test lÃ¤uft", "Die Kalibriermessung lÃ¤uft bereits.")
+            QMessageBox.warning(self, "Test läuft", "Die Kalibriermessung läuft bereits.")
             return
         if hasattr(self, "duration_hours"):
             self._duration_sec = int(float(self.duration_hours.currentText()) * 3600)
@@ -2982,7 +2982,7 @@ class StageControlView(QWidget):
         y_pad = max(0.2, y_max * 0.15)
         self.chart.ax.set_ylim(-y_max - y_pad, y_max + y_pad)
         self.chart.draw_idle()
-        self.qa_val.setText(f"{max_err:.2f} Âµm")
+        self.qa_val.setText(f"{max_err:.2f} µm")
         limit = data.get("limit_um", resolve_stage.DUR_MAX_UM)
         if max_err > limit:
              self.qa_box.setStyleSheet(f"background-color: {COLORS['danger']}15; border: 1px solid {COLORS['danger']}40; border-radius: 12px;")
@@ -3043,8 +3043,8 @@ class StageControlView(QWidget):
         msg = (
             f"Dauertest beendet.\n"
             f"Daten gespeichert: lokal und in DB.\n"
-            f"Max. Abweichung: {self._dur_max_um:.2f} Âµm\n"
-            f"Limit: {limit:.1f} Âµm -> {'OK' if dur_ok else 'FEHLER'}"
+            f"Max. Abweichung: {self._dur_max_um:.2f} µm\n"
+            f"Limit: {limit:.1f} µm -> {'OK' if dur_ok else 'FEHLER'}"
         )
         QMessageBox.information(self, "Test Beendet", msg)
     def _on_thr_finished(self):
@@ -3086,6 +3086,8 @@ class StageControlView(QWidget):
             pass
     def _plot_and_save(self, axis, mot, enc, calc, spm, epm, out_dir: pathlib.Path, batch: str) -> pathlib.Path:
         diff, idx = enc - calc, np.linspace(0, 1, len(mot))
+        diff_um = diff / epm * 1e6
+        pos_mm = mot / spm * 1e3
         fig = Figure(figsize=(12, 8), dpi=110, facecolor=COLORS['surface'])
         def style_ax(ax):
             ax.set_facecolor(COLORS['surface'])
@@ -3096,12 +3098,37 @@ class StageControlView(QWidget):
             ax.grid(True, color=COLORS['border'], linestyle='--', alpha=0.3)
             for spine in ax.spines.values():
                 spine.set_color(COLORS['border'])
-        ax1 = fig.add_subplot(221); style_ax(ax1); ax1.plot(idx, mot, color=COLORS['primary']); ax1.set_title(f"Motorschritte Â· {axis}")
-        ax2 = fig.add_subplot(222); style_ax(ax2); ax2.scatter(mot, diff, c=idx, cmap="gray"); ax2.set_title(f"Encoder-Delta Â· {axis}")
-        ax3 = fig.add_subplot(223); style_ax(ax3); ax3.plot(diff / epm * 1e6, color=COLORS['primary']); ax3.set_title("Delta (Âµm) vs Index")
-        ax4 = fig.add_subplot(224); style_ax(ax4); ax4.scatter(mot / spm * 1e3, diff / epm * 1e6, c=idx, cmap="gray"); ax4.set_title("Delta (Âµm) vs Weg")
-        fig.suptitle(f"{axis}-Achse â€“ Messung Â· Charge: {batch}", color=COLORS['text'], fontweight="semibold")
-        fig.tight_layout()
+        point_kw = dict(s=28, c=idx, cmap="viridis", edgecolors=COLORS['surface'], linewidths=0.5, alpha=0.95, zorder=3)
+
+        ax1 = fig.add_subplot(221); style_ax(ax1)
+        ax1.plot(idx, mot, color=COLORS['primary'], linewidth=1.8, alpha=0.9, zorder=2)
+        ax1.scatter(idx, mot, **point_kw)
+        ax1.set_title(f"Motorschritte · {axis}")
+        ax1.set_xlabel("Normierter Messindex [0..1]")
+        ax1.set_ylabel("Motorschritte")
+
+        ax2 = fig.add_subplot(222); style_ax(ax2)
+        ax2.plot(mot, diff, color=COLORS['text_muted'], linewidth=1.2, alpha=0.45, zorder=1)
+        ax2.scatter(mot, diff, **point_kw)
+        ax2.set_title(f"Encoder-Delta · {axis}")
+        ax2.set_xlabel("Motorschritte")
+        ax2.set_ylabel("Encoder-Delta [counts]")
+
+        ax3 = fig.add_subplot(223); style_ax(ax3)
+        ax3.plot(idx, diff_um, color=COLORS['primary'], linewidth=1.8, alpha=0.9, zorder=2)
+        ax3.scatter(idx, diff_um, **point_kw)
+        ax3.set_title("Delta (µm) vs Index")
+        ax3.set_xlabel("Normierter Messindex [0..1]")
+        ax3.set_ylabel("Abweichung [µm]")
+
+        ax4 = fig.add_subplot(224); style_ax(ax4)
+        ax4.plot(pos_mm, diff_um, color=COLORS['text_muted'], linewidth=1.2, alpha=0.45, zorder=1)
+        ax4.scatter(pos_mm, diff_um, **point_kw)
+        ax4.set_title("Delta (µm) vs Weg")
+        ax4.set_xlabel("Weg [mm]")
+        ax4.set_ylabel("Abweichung [µm]")
+        fig.suptitle(f"{axis}-Achse – Messung · Charge: {batch}", color=COLORS['text'], fontweight="semibold")
+        fig.tight_layout(rect=[0, 0, 1, 0.97])
         out_png = out_dir / f"{axis}_{batch}.png"
         fig.savefig(out_png)
         return out_png
@@ -3744,7 +3771,7 @@ class GitterschieberView(QWidget):
             try:
                 angle = gitterschieber.MeasureSingleImageGratingAngle()
                 def update_ui():
-                    self.metric_angle.value_label.setText(f"{angle:.3f}Â°")
+                    self.metric_angle.value_label.setText(f"{angle:.3f}°")
                     self.btn_angle.setEnabled(True)
                     self.btn_angle.setText("Measure Angle")
                 QMetaObject.invokeMethod(self, update_ui)
@@ -4209,13 +4236,13 @@ class IPCView(QWidget):
                 if "justage_angle" in df.columns and "particle_count" in df.columns:
                     x = pd.to_numeric(df["particle_count"], errors='coerce').fillna(0)
                     y = pd.to_numeric(df["justage_angle"], errors='coerce').fillna(0)
-                    style(self.chart1.ax, "Angle vs Particles", "Particles", "Angle [Â°]")
+                    style(self.chart1.ax, "Angle vs Particles", "Particles", "Angle [°]")
                     self.chart1.ax.scatter(x, y, color=COLORS['primary'], alpha=0.7)
                     # Trend: Angle over time (index mostly if time is not parsed perfectly)
                     # Use index as proxy for time (assuming sorted desc, so we reverse)
                     y_trend = y.iloc[::-1].values # Newest is 0, so reverse to have history->new
                     x_trend = np.arange(len(y_trend))
-                    style(self.chart2.ax, "Angle Trend", "Sample Index", "Angle [Â°]")
+                    style(self.chart2.ax, "Angle Trend", "Sample Index", "Angle [°]")
                     self.chart2.ax.plot(x_trend, y_trend, '-o', color=COLORS['success'], markersize=4)
             elif source == "stage_test":
                 # Plot X vs Y coordinates of CAM1
@@ -4303,7 +4330,7 @@ class IPCView(QWidget):
             ax.set_xlabel(xl, color=COLORS['text_muted'])
             ax.set_ylabel(yl, color=COLORS['text_muted'])
             ax.grid(True, linestyle='--', alpha=0.3, color=COLORS['border'])
-        style(self.chart1.ax, "Echtzeit-Abweichung (X vs Y)", "Time [min]", "Error [Âµm]")
+        style(self.chart1.ax, "Echtzeit-Abweichung (X vs Y)", "Time [min]", "Error [µm]")
         self.chart1.ax.plot(list(t), list(x_vals), color=COLORS['primary'], linewidth=2, label="Fehler X")
         self.chart1.ax.plot(list(t), list(y_vals), color=COLORS['secondary'], linewidth=2, label="Fehler Y")
         self.chart1.ax.legend(loc='upper right', facecolor=COLORS['surface'], edgecolor=COLORS['border'], labelcolor=COLORS['text'])
@@ -4441,15 +4468,15 @@ class LaserscanView(QWidget):
             self.cam_embed = CameraWidget(self._get_frame, start_immediately=False)
             self.cam_embed.setObjectName("Laserscan_CamEmbed") # IMPORTANT FOR RESIZE
             card.add_widget(self.cam_embed)
-        workflow_card = Card("Workflow Ãœbersicht")
+        workflow_card = Card("Workflow Übersicht")
         workflow_card.set_compact(content_spacing=6)
         workflow_layout = QVBoxLayout()
         workflow_layout.setSpacing(6)
         steps = [
-            ("1. WellenlÃ¤nge / Check", "Ermittle die dominante Farbe der Laserlinie und vergleiche sie mit dem Sollwert. Passe IntensitÃ¤t oder Filter an, falls der Offset zu groÃŸ ist."),
-            ("2. Prisma Grobjustage", "Kamera anzeigen lassen, Messsequenz aufnehmen und Winkel + Toleranz einsehen. Nutze den resultierenden Mittelwert fÃ¼r erste Ausrichtung."),
-            ("3. FineJustage Linse Ausrichten", "FÃ¼hre die Messsequenz durch und bewerte Linienbreite sowie Winkel der Fokuslinie. Wiederhole bis beide Werte im Toleranzbereich liegen."),
-            ("4. FineJustage Prisma", "Feinjustage der Prismaposition mit hÃ¶herer Stichprobentiefe, Winkeltracking und engeren Toleranzen. Nur aktivieren, wenn alle Lens-Checks grÃ¼n sind.")
+            ("1. Wellenlänge / Check", "Ermittle die dominante Farbe der Laserlinie und vergleiche sie mit dem Sollwert. Passe Intensität oder Filter an, falls der Offset zu groß ist."),
+            ("2. Prisma Grobjustage", "Kamera anzeigen lassen, Messsequenz aufnehmen und Winkel + Toleranz einsehen. Nutze den resultierenden Mittelwert für erste Ausrichtung."),
+            ("3. FineJustage Linse Ausrichten", "Führe die Messsequenz durch und bewerte Linienbreite sowie Winkel der Fokuslinie. Wiederhole bis beide Werte im Toleranzbereich liegen."),
+            ("4. FineJustage Prisma", "Feinjustage der Prismaposition mit höherer Stichprobentiefe, Winkeltracking und engeren Toleranzen. Nur aktivieren, wenn alle Lens-Checks grün sind.")
         ]
         for title, desc in steps:
             lbl = QLabel(f"<b>{title}</b><br><span style='color:{COLORS['secondary']}; font-size:11px;'>{desc}</span>")
@@ -4485,7 +4512,7 @@ class LaserscanView(QWidget):
         self.spin_prisma_target_angle.setDecimals(2)
         self.spin_prisma_target_angle.setValue(0.0)
         self.spin_prisma_target_angle.setSingleStep(0.1)
-        self.spin_prisma_target_angle.setSuffix("Â°")
+        self.spin_prisma_target_angle.setSuffix("°")
         self.spin_prisma_target_angle.setFixedWidth(100)
         target_row.addWidget(self.spin_prisma_target_angle)
         target_row.addWidget(QLabel("Toleranz:"))
@@ -4494,7 +4521,7 @@ class LaserscanView(QWidget):
         self.spin_prisma_tolerance.setDecimals(2)
         self.spin_prisma_tolerance.setSingleStep(0.1)
         self.spin_prisma_tolerance.setValue(0.6)
-        self.spin_prisma_tolerance.setSuffix("Â°")
+        self.spin_prisma_tolerance.setSuffix("°")
         self.spin_prisma_tolerance.setFixedWidth(90)
         target_row.addWidget(self.spin_prisma_tolerance)
         target_row.addStretch()
@@ -4511,13 +4538,13 @@ class LaserscanView(QWidget):
         prism_layout.addWidget(self.lbl_prisma_delta)
         prism_layout.addWidget(self.lbl_prisma_status)
         prism_card.add_layout(prism_layout)
-        wavelength_card = Card("WellenlÃ¤nge / Check")
+        wavelength_card = Card("Wellenlänge / Check")
         wave_layout = QVBoxLayout()
         wave_layout.setContentsMargins(0, 0, 0, 0)
         wave_layout.setSpacing(8)
         wave_target_row = QHBoxLayout()
         wave_target_row.setSpacing(8)
-        wave_target_row.addWidget(QLabel("ZielwellenlÃ¤nge:"))
+        wave_target_row.addWidget(QLabel("Zielwellenlänge:"))
         self.spin_wave_target = QDoubleSpinBox()
         self.spin_wave_target.setRange(400.0, 800.0)
         self.spin_wave_target.setValue(633.0)
@@ -4533,10 +4560,10 @@ class LaserscanView(QWidget):
         self.spin_wave_tolerance.setFixedWidth(80)
         wave_target_row.addWidget(self.spin_wave_tolerance)
         wave_target_row.addStretch()
-        self.btn_wavelength_check = ModernButton("WellenlÃ¤nge prÃ¼fen", "primary")
+        self.btn_wavelength_check = ModernButton("Wellenlänge prüfen", "primary")
         self.btn_wavelength_check.setFixedHeight(32)
         self.btn_wavelength_check.clicked.connect(self._on_wavelength_check)
-        self.lbl_wave_value = QLabel("WellenlÃ¤nge: --- nm")
+        self.lbl_wave_value = QLabel("Wellenlänge: --- nm")
         self.lbl_wave_value.setStyleSheet(f"color: {COLORS['primary']}; font-weight: 600;")
         self.lbl_wave_status = QLabel("Status: Bereit")
         self.lbl_wave_status.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 600;")
@@ -4587,7 +4614,7 @@ class LaserscanView(QWidget):
         self.spin_line_angle_target.setRange(-90.0, 90.0)
         self.spin_line_angle_target.setDecimals(2)
         self.spin_line_angle_target.setValue(0.0)
-        self.spin_line_angle_target.setSuffix("Â°")
+        self.spin_line_angle_target.setSuffix("°")
         self.spin_line_angle_target.setFixedWidth(100)
         angle_row.addWidget(self.spin_line_angle_target)
         angle_row.addWidget(QLabel("Toleranz:"))
@@ -4595,7 +4622,7 @@ class LaserscanView(QWidget):
         self.spin_line_angle_tolerance.setRange(0.1, 20.0)
         self.spin_line_angle_tolerance.setDecimals(2)
         self.spin_line_angle_tolerance.setValue(5.0)
-        self.spin_line_angle_tolerance.setSuffix("Â°")
+        self.spin_line_angle_tolerance.setSuffix("°")
         self.spin_line_angle_tolerance.setFixedWidth(90)
         angle_row.addWidget(self.spin_line_angle_tolerance)
         angle_row.addStretch()
@@ -4643,7 +4670,7 @@ class LaserscanView(QWidget):
         self.spin_prisma_fine_target.setDecimals(2)
         self.spin_prisma_fine_target.setValue(0.0)
         self.spin_prisma_fine_target.setSingleStep(0.1)
-        self.spin_prisma_fine_target.setSuffix("Â°")
+        self.spin_prisma_fine_target.setSuffix("°")
         self.spin_prisma_fine_target.setFixedWidth(100)
         fine_target_row.addWidget(self.spin_prisma_fine_target)
         fine_target_row.addWidget(QLabel("Toleranz:"))
@@ -4651,7 +4678,7 @@ class LaserscanView(QWidget):
         self.spin_prisma_fine_tolerance.setRange(0.05, 5.0)
         self.spin_prisma_fine_tolerance.setDecimals(2)
         self.spin_prisma_fine_tolerance.setValue(0.3)
-        self.spin_prisma_fine_tolerance.setSuffix("Â°")
+        self.spin_prisma_fine_tolerance.setSuffix("°")
         self.spin_prisma_fine_tolerance.setFixedWidth(80)
         fine_target_row.addWidget(self.spin_prisma_fine_tolerance)
         fine_target_row.addStretch()
@@ -4686,7 +4713,7 @@ class LaserscanView(QWidget):
         self.lbl_laser_status.setStyleSheet(f"color: {COLORS['text_muted']}; font-weight: 600;")
         laser_layout.addWidget(self.lbl_laser_status)
         intensity_row = QHBoxLayout()
-        self.lbl_laser_intensity = QLabel(f"IntensitÃ¤t: {self._laser_intensity}%")
+        self.lbl_laser_intensity = QLabel(f"Intensität: {self._laser_intensity}%")
         self.lbl_laser_intensity.setStyleSheet(f"font-size: 11px; color: {COLORS['secondary']};")
         intensity_row.addWidget(self.lbl_laser_intensity)
         intensity_row.addStretch()
@@ -4817,7 +4844,7 @@ class LaserscanView(QWidget):
     def _on_laser_intensity_changed(self, value: int):
         self._laser_intensity = max(0, min(100, int(value)))
         if self.lbl_laser_intensity is not None:
-            self.lbl_laser_intensity.setText(f"IntensitÃ¤t: {self._laser_intensity}%")
+            self.lbl_laser_intensity.setText(f"Intensität: {self._laser_intensity}%")
         self._apply_laser_intensity()
 
     def _apply_laser_state(self):
@@ -4924,9 +4951,9 @@ class LaserscanView(QWidget):
         is_ok = abs(delta) <= tolerance
         status_color = COLORS["success"] if is_ok else COLORS["danger"]
         if angle_label:
-            angle_label.setText(f"Winkel: {mean_angle:.2f}Â°")
+            angle_label.setText(f"Winkel: {mean_angle:.2f}°")
         if delta_label:
-            delta_label.setText(f"Abweichung: {delta:+.2f}Â° (Tol. +/-{tolerance:.2f}Â°)")
+            delta_label.setText(f"Abweichung: {delta:+.2f}° (Tol. +/-{tolerance:.2f}°)")
         if status_label:
             status_label.setText("Innerhalb Toleranz" if is_ok else "Toleranz verletzt")
             status_label.setStyleSheet(f"font-weight: 600; color: {status_color};")
@@ -4990,12 +5017,12 @@ class LaserscanView(QWidget):
             f"Zeitpunkt: {now}",
             "",
             f"Linienbreite: {width:.1f} px",
-            f"Zielbreite: {width_target:.1f} px Â±{width_tol:.1f} px",
+            f"Zielbreite: {width_target:.1f} px ±{width_tol:.1f} px",
             f"Abweichung: {width_delta:+.1f} px",
             "",
-            f"Winkel: {angle:.2f}Â°",
-            f"Zielwinkel: {angle_target:.2f}Â° Â±{angle_tol:.2f}Â°",
-            f"Abweichung: {angle_delta:+.2f}Â°",
+            f"Winkel: {angle:.2f}°",
+            f"Zielwinkel: {angle_target:.2f}° ±{angle_tol:.2f}°",
+            f"Abweichung: {angle_delta:+.2f}°",
             "",
             f"Status: {status_text}",
         ]
@@ -5020,9 +5047,9 @@ class LaserscanView(QWidget):
             f"Zeitpunkt: {now}",
             "",
             f"Messungen: {seq_count}",
-            f"Zielwinkel: {target:.2f}Â° Â±{tolerance:.2f}Â°",
-            f"Gemessener Winkel: {mean_angle:.2f}Â°",
-            f"Abweichung: {delta:+.2f}Â°",
+            f"Zielwinkel: {target:.2f}° ±{tolerance:.2f}°",
+            f"Gemessener Winkel: {mean_angle:.2f}°",
+            f"Abweichung: {delta:+.2f}°",
             "",
             f"Status: {status_text}",
         ]
@@ -5069,7 +5096,7 @@ class LaserscanView(QWidget):
         is_ok = abs(delta) <= tolerance
         status_color = COLORS["success"] if is_ok else COLORS["danger"]
         if self.lbl_wave_value:
-            self.lbl_wave_value.setText(f"WellenlÃ¤nge: {wavelength:.1f} nm")
+            self.lbl_wave_value.setText(f"Wellenlänge: {wavelength:.1f} nm")
         if self.lbl_wave_status:
             self.lbl_wave_status.setText("Innerhalb Toleranz" if is_ok else "Toleranz verletzt")
             self.lbl_wave_status.setStyleSheet(f"font-weight: 600; color: {status_color};")
@@ -5084,7 +5111,7 @@ class LaserscanView(QWidget):
 
     def _reset_wavelength_feedback(self, status_text, color):
         if self.lbl_wave_value:
-            self.lbl_wave_value.setText("WellenlÃ¤nge: --- nm")
+            self.lbl_wave_value.setText("Wellenlänge: --- nm")
         if self.lbl_wave_status:
             self.lbl_wave_status.setText(status_text)
             self.lbl_wave_status.setStyleSheet(f"font-weight: 600; color: {color};")
@@ -5126,9 +5153,9 @@ class LaserscanView(QWidget):
         if self.lbl_line_width_value:
             self.lbl_line_width_value.setText(f"Linienbreite: {width:.1f} px")
         if self.lbl_line_angle:
-            self.lbl_line_angle.setText(f"Winkel: {angle:.2f}Â°")
+            self.lbl_line_angle.setText(f"Winkel: {angle:.2f}°")
         if self.lbl_line_width_delta:
-            self.lbl_line_width_delta.setText(f"Breite Î”: {width_delta:+.1f} px | Winkel Î”: {angle_delta:+.2f}Â°")
+            self.lbl_line_width_delta.setText(f"Breite Δ: {width_delta:+.1f} px | Winkel Δ: {angle_delta:+.2f}°")
         if self.lbl_line_width_status:
             self.lbl_line_width_status.setText("Innerhalb Toleranz" if overall_ok else "Toleranz verletzt")
             self.lbl_line_width_status.setStyleSheet(f"font-weight: 600; color: {status_color};")
@@ -5509,7 +5536,7 @@ class StudioToolView(QWidget):
                 self.clear_layout(item.layout())
 # --- NAVIGATION SIDEBAR ---
 class SidebarButton(QPushButton):
-    def __init__(self, text, icon_char="â€¢", parent=None):
+    def __init__(self, text, icon_char="•", parent=None):
         super().__init__(text, parent)
         self.setCheckable(True)
         self.setAutoExclusive(True)
@@ -6750,11 +6777,11 @@ class OllamaChatView(QWidget):
             "tests",
             "risiko",
             "auffaellig",
-            "auffÃ¤ll",
+            "auffäll",
             "abweichung",
             "trend",
             "qualitaet",
-            "qualitÃ¤t",
+            "qualität",
             "fehler",
             "produktion",
             "dashboard",
@@ -7355,5 +7382,7 @@ if __name__ == "__main__":
     app.installEventFilter(app.studio_filter)
     window.showMaximized()
     sys.exit(app.exec())
+
+# version 1.0
 
 
