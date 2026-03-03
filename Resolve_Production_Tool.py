@@ -2585,12 +2585,14 @@ class StageControlView(QWidget):
         self.dauer_wrk = None
         self.executor = ThreadPoolExecutor(max_workers=3)
         self._sam_resume_prompt_shown = False
+        self._sam_window_ref = None
         self.setup_ui()
         # Real-time data storage
         self.x_data = deque(maxlen=300)
         self.y1_data = deque(maxlen=300)
         self.y2_data = deque(maxlen=300)
         self.tick = 0
+        QTimer.singleShot(0, self._attach_sam_window_watcher)
         QTimer.singleShot(0, self._maybe_prompt_sam_connected)
     def setup_ui(self):
         layout = QHBoxLayout(self)
@@ -2860,11 +2862,35 @@ class StageControlView(QWidget):
         if dialog.clickedButton() is not btn_ok:
             return
         self._set_sam_start_pending(True)
+        self._attach_sam_window_watcher()
         top = self.window()
         if top is not None:
             top.showMinimized()
         else:
             self.showMinimized()
+
+    def _attach_sam_window_watcher(self):
+        top = self.window()
+        if top is None:
+            return
+        if self._sam_window_ref is top:
+            return
+        if self._sam_window_ref is not None:
+            try:
+                self._sam_window_ref.removeEventFilter(self)
+            except Exception:
+                pass
+        self._sam_window_ref = top
+        self._sam_window_ref.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if obj is self._sam_window_ref:
+            if event.type() == QEvent.WindowStateChange:
+                if not self._sam_window_ref.isMinimized():
+                    QTimer.singleShot(0, self._maybe_prompt_sam_connected)
+            elif event.type() == QEvent.Show:
+                QTimer.singleShot(0, self._maybe_prompt_sam_connected)
+        return super().eventFilter(obj, event)
 
     def _maybe_prompt_sam_connected(self):
         if self._sam_resume_prompt_shown:
@@ -2882,6 +2908,7 @@ class StageControlView(QWidget):
         if dialog.clickedButton() is btn_start:
             self._set_sam_start_pending(False)
             self._start_precision_test()
+        self._sam_resume_prompt_shown = False
     def _start_precision_test(self):
         if self.dauer_running:
             QMessageBox.warning(self, "Test läuft", "Der Dauertest läuft bereits.")
