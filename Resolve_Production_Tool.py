@@ -2559,7 +2559,7 @@ class ZTriebView(QWidget):
         self.shutdown()
         super().closeEvent(event)
 class StageControlView(QWidget):
-    _SAM_PENDING_KEY = "stage_precision_waiting_for_sam"
+    _SAM_PRESTART_PENDING_KEY = "stage_precision_waiting_for_sam_prestart"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2584,7 +2584,9 @@ class StageControlView(QWidget):
         self.dauer_thr = None
         self.dauer_wrk = None
         self.executor = ThreadPoolExecutor(max_workers=3)
-        self._sam_resume_prompt_shown = False
+        self._sam_prestart_prompt_open = False
+        self._sam_midrun_pending = False
+        self._sam_midrun_prompt_open = False
         self._sam_window_ref = None
         self.setup_ui()
         # Real-time data storage
@@ -2593,7 +2595,7 @@ class StageControlView(QWidget):
         self.y2_data = deque(maxlen=300)
         self.tick = 0
         QTimer.singleShot(0, self._attach_sam_window_watcher)
-        QTimer.singleShot(0, self._maybe_prompt_sam_connected)
+        QTimer.singleShot(0, self._maybe_prompt_start_precision_after_prestart)
     def setup_ui(self):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -2843,15 +2845,15 @@ class StageControlView(QWidget):
             self.btn_start.setText("Kalibriermessung starten")
             self.btn_start.set_variant("primary")
         else:
-            self._prompt_connect_sam_and_minimize()
+            self._prompt_connect_sam_and_minimize_prestart()
 
-    def _set_sam_start_pending(self, pending: bool):
-        UI_CONFIG.set(self._SAM_PENDING_KEY, bool(pending))
+    def _set_sam_prestart_pending(self, pending: bool):
+        UI_CONFIG.set(self._SAM_PRESTART_PENDING_KEY, bool(pending))
 
-    def _is_sam_start_pending(self) -> bool:
-        return bool(UI_CONFIG.get(self._SAM_PENDING_KEY, False))
+    def _is_sam_prestart_pending(self) -> bool:
+        return bool(UI_CONFIG.get(self._SAM_PRESTART_PENDING_KEY, False))
 
-    def _prompt_connect_sam_and_minimize(self):
+    def _prompt_connect_sam_and_minimize_prestart(self):
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Information)
         dialog.setWindowTitle("Hinweis")
@@ -2860,8 +2862,9 @@ class StageControlView(QWidget):
         dialog.addButton("Abbrechen", QMessageBox.RejectRole)
         dialog.exec()
         if dialog.clickedButton() is not btn_ok:
+            self._set_sam_prestart_pending(False)
             return
-        self._set_sam_start_pending(True)
+        self._set_sam_prestart_pending(True)
         self._attach_sam_window_watcher()
         top = self.window()
         if top is not None:
@@ -2887,32 +2890,83 @@ class StageControlView(QWidget):
         if obj is self._sam_window_ref:
             if event.type() == QEvent.WindowStateChange:
                 if not self._sam_window_ref.isMinimized():
-                    QTimer.singleShot(0, self._maybe_prompt_sam_connected)
+                    QTimer.singleShot(0, self._maybe_prompt_start_precision_after_prestart)
+                    QTimer.singleShot(0, self._maybe_prompt_resume_precision_after_sam)
             elif event.type() == QEvent.Show:
-                QTimer.singleShot(0, self._maybe_prompt_sam_connected)
+                QTimer.singleShot(0, self._maybe_prompt_start_precision_after_prestart)
+                QTimer.singleShot(0, self._maybe_prompt_resume_precision_after_sam)
         return super().eventFilter(obj, event)
 
-    def _maybe_prompt_sam_connected(self):
-        if self._sam_resume_prompt_shown:
+    def _maybe_prompt_start_precision_after_prestart(self):
+        if self._sam_prestart_prompt_open:
             return
-        if not self._is_sam_start_pending():
+        if self.running or self.dauer_running:
+            self._set_sam_prestart_pending(False)
             return
-        self._sam_resume_prompt_shown = True
+        if not self._is_sam_prestart_pending():
+            return
+        self._sam_prestart_prompt_open = True
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Question)
         dialog.setWindowTitle("SAM Board")
         dialog.setText("SAM Board verbunden?")
         btn_start = dialog.addButton("Test starten", QMessageBox.AcceptRole)
-        dialog.addButton("Später", QMessageBox.RejectRole)
+        dialog.addButton("Abbrechen", QMessageBox.RejectRole)
         dialog.exec()
+        self._set_sam_prestart_pending(False)
         if dialog.clickedButton() is btn_start:
-            self._set_sam_start_pending(False)
             self._start_precision_test()
-        self._sam_resume_prompt_shown = False
+        self._sam_prestart_prompt_open = False
+
+    def _on_sam_reconnect_required(self, payload):
+        if self.wrk is None:
+            return
+        self._attach_sam_window_watcher()
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setWindowTitle("SAM Board")
+        dialog.setText("SAM Board trennen und neu verbinden.")
+        btn_ok = dialog.addButton("OK", QMessageBox.AcceptRole)
+        dialog.addButton("Abbrechen", QMessageBox.RejectRole)
+        dialog.exec()
+        if dialog.clickedButton() is not btn_ok:
+            self._sam_midrun_pending = False
+            self.wrk.provide_sam_reconnect_decision(False)
+            return
+        self._sam_midrun_pending = True
+        top = self.window()
+        if top is not None:
+            top.showMinimized()
+        else:
+            self.showMinimized()
+
+    def _maybe_prompt_resume_precision_after_sam(self):
+        if self._sam_midrun_prompt_open:
+            return
+        if not self._sam_midrun_pending:
+            return
+        if self.wrk is None:
+            self._sam_midrun_pending = False
+            return
+        self._sam_midrun_prompt_open = True
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Question)
+        dialog.setWindowTitle("SAM Board")
+        dialog.setText("Messung fortsetzen?")
+        btn_continue = dialog.addButton("Messung fortsetzen", QMessageBox.AcceptRole)
+        dialog.addButton("Abbrechen", QMessageBox.RejectRole)
+        dialog.exec()
+        self._sam_midrun_pending = False
+        if dialog.clickedButton() is btn_continue:
+            self.wrk.provide_sam_reconnect_decision(True)
+        else:
+            self.wrk.provide_sam_reconnect_decision(False)
+        self._sam_midrun_prompt_open = False
     def _start_precision_test(self):
         if self.dauer_running:
             QMessageBox.warning(self, "Test läuft", "Der Dauertest läuft bereits.")
             return
+        self._set_sam_prestart_pending(False)
         self._acquire_metadata()
         out_dir = self._ensure_run_dir()
         self._send_stage_db_event(user_id="100", event_label="Kalibrierung")
@@ -2926,6 +2980,7 @@ class StageControlView(QWidget):
         self.wrk.new_phase.connect(self._on_phase)
         self.wrk.step.connect(self._on_step)
         self.wrk.calib.connect(self._on_calib)
+        self.wrk.sam_reconnect_required.connect(self._on_sam_reconnect_required)
         self.wrk.done.connect(self._on_precision_done)
         self.wrk.error.connect(self._on_error)
         self.wrk.done.connect(self.thr.quit)
@@ -2946,8 +3001,15 @@ class StageControlView(QWidget):
         self.lbl_calib.setText(f"{x} / {y}")
     def _on_precision_done(self, data):
         self.running = False
+        self._set_sam_prestart_pending(False)
+        self._sam_midrun_pending = False
+        self._sam_midrun_prompt_open = False
         self.btn_start.setText("Kalibriermessung starten")
         self.btn_start.set_variant("primary")
+        if bool(data.get("aborted", False)):
+            self.lbl_phase.setText("ABGEBROCHEN")
+            QMessageBox.information(self, "Workflow abgebrochen", "Workflow nach Kalibrierung beendet (SAM-Reconnect nicht bestätigt).")
+            return
         self.lbl_phase.setText("BEENDET")
         out_dir = data["out"]
         plots = data["plots"]
@@ -3130,6 +3192,10 @@ class StageControlView(QWidget):
     def _on_thr_finished(self):
         self.running = False
         self.dauer_running = False
+        self._set_sam_prestart_pending(False)
+        self._sam_prestart_prompt_open = False
+        self._sam_midrun_pending = False
+        self._sam_midrun_prompt_open = False
         self.btn_start.setText("Start Precision Test")
         self.btn_start.set_variant("primary")
         self.btn_dauer.setText("Start Endurance Test")
@@ -3272,6 +3338,10 @@ class StageControlView(QWidget):
         QMessageBox.critical(self, "Error", msg)
         self.running = False
         self.dauer_running = False
+        self._set_sam_prestart_pending(False)
+        self._sam_prestart_prompt_open = False
+        self._sam_midrun_pending = False
+        self._sam_midrun_prompt_open = False
         self.btn_start.setText("Start Precision Test")
         self.btn_start.set_variant("primary")
         self.btn_dauer.setText("Start Endurance Test")

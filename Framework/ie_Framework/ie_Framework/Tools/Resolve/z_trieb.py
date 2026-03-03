@@ -12,12 +12,47 @@ from typing import Callable, Optional
 from pathlib import Path
 import ctypes
 
-# Make sure the vendor MCS package (in this repo) is importable even with the space in the folder name.
+# Make sure the vendor MCS package is importable.
+# Preferred location is the same directory that contains Resolve_Production_Tool.py.
 _HERE = Path(__file__).resolve().parent
-for _cand in (
-    _HERE / "Miltenyi CAN System (MCS)",
-    _HERE.parent / "Miltenyi CAN System (MCS)",
-):
+_MCS_DIRNAME = "Miltenyi CAN System (MCS)"
+
+
+def _iter_resolve_tool_dirs():
+    seen: set[str] = set()
+    main_mod = sys.modules.get("__main__")
+    main_file = getattr(main_mod, "__file__", None)
+    if main_file:
+        p = Path(main_file).resolve()
+        base = p.parent if p.is_file() else p
+        key = str(base)
+        if key not in seen:
+            seen.add(key)
+            yield base
+    for anchor in (Path.cwd().resolve(), _HERE):
+        for p in (anchor, *anchor.parents):
+            key = str(p)
+            if key in seen:
+                continue
+            seen.add(key)
+            if (p / "Resolve_Production_Tool.py").exists():
+                yield p
+
+
+_mcs_candidates = []
+for _base in _iter_resolve_tool_dirs():
+    _mcs_candidates.append(_base / _MCS_DIRNAME)
+_mcs_candidates.extend((
+    _HERE / _MCS_DIRNAME,
+    _HERE.parent / _MCS_DIRNAME,
+))
+
+_seen_cands: set[str] = set()
+for _cand in _mcs_candidates:
+    _key = str(_cand.resolve()) if _cand.exists() else str(_cand)
+    if _key in _seen_cands:
+        continue
+    _seen_cands.add(_key)
     if (_cand / "mcs").exists() and str(_cand) not in sys.path:
         sys.path.insert(0, str(_cand))
         break

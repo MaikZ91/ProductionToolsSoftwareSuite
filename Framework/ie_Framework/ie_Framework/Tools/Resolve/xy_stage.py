@@ -10,6 +10,7 @@ import datetime
 import os
 import pathlib
 import re
+import threading
 import time
 
 import numpy as np
@@ -683,6 +684,7 @@ def run_stage_calibration_and_measurement(
     on_phase=None,
     on_step=None,
     on_calib=None,
+    on_post_calibration_pause=None,
 ):
     """Orchestrate calibration first, then measurement, and return the combined payload."""
     batch = sanitize_batch(batch)
@@ -700,6 +702,18 @@ def run_stage_calibration_and_measurement(
         on_step=on_step,
         on_calib=on_calib,
     )
+    if on_post_calibration_pause is not None:
+        should_continue = bool(on_post_calibration_pause())
+        if not should_continue:
+            return {
+                "out": out,
+                "plots": [],
+                "calib": calib_info,
+                "batch": batch,
+                "meas_max_um": 0.0,
+                "aborted": True,
+                "abort_reason": "sam_reconnect_cancelled",
+            }
     meas_info = run_stage_measurement(
         sc,
         batch=batch,
@@ -713,6 +727,8 @@ def run_stage_calibration_and_measurement(
         "calib": calib_info,
         "batch": batch,
         "meas_max_um": meas_info["meas_max_um"],
+        "aborted": False,
+        "abort_reason": None,
     }
 
     
@@ -856,6 +872,7 @@ class TestWorker(QObject):
     done      = Signal(dict)
     error     = Signal(str)
     calib     = Signal(dict)
+    sam_reconnect_required = Signal(dict)
 
     def __init__(self, sc, batch: str = "NoBatch"):
         super().__init__()
@@ -863,6 +880,8 @@ class TestWorker(QObject):
         self.batch = sanitize_batch(batch)
         self._meas_max_um = None
         self._stop_requested = False
+        self._sam_pause_event = threading.Event()
+        self._sam_continue = False
 
     def stop(self):
         """
@@ -873,6 +892,21 @@ class TestWorker(QObject):
         future cooperative checks to key off `_stop_requested`.
         """
         self._stop_requested = True
+        self.provide_sam_reconnect_decision(False)
+
+    def provide_sam_reconnect_decision(self, continue_measurement: bool):
+        self._sam_continue = bool(continue_measurement)
+        self._sam_pause_event.set()
+
+    def _wait_for_sam_reconnect(self) -> bool:
+        self._sam_continue = False
+        self._sam_pause_event.clear()
+        self.sam_reconnect_required.emit({
+            "batch": self.batch,
+            "message": "SAM Board trennen und neu verbinden.",
+        })
+        self._sam_pause_event.wait()
+        return bool(self._sam_continue) and not self._stop_requested
 
     def run(self):
         try:
@@ -883,6 +917,7 @@ class TestWorker(QObject):
                 on_phase=self.new_phase.emit,
                 on_step=self.step.emit,
                 on_calib=self.calib.emit,
+                on_post_calibration_pause=self._wait_for_sam_reconnect,
             )
             self._meas_max_um = float(result.get("meas_max_um", 0.0))
             self.done.emit(result)
@@ -1020,7 +1055,7 @@ class ExtendedEnduranceTestWorker(QObject):
                         tx = int(np.random.randint(self.sc.low_lim['X'], self.sc.high_lim['X'] + 1))
                         ty = int(np.random.randint(self.sc.low_lim['Y'], self.sc.high_lim['Y'] + 1))
                         move_idx += 1
-                        self._log_move("GroÃŸe Amplituden", large_idx, est_total, tx, ty, move_idx, dwell)
+                        self._log_move("Große Amplituden", large_idx, est_total, tx, ty, move_idx, dwell)
                     if self.stop_at_ts and time.time() >= self.stop_at_ts:
                         break
                 now = time.time()
