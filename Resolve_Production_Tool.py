@@ -2576,6 +2576,10 @@ class StageControlView(QWidget):
         self._calib_vals = {"X": "---", "Y": "---"}
         self._meas_max_um = None
         self._dur_max_um = None
+        self._workflow_state = "idle"
+        self._calib_done_for_run = False
+        self._meas_done_for_run = False
+        self._active_stage_step = "none"
         self.MEAS_MAX_UM = 10.0
         self._last_db_sync_ts = 0.0
         # Threading/Workers
@@ -2585,8 +2589,6 @@ class StageControlView(QWidget):
         self.dauer_wrk = None
         self.executor = ThreadPoolExecutor(max_workers=3)
         self._sam_prestart_prompt_open = False
-        self._sam_midrun_pending = False
-        self._sam_midrun_prompt_open = False
         self._sam_window_ref = None
         self.setup_ui()
         # Real-time data storage
@@ -2647,10 +2649,13 @@ class StageControlView(QWidget):
         form_layout.addLayout(dur_row)
         btn_layout = QVBoxLayout()
         btn_layout.setSpacing(8)
-        self.btn_start = ModernButton("Kalibriermessung starten", "primary")
-        self.btn_start.clicked.connect(self.toggle_precision_test)
-        btn_layout.addWidget(self.btn_start)
-        self.btn_dauer = ModernButton("Dauertest starten", "secondary")
+        self.btn_calib = ModernButton("Kalibrierung starten", "primary")
+        self.btn_calib.clicked.connect(self.toggle_calibration_test)
+        btn_layout.addWidget(self.btn_calib)
+        self.btn_measure = ModernButton("Messung starten", "secondary")
+        self.btn_measure.clicked.connect(self.toggle_measurement_test)
+        btn_layout.addWidget(self.btn_measure)
+        self.btn_dauer = ModernButton("Dauertest starten", "ghost")
         self.btn_dauer.clicked.connect(self.toggle_endurance_test)
         btn_layout.addWidget(self.btn_dauer)
         row_btn = QHBoxLayout()
@@ -2694,6 +2699,31 @@ class StageControlView(QWidget):
         status_card = Card("QA-Status")
         status_card.set_compact()
         sl = QVBoxLayout()
+        wf_header = QHBoxLayout()
+        wf_header.addWidget(QLabel("Workflow"))
+        wf_header.addStretch()
+        self.lbl_workflow_badge = QLabel("BEREIT")
+        self.lbl_workflow_badge.setStyleSheet(
+            f"padding: 4px 10px; border-radius: 10px; font-weight: 800; "
+            f"color: {COLORS['text_muted']}; background-color: {hex_to_rgba(COLORS['border'], 0.25)};"
+        )
+        wf_header.addWidget(self.lbl_workflow_badge)
+        sl.addLayout(wf_header)
+        self.workflow_step_labels = []
+        step_row = QHBoxLayout()
+        step_row.setSpacing(6)
+        for text in ("1 Kalibrierung", "2 Messung", "3 Dauertest"):
+            lbl = QLabel(text)
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet(
+                f"padding: 5px 8px; border-radius: 8px; font-size: 11px; font-weight: 700; "
+                f"border: 1px solid {hex_to_rgba(COLORS['border'], 0.7)}; color: {COLORS['text_muted']}; "
+                f"background-color: {hex_to_rgba(COLORS['surface_light'], 0.75)};"
+            )
+            lbl.setMinimumHeight(26)
+            self.workflow_step_labels.append(lbl)
+            step_row.addWidget(lbl)
+        sl.addLayout(step_row)
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Kalibrierung (X/Y)"))
         self.lbl_calib = QLabel("--- / ---")
@@ -2750,6 +2780,8 @@ class StageControlView(QWidget):
         chart_card.add_widget(self.chart)
         right_col.addWidget(chart_card)
         layout.addLayout(right_col, 3)
+        self._set_workflow_state("idle")
+        self._refresh_stage_buttons()
     def add_input(self, layout, label, placeholder):
         lbl = QLabel(label.upper())
         lbl.setStyleSheet(f"font-size: 11px; font-weight: 700; color: {COLORS['text_muted']}; border: none; margin-bottom: 4px;")
@@ -2838,14 +2870,89 @@ class StageControlView(QWidget):
         LIVE_STAGE_BUS.set_active(bool(checked))
         if checked:
             LIVE_STAGE_BUS.push({"event": "stage_test_start", "ts": datetime.datetime.now()})
-    # --- Precision Test ---
-    def toggle_precision_test(self):
-        if self.running:
-            if self.wrk: self.wrk.stop() # Wait, TestWorker doesn't have stop? Checking...
-            self.btn_start.setText("Kalibriermessung starten")
-            self.btn_start.set_variant("primary")
-        else:
-            self._prompt_connect_sam_and_minimize_prestart()
+
+    def _set_workflow_state(self, state: str):
+        self._workflow_state = state
+        state_cfg = {
+            "idle": ("BEREIT", COLORS["text_muted"], COLORS["border"]),
+            "calib_running": ("KALIBRIERUNG LÄUFT", COLORS["primary"], COLORS["primary"]),
+            "calib_done": ("KALIBRIERT", COLORS["success"], COLORS["success"]),
+            "meas_running": ("MESSUNG LÄUFT", COLORS["primary"], COLORS["primary"]),
+            "meas_done": ("GEMESSEN", COLORS["success"], COLORS["success"]),
+            "dur_running": ("DAUERTEST LÄUFT", COLORS["primary"], COLORS["primary"]),
+            "finished": ("ABGESCHLOSSEN", COLORS["success"], COLORS["success"]),
+            "error": ("FEHLER", COLORS["danger"], COLORS["danger"]),
+        }
+        text, fg, bg = state_cfg.get(state, state_cfg["idle"])
+        self.lbl_workflow_badge.setText(text)
+        self.lbl_workflow_badge.setStyleSheet(
+            f"padding: 4px 10px; border-radius: 10px; font-weight: 800; "
+            f"color: {fg}; background-color: {hex_to_rgba(bg, 0.16)}; border: 1px solid {hex_to_rgba(bg, 0.4)};"
+        )
+        self._update_workflow_stepper()
+
+    def _update_workflow_stepper(self):
+        states = [("calib_done", "calib_running"), ("meas_done", "meas_running"), ("finished", "dur_running")]
+        for idx, lbl in enumerate(self.workflow_step_labels):
+            done_state, run_state = states[idx]
+            if idx == 2 and self._workflow_state in {"meas_done", "calib_done", "idle"}:
+                color = COLORS["text_muted"]
+                bg = COLORS["surface_light"]
+            elif self._workflow_state == run_state:
+                color = COLORS["primary"]
+                bg = COLORS["primary"]
+            elif self._workflow_state in {"error"}:
+                color = COLORS["danger"]
+                bg = COLORS["danger"]
+            elif done_state == "calib_done" and self._calib_done_for_run:
+                color = COLORS["success"]
+                bg = COLORS["success"]
+            elif done_state == "meas_done" and self._meas_done_for_run:
+                color = COLORS["success"]
+                bg = COLORS["success"]
+            elif done_state == "finished" and self._workflow_state == "finished":
+                color = COLORS["success"]
+                bg = COLORS["success"]
+            else:
+                color = COLORS["text_muted"]
+                bg = COLORS["surface_light"]
+            lbl.setStyleSheet(
+                f"padding: 5px 8px; border-radius: 8px; font-size: 11px; font-weight: 700; "
+                f"border: 1px solid {hex_to_rgba(bg, 0.45)}; color: {color}; background-color: {hex_to_rgba(bg, 0.18)};"
+            )
+
+    def _refresh_stage_buttons(self):
+        busy = bool(self.running or self.dauer_running)
+        if self._active_stage_step == "calib" and self.running:
+            self.btn_calib.setText("Kalibrierung stoppen")
+            self.btn_calib.set_variant("danger")
+            self.btn_calib.setEnabled(True)
+            self.btn_measure.setEnabled(False)
+            self.btn_dauer.setEnabled(False)
+            return
+        if self._active_stage_step == "meas" and self.running:
+            self.btn_measure.setText("Messung stoppen")
+            self.btn_measure.set_variant("danger")
+            self.btn_measure.setEnabled(True)
+            self.btn_calib.setEnabled(False)
+            self.btn_dauer.setEnabled(False)
+            return
+        if self.dauer_running:
+            self.btn_dauer.setText("Dauertest stoppen")
+            self.btn_dauer.set_variant("danger")
+            self.btn_dauer.setEnabled(True)
+            self.btn_calib.setEnabled(False)
+            self.btn_measure.setEnabled(False)
+            return
+        self.btn_calib.setText("Kalibrierung starten")
+        self.btn_calib.set_variant("primary")
+        self.btn_measure.setText("Messung starten")
+        self.btn_measure.set_variant("secondary")
+        self.btn_dauer.setText("Dauertest starten")
+        self.btn_dauer.set_variant("ghost")
+        self.btn_calib.setEnabled(not busy)
+        self.btn_measure.setEnabled(not busy)
+        self.btn_dauer.setEnabled(not busy)
 
     def _set_sam_prestart_pending(self, pending: bool):
         UI_CONFIG.set(self._SAM_PRESTART_PENDING_KEY, bool(pending))
@@ -2891,10 +2998,8 @@ class StageControlView(QWidget):
             if event.type() == QEvent.WindowStateChange:
                 if not self._sam_window_ref.isMinimized():
                     QTimer.singleShot(0, self._maybe_prompt_start_precision_after_prestart)
-                    QTimer.singleShot(0, self._maybe_prompt_resume_precision_after_sam)
             elif event.type() == QEvent.Show:
                 QTimer.singleShot(0, self._maybe_prompt_start_precision_after_prestart)
-                QTimer.singleShot(0, self._maybe_prompt_resume_precision_after_sam)
         return super().eventFilter(obj, event)
 
     def _maybe_prompt_start_precision_after_prestart(self):
@@ -2910,136 +3015,200 @@ class StageControlView(QWidget):
         dialog.setIcon(QMessageBox.Question)
         dialog.setWindowTitle("SAM Board")
         dialog.setText("SAM Board verbunden?")
-        btn_start = dialog.addButton("Test starten", QMessageBox.AcceptRole)
+        btn_start = dialog.addButton("Kalibrierung starten", QMessageBox.AcceptRole)
         dialog.addButton("Abbrechen", QMessageBox.RejectRole)
         dialog.exec()
         self._set_sam_prestart_pending(False)
         if dialog.clickedButton() is btn_start:
-            self._start_precision_test()
+            self._start_calibration_test()
         self._sam_prestart_prompt_open = False
 
-    def _on_sam_reconnect_required(self, payload):
-        if self.wrk is None:
+    def toggle_calibration_test(self):
+        if self.running and self._active_stage_step == "calib":
+            if self.wrk:
+                self.wrk.stop()
             return
-        self._attach_sam_window_watcher()
-        dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Information)
-        dialog.setWindowTitle("SAM Board")
-        dialog.setText("SAM Board trennen und neu verbinden.")
-        btn_ok = dialog.addButton("OK", QMessageBox.AcceptRole)
-        dialog.addButton("Abbrechen", QMessageBox.RejectRole)
-        dialog.exec()
-        if dialog.clickedButton() is not btn_ok:
-            self._sam_midrun_pending = False
-            self.wrk.provide_sam_reconnect_decision(False)
+        if self.running or self.dauer_running:
+            QMessageBox.warning(self, "Test läuft", "Es läuft bereits ein anderer Test.")
             return
-        self._sam_midrun_pending = True
-        top = self.window()
-        if top is not None:
-            top.showMinimized()
-        else:
-            self.showMinimized()
+        self._prompt_connect_sam_and_minimize_prestart()
 
-    def _maybe_prompt_resume_precision_after_sam(self):
-        if self._sam_midrun_prompt_open:
-            return
-        if not self._sam_midrun_pending:
-            return
-        if self.wrk is None:
-            self._sam_midrun_pending = False
-            return
-        self._sam_midrun_prompt_open = True
-        dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Question)
-        dialog.setWindowTitle("SAM Board")
-        dialog.setText("Messung fortsetzen?")
-        btn_continue = dialog.addButton("Messung fortsetzen", QMessageBox.AcceptRole)
-        dialog.addButton("Abbrechen", QMessageBox.RejectRole)
-        dialog.exec()
-        self._sam_midrun_pending = False
-        if dialog.clickedButton() is btn_continue:
-            self.wrk.provide_sam_reconnect_decision(True)
-        else:
-            self.wrk.provide_sam_reconnect_decision(False)
-        self._sam_midrun_prompt_open = False
-    def _start_precision_test(self):
-        if self.dauer_running:
-            QMessageBox.warning(self, "Test läuft", "Der Dauertest läuft bereits.")
+    def _start_calibration_test(self):
+        if self.running or self.dauer_running:
+            QMessageBox.warning(self, "Test läuft", "Es läuft bereits ein anderer Test.")
             return
         self._set_sam_prestart_pending(False)
         self._acquire_metadata()
         out_dir = self._ensure_run_dir()
+        self._calib_done_for_run = False
+        self._meas_done_for_run = False
+        self._meas_max_um = None
+        self._dur_max_um = None
         self._send_stage_db_event(user_id="100", event_label="Kalibrierung")
         self.running = True
-        self.btn_start.setText("Test stoppen")
-        self.btn_start.set_variant("danger")
+        self._active_stage_step = "calib"
+        self._set_workflow_state("calib_running")
+        self._refresh_stage_buttons()
         self.thr = QThread()
-        self.wrk = resolve_stage.TestWorker(self.sc, batch=self._batch)
+        self.wrk = resolve_stage.CalibrationWorker(self.sc, batch=self._batch, out_dir=out_dir)
         self.wrk.moveToThread(self.thr)
         self.thr.started.connect(self.wrk.run)
         self.wrk.new_phase.connect(self._on_phase)
         self.wrk.step.connect(self._on_step)
         self.wrk.calib.connect(self._on_calib)
-        self.wrk.sam_reconnect_required.connect(self._on_sam_reconnect_required)
-        self.wrk.done.connect(self._on_precision_done)
+        self.wrk.done.connect(self._on_calibration_done)
         self.wrk.error.connect(self._on_error)
         self.wrk.done.connect(self.thr.quit)
         self.wrk.error.connect(self.thr.quit)
         self.thr.finished.connect(self._on_thr_finished)
         self.thr.start()
+
+    def _on_calibration_done(self, data):
+        self.running = False
+        self._active_stage_step = "none"
+        self._set_sam_prestart_pending(False)
+        if bool(data.get("aborted", False)):
+            self.lbl_phase.setText("KALIBRIERUNG ABGEBROCHEN")
+            self._set_workflow_state("idle")
+            self._refresh_stage_buttons()
+            QMessageBox.information(self, "Kalibrierung", "Kalibrierung wurde gestoppt.")
+            return
+        self.lbl_phase.setText("KALIBRIERUNG BEENDET")
+        out_dir = pathlib.Path(data.get("out", self._ensure_run_dir()))
+        batch = data.get("batch", self._batch)
+        self._calib_done_for_run = True
+        self._set_workflow_state("calib_done")
+        report_path = out_dir / f"report_{batch}.pdf"
+        try:
+            self._write_report_pdf(report_path, self._collect_report_images(out_dir, batch))
+        except Exception as e:
+            print(f"Report Error: {e}")
+        self._refresh_stage_buttons()
+        QMessageBox.information(
+            self,
+            "Kalibrierung beendet",
+            "Kalibrierung abgeschlossen.\nNeue stepsPerMeter wurden geschrieben.",
+        )
+
+    def toggle_measurement_test(self):
+        if self.running and self._active_stage_step == "meas":
+            if self.wrk:
+                self.wrk.stop()
+            return
+        if self.running or self.dauer_running:
+            QMessageBox.warning(self, "Test läuft", "Es läuft bereits ein anderer Test.")
+            return
+        if not self._calib_done_for_run:
+            warn = QMessageBox(self)
+            warn.setIcon(QMessageBox.Warning)
+            warn.setWindowTitle("Messung ohne Kalibrierung")
+            warn.setText("Es wurde in diesem Workflow noch keine Kalibrierung abgeschlossen. Messung trotzdem starten?")
+            btn_continue = warn.addButton("Weiter", QMessageBox.AcceptRole)
+            warn.addButton("Abbrechen", QMessageBox.RejectRole)
+            warn.exec()
+            if warn.clickedButton() is not btn_continue:
+                return
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Question)
+        dialog.setWindowTitle("SAM Board")
+        dialog.setText("SAM Board getrennt und neu verbunden?")
+        btn_continue = dialog.addButton("Messung starten", QMessageBox.AcceptRole)
+        dialog.addButton("Abbrechen", QMessageBox.RejectRole)
+        dialog.exec()
+        if dialog.clickedButton() is btn_continue:
+            self._start_measurement_test()
+
+    def _start_measurement_test(self):
+        if self.running or self.dauer_running:
+            QMessageBox.warning(self, "Test läuft", "Es läuft bereits ein anderer Test.")
+            return
+        self._acquire_metadata()
+        out_dir = self._ensure_run_dir()
+        self._send_stage_db_event(user_id="101", event_label="Messung")
+        self.running = True
+        self._active_stage_step = "meas"
+        self._set_workflow_state("meas_running")
+        self._refresh_stage_buttons()
+        self.thr = QThread()
+        self.wrk = resolve_stage.MeasurementWorker(self.sc, batch=self._batch, out_dir=out_dir)
+        self.wrk.moveToThread(self.thr)
+        self.thr.started.connect(self.wrk.run)
+        self.wrk.new_phase.connect(self._on_phase)
+        self.wrk.step.connect(self._on_step)
+        self.wrk.done.connect(self._on_measurement_done)
+        self.wrk.error.connect(self._on_error)
+        self.wrk.done.connect(self.thr.quit)
+        self.wrk.error.connect(self.thr.quit)
+        self.thr.finished.connect(self._on_thr_finished)
+        self.thr.start()
+
+    def _on_measurement_done(self, data):
+        self.running = False
+        self._active_stage_step = "none"
+        if bool(data.get("aborted", False)):
+            self.lbl_phase.setText("MESSUNG ABGEBROCHEN")
+            self._set_workflow_state("calib_done" if self._calib_done_for_run else "idle")
+            self._refresh_stage_buttons()
+            QMessageBox.information(self, "Messung", "Messung wurde gestoppt.")
+            return
+        self.lbl_phase.setText("MESSUNG BEENDET")
+        out_dir = pathlib.Path(data.get("out", self._ensure_run_dir()))
+        plots = data.get("plots", [])
+        batch = data.get("batch", self._batch)
+        max_abs_um = 0.0
+        for ax, mot, enc, calc, spm, epm in plots:
+            diff_um = np.abs((enc - calc) / epm * 1e6)
+            max_abs_um = max(max_abs_um, float(np.max(diff_um)))
+            self._plot_and_save(ax, mot, enc, calc, spm, epm, out_dir, batch)
+        self._meas_max_um = max_abs_um
+        self._meas_done_for_run = True
+        self._set_workflow_state("meas_done")
+        report_path = out_dir / f"report_{batch}.pdf"
+        try:
+            self._write_report_pdf(report_path, self._collect_report_images(out_dir, batch))
+        except Exception as e:
+            print(f"Report Error: {e}")
+        self._refresh_stage_buttons()
+        meas_ok = (self._meas_max_um <= self.MEAS_MAX_UM)
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setWindowTitle("Messung beendet")
+        dialog.setText(
+            "Messung beendet.\n"
+            f"Max. Abweichung: {self._meas_max_um:.2f} µm\n"
+            f"Limit: {self.MEAS_MAX_UM:.1f} µm -> {'OK' if meas_ok else 'FEHLER'}"
+        )
+        dialog.exec()
+
     def _on_phase(self, name, maxi):
         self.lbl_phase.setText(name.upper())
         self.progress.setMaximum(maxi)
         self.progress.setValue(0)
+
     def _on_step(self, val):
         self.progress.setValue(val)
+
     def _on_calib(self, d):
         x = d.get("X_stepsPerMeter", "---")
         y = d.get("Y_stepsPerMeter", "---")
         self._calib_vals["X"] = x
         self._calib_vals["Y"] = y
         self.lbl_calib.setText(f"{x} / {y}")
-    def _on_precision_done(self, data):
-        self.running = False
-        self._set_sam_prestart_pending(False)
-        self._sam_midrun_pending = False
-        self._sam_midrun_prompt_open = False
-        self.btn_start.setText("Kalibriermessung starten")
-        self.btn_start.set_variant("primary")
-        if bool(data.get("aborted", False)):
-            self.lbl_phase.setText("ABGEBROCHEN")
-            QMessageBox.information(self, "Workflow abgebrochen", "Workflow nach Kalibrierung beendet (SAM-Reconnect nicht bestätigt).")
-            return
-        self.lbl_phase.setText("BEENDET")
-        out_dir = data["out"]
-        plots = data["plots"]
-        batch = data.get("batch", "NoBatch")
-        fig_paths = []
-        max_abs_um = 0.0
-        for ax, mot, enc, calc, spm, epm in plots:
-            diff_um = np.abs((enc - calc) / epm * 1e6)
-            max_abs_um = max(max_abs_um, float(np.max(diff_um)))
-            png = self._plot_and_save(ax, mot, enc, calc, spm, epm, out_dir, batch)
-            fig_paths.append(str(png))
-        self._meas_max_um = max_abs_um
-        # Check calib images
-        cal_x = out_dir / f"calib_x_{batch}.png"
-        cal_y = out_dir / f"calib_y_{batch}.png"
-        if cal_x.exists(): fig_paths.insert(0, str(cal_x))
-        if cal_y.exists(): fig_paths.insert(1, str(cal_y))
-        report_path = out_dir / f"report_{batch}.pdf"
-        try:
-            self._write_report_pdf(report_path, fig_paths)
-        except Exception as e:
-            print(f"Report Error: {e}")
-        meas_ok = (self._meas_max_um <= self.MEAS_MAX_UM)
-        msg = (
-            f"Kalibriermessung beendet.\n"
-            f"Daten gespeichert: lokal und in DB.\n"
-            f"Max. Abweichung: {self._meas_max_um:.2f} µm\n"
-            f"Limit: {self.MEAS_MAX_UM:.1f} µm -> {'OK' if meas_ok else 'FEHLER'}"
-        )
-        QMessageBox.information(self, "Test Beendet", msg)
+
+    def _collect_report_images(self, out_dir: pathlib.Path, batch: str):
+        images = []
+        for name in [
+            f"calib_x_{batch}.png",
+            f"calib_y_{batch}.png",
+            f"X_{batch}.png",
+            f"Y_{batch}.png",
+            f"dauertest_{batch}.png",
+        ]:
+            f = out_dir / name
+            if f.exists():
+                images.append(str(f))
+        return images
+
     # --- Endurance Test ---
     def toggle_endurance_test(self):
         if self.dauer_running:
@@ -3048,7 +3217,7 @@ class StageControlView(QWidget):
             self._start_endurance_test()
     def _start_endurance_test(self):
         if self.running:
-            QMessageBox.warning(self, "Test läuft", "Die Kalibriermessung läuft bereits.")
+            QMessageBox.warning(self, "Test läuft", "Es läuft bereits Kalibrierung oder Messung.")
             return
         if hasattr(self, "duration_hours"):
             self._duration_sec = int(float(self.duration_hours.currentText()) * 3600)
@@ -3061,8 +3230,9 @@ class StageControlView(QWidget):
             QMessageBox.critical(self, "Fehler", f"Konnte aktuelle Position nicht abrufen: {e}")
             return
         self.dauer_running = True
-        self.btn_dauer.setText("Dauertest stoppen")
-        self.btn_dauer.set_variant("danger")
+        self._active_stage_step = "dur"
+        self._set_workflow_state("dur_running")
+        self._refresh_stage_buttons()
         self.x_data.clear()
         self.y1_data.clear()
         self.y2_data.clear()
@@ -3150,13 +3320,20 @@ class StageControlView(QWidget):
         if self.dauer_wrk:
             self.dauer_wrk.stop()
         self.dauer_running = False
-        self.btn_dauer.setText("Start Endurance Test")
-        self.btn_dauer.set_variant("secondary")
+        self._active_stage_step = "none"
+        if self._meas_done_for_run:
+            self._set_workflow_state("meas_done")
+        elif self._calib_done_for_run:
+            self._set_workflow_state("calib_done")
+        else:
+            self._set_workflow_state("idle")
+        self._refresh_stage_buttons()
         LIVE_STAGE_BUS.set_active(False)
     def _on_endurance_finished(self, data):
         self.dauer_running = False
-        self.btn_dauer.setText("Dauertest starten")
-        self.btn_dauer.set_variant("secondary")
+        self._active_stage_step = "none"
+        self._set_workflow_state("finished")
+        self._refresh_stage_buttons()
         self.lbl_phase.setText("BEENDET")
         LIVE_STAGE_BUS.set_active(False)
         outdir = self._ensure_run_dir()
@@ -3171,14 +3348,8 @@ class StageControlView(QWidget):
         limit = float(data.get("limit_um", resolve_stage.DUR_MAX_UM))
         # Update report
         try:
-            images = []
-            for name in [f"calib_x_{batch}.png", f"calib_y_{batch}.png",
-                         f"X_{batch}.png", f"Y_{batch}.png",
-                         f"dauertest_{batch}.png"]:
-                f = outdir / name
-                if f.exists(): images.append(str(f))
             report_path = outdir / f"report_{batch}.pdf"
-            self._write_report_pdf(report_path, images)
+            self._write_report_pdf(report_path, self._collect_report_images(outdir, batch))
         except Exception as e:
             print(f"Report Update Error: {e}")
         dur_ok = (self._dur_max_um <= limit)
@@ -3191,15 +3362,10 @@ class StageControlView(QWidget):
         QMessageBox.information(self, "Test Beendet", msg)
     def _on_thr_finished(self):
         self.running = False
-        self.dauer_running = False
         self._set_sam_prestart_pending(False)
         self._sam_prestart_prompt_open = False
-        self._sam_midrun_pending = False
-        self._sam_midrun_prompt_open = False
-        self.btn_start.setText("Start Precision Test")
-        self.btn_start.set_variant("primary")
-        self.btn_dauer.setText("Start Endurance Test")
-        self.btn_dauer.set_variant("secondary")
+        self._active_stage_step = "none"
+        self._refresh_stage_buttons()
     def shutdown(self):
         try:
             if self.wrk:
@@ -3338,14 +3504,12 @@ class StageControlView(QWidget):
         QMessageBox.critical(self, "Error", msg)
         self.running = False
         self.dauer_running = False
+        self.lbl_phase.setText("FEHLER")
+        self._active_stage_step = "none"
+        self._set_workflow_state("error")
         self._set_sam_prestart_pending(False)
         self._sam_prestart_prompt_open = False
-        self._sam_midrun_pending = False
-        self._sam_midrun_prompt_open = False
-        self.btn_start.setText("Start Precision Test")
-        self.btn_start.set_variant("primary")
-        self.btn_dauer.setText("Start Endurance Test")
-        self.btn_dauer.set_variant("secondary")
+        self._refresh_stage_buttons()
 class BlazeStageTestWorker(QObject):
     progress = Signal(int, int)
     finished = Signal()

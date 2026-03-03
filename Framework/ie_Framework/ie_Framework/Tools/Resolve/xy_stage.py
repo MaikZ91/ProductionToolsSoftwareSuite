@@ -924,6 +924,84 @@ class TestWorker(QObject):
         except Exception as e:
             self.error.emit(str(e))
 
+
+class CalibrationWorker(QObject):
+    """Worker for running only X/Y calibration."""
+    new_phase = Signal(str, int)
+    step = Signal(int)
+    done = Signal(dict)
+    error = Signal(str)
+    calib = Signal(dict)
+
+    def __init__(self, sc, batch: str = "NoBatch", out_dir: pathlib.Path | None = None):
+        super().__init__()
+        self.sc = sc
+        self.batch = sanitize_batch(batch)
+        self.out_dir = pathlib.Path(out_dir) if out_dir is not None else None
+        self._stop_requested = False
+
+    def stop(self):
+        self._stop_requested = True
+
+    def run(self):
+        try:
+            if self.out_dir is None:
+                raise ValueError("out_dir is required for CalibrationWorker")
+            calib_info = run_stage_calibration(
+                self.sc,
+                batch=self.batch,
+                out_dir=self.out_dir,
+                on_phase=self.new_phase.emit,
+                on_step=self.step.emit,
+                on_calib=self.calib.emit,
+            )
+            self.done.emit({
+                "out": self.out_dir,
+                "batch": self.batch,
+                "calib": calib_info,
+                "aborted": bool(self._stop_requested),
+            })
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class MeasurementWorker(QObject):
+    """Worker for running only X/Y measurement with current calibration."""
+    new_phase = Signal(str, int)
+    step = Signal(int)
+    done = Signal(dict)
+    error = Signal(str)
+
+    def __init__(self, sc, batch: str = "NoBatch", out_dir: pathlib.Path | None = None):
+        super().__init__()
+        self.sc = sc
+        self.batch = sanitize_batch(batch)
+        self.out_dir = pathlib.Path(out_dir) if out_dir is not None else None
+        self._stop_requested = False
+
+    def stop(self):
+        self._stop_requested = True
+
+    def run(self):
+        try:
+            if self.out_dir is None:
+                raise ValueError("out_dir is required for MeasurementWorker")
+            meas_info = run_stage_measurement(
+                self.sc,
+                batch=self.batch,
+                on_phase=self.new_phase.emit,
+                on_step=self.step.emit,
+            )
+            self.done.emit({
+                "out": self.out_dir,
+                "batch": self.batch,
+                "plots": meas_info.get("plots", []),
+                "meas_max_um": float(meas_info.get("meas_max_um", 0.0)),
+                "aborted": bool(self._stop_requested),
+            })
+        except Exception as e:
+            self.error.emit(str(e))
+
 class ExtendedEnduranceTestWorker(QObject):
     """Endurance-test worker with alternating small/large random moves."""
     update   = Signal(dict)
