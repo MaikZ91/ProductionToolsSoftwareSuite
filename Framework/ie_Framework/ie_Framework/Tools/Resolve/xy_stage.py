@@ -654,6 +654,7 @@ def run_stage_measurement(
     on_step=None,
 ):
     """Run X/Y zig-zag measurement and return plot data + max error."""
+    sc = reconnect_stage_controller(sc)
     batch = sanitize_batch(batch)
     plot_data = []
     max_abs_um = 0.0
@@ -815,6 +816,7 @@ class StageController:
         """
         # `pmac_connect` transparently falls back to the in-memory dummy backend
         # when no hardware backend is available or the first PMAC call fails.
+        self.uri = uri
         self.conn, self.status = pmac_connect(uri), {}
 
         # Prime `self.status` once so downstream reads can immediately access
@@ -865,6 +867,12 @@ class StageController:
         """
         self.refresh()
         return self.status[f"{a.lower()}Pos_encoderSteps"]
+
+
+def reconnect_stage_controller(sc: StageController | None = None) -> StageController:
+    """Create a fresh StageController (new PMAC connection), preserving URI when available."""
+    uri = getattr(sc, "uri", "tcp://127.0.0.1:5050")
+    return StageController(uri=uri)
 
 class TestWorker(QObject):
     new_phase = Signal(str, int)
