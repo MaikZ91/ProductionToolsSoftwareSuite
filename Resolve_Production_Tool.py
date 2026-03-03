@@ -2559,6 +2559,8 @@ class ZTriebView(QWidget):
         self.shutdown()
         super().closeEvent(event)
 class StageControlView(QWidget):
+    _SAM_PENDING_KEY = "stage_precision_waiting_for_sam"
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -2582,12 +2584,14 @@ class StageControlView(QWidget):
         self.dauer_thr = None
         self.dauer_wrk = None
         self.executor = ThreadPoolExecutor(max_workers=3)
+        self._sam_resume_prompt_shown = False
         self.setup_ui()
         # Real-time data storage
         self.x_data = deque(maxlen=300)
         self.y1_data = deque(maxlen=300)
         self.y2_data = deque(maxlen=300)
         self.tick = 0
+        QTimer.singleShot(0, self._maybe_prompt_sam_connected)
     def setup_ui(self):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -2731,8 +2735,8 @@ class StageControlView(QWidget):
         chart_card.add_layout(top_row)
         self.chart = ModernChart(height=5)
         self.chart.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.line_x, = self.chart.ax.plot([], [], color=COLORS['primary'], linewidth=2, label="Fehler X")
-        self.line_y, = self.chart.ax.plot([], [], color=COLORS['secondary'], linewidth=2, label="Fehler Y")
+        self.line_x, = self.chart.ax.plot([], [], color=COLORS['success'], linewidth=2, label="Fehler X")
+        self.line_y, = self.chart.ax.plot([], [], color=COLORS['warning'], linewidth=2, label="Fehler Y")
         self.chart.ax.set_xlabel("Zeit [min]", color=COLORS['text_muted'])
         self.chart.ax.set_ylabel("Abweichung [µm]", color=COLORS['text_muted'])
         # Chart Legend
@@ -2837,11 +2841,46 @@ class StageControlView(QWidget):
             self.btn_start.setText("Kalibriermessung starten")
             self.btn_start.set_variant("primary")
         else:
-            QMessageBox.information(
-                self,
-                "Hinweis",
-                "Öffne zuerst das Functional Model und Connect das SAM Board."
-            )
+            self._prompt_connect_sam_and_minimize()
+
+    def _set_sam_start_pending(self, pending: bool):
+        UI_CONFIG.set(self._SAM_PENDING_KEY, bool(pending))
+
+    def _is_sam_start_pending(self) -> bool:
+        return bool(UI_CONFIG.get(self._SAM_PENDING_KEY, False))
+
+    def _prompt_connect_sam_and_minimize(self):
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setWindowTitle("Hinweis")
+        dialog.setText("Öffne zuerst das Functional Model und Connect das SAM Board.")
+        btn_ok = dialog.addButton("OK", QMessageBox.AcceptRole)
+        dialog.addButton("Abbrechen", QMessageBox.RejectRole)
+        dialog.exec()
+        if dialog.clickedButton() is not btn_ok:
+            return
+        self._set_sam_start_pending(True)
+        top = self.window()
+        if top is not None:
+            top.showMinimized()
+        else:
+            self.showMinimized()
+
+    def _maybe_prompt_sam_connected(self):
+        if self._sam_resume_prompt_shown:
+            return
+        if not self._is_sam_start_pending():
+            return
+        self._sam_resume_prompt_shown = True
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Question)
+        dialog.setWindowTitle("SAM Board")
+        dialog.setText("SAM Board verbunden?")
+        btn_start = dialog.addButton("Test starten", QMessageBox.AcceptRole)
+        dialog.addButton("Später", QMessageBox.RejectRole)
+        dialog.exec()
+        if dialog.clickedButton() is btn_start:
+            self._set_sam_start_pending(False)
             self._start_precision_test()
     def _start_precision_test(self):
         if self.dauer_running:
