@@ -1217,13 +1217,15 @@ class DashboardView(QWidget):
         container.value_label = v_lbl
         return container
     def trigger_refresh(self):
-        """Manually restart the timer and fetch data."""
-        if not self.timer.isActive():
-            self.timer.start(10000)
+        """Manual refresh only (no background polling)."""
         self.update_data()
 
     def update_data(self):
         """Starts a background thread to fetch data."""
+        if not self.isVisible():
+            if self.timer.isActive():
+                self.timer.stop()
+            return
         if self._is_fetching:
             return
         testtype = self.combo_testtype.currentText()
@@ -1242,6 +1244,13 @@ class DashboardView(QWidget):
                 print(f"Background Fetch Error: {e}")
                 self.data_updated.emit(pd.DataFrame(), False)
         threading.Thread(target=task, daemon=True).start()
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.update_data()
+    def hideEvent(self, event):
+        if self.timer.isActive():
+            self.timer.stop()
+        super().hideEvent(event)
     def _on_data_received(self, df, connected):
         """Processes the background result on the main thread."""
         self._is_fetching = False
@@ -2828,6 +2837,11 @@ class StageControlView(QWidget):
             self.btn_start.setText("Kalibriermessung starten")
             self.btn_start.set_variant("primary")
         else:
+            QMessageBox.information(
+                self,
+                "Hinweis",
+                "Öffne zuerst das Functional Model und Connect das SAM Board."
+            )
             self._start_precision_test()
     def _start_precision_test(self):
         if self.dauer_running:
@@ -3092,8 +3106,8 @@ class StageControlView(QWidget):
         def style_ax(ax):
             ax.set_facecolor(COLORS['surface'])
             ax.tick_params(colors=COLORS['text'], labelsize=9)
-            ax.xaxis.label.set_color(COLORS['text_muted'])
-            ax.yaxis.label.set_color(COLORS['text_muted'])
+            ax.xaxis.label.set_color(COLORS['text'])
+            ax.yaxis.label.set_color(COLORS['text'])
             ax.title.set_color(COLORS['text'])
             ax.grid(True, color=COLORS['border'], linestyle='--', alpha=0.3)
             for spine in ax.spines.values():
@@ -3164,20 +3178,29 @@ class StageControlView(QWidget):
         ]
 
         all_paths = list(image_paths or [])
-        chart_paths = []
-        for key in ("dauertest_", "X_", "Y_"):
-            for p in list(all_paths):
-                if key in pathlib.Path(p).name:
-                    chart_paths.append(p)
-                    all_paths.remove(p)
-        chart_paths = chart_paths[:2]
-        image_paths = all_paths[:4]
+        calib_paths = []
+        meas_paths = []
+        other_paths = []
+        for p in all_paths:
+            name = pathlib.Path(p).name.lower()
+            if name.startswith("calib_"):
+                calib_paths.append(p)
+            elif name.startswith("x_") or name.startswith("y_") or name.startswith("dauertest_"):
+                meas_paths.append(p)
+            else:
+                other_paths.append(p)
+
+        calib_paths = calib_paths[:4]
+        meas_paths = meas_paths[:4]
+        other_paths = other_paths[:4]
 
         pages = [{"type": "summary", "title": "Stage Test Report", "lines": summary_lines}]
-        if chart_paths:
-            pages.append({"type": "image_grid", "title": "Diagramme", "paths": chart_paths, "cols": 2})
-        if image_paths:
-            pages.append({"type": "image_grid", "title": "Bilder", "paths": image_paths, "cols": 2})
+        if calib_paths:
+            pages.append({"type": "image_grid", "title": "Kalibrierung", "paths": calib_paths, "cols": 2})
+        if meas_paths:
+            pages.append({"type": "image_grid", "title": "Messung", "paths": meas_paths, "cols": 2})
+        if other_paths:
+            pages.append({"type": "image_grid", "title": "Bilder", "paths": other_paths, "cols": 2})
         local_storage.PdfModule.write_pdf(pdf_path, pages, db_test_type="gitterschieber_tool")
     def _on_error(self, msg):
         QMessageBox.critical(self, "Error", msg)
