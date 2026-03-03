@@ -49,5 +49,6 @@
         "text": "Optikk\u00f6rper",
         "fixed_width": 198,
         "fixed_height": 42
-    }
+    },
+    "stage_precision_waiting_for_sam_prestart": false
 }
