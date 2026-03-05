@@ -2746,6 +2746,8 @@ class StageControlView(QWidget):
         chart_card.add_layout(top_row)
         self.chart = ModernChart(height=5)
         self.chart.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.chart.setMinimumHeight(220)
+        self.chart.setMaximumHeight(320)
         self.line_x, = self.chart.ax.plot([], [], color=COLORS['success'], linewidth=2, label="Fehler X")
         self.line_y, = self.chart.ax.plot([], [], color=COLORS['warning'], linewidth=2, label="Fehler Y")
         self.chart.ax.set_xlabel("Zeit [min]", color=COLORS['text_muted'])
@@ -2755,7 +2757,7 @@ class StageControlView(QWidget):
         leg.get_frame().set_linewidth(1)
         self.chart.fig.subplots_adjust(left=0.08, right=0.98, top=0.92, bottom=0.12)
         chart_card.add_widget(self.chart)
-        right_col.addWidget(chart_card)
+        right_col.addWidget(chart_card, 1)
 
         plot_card = Card("Ergebnisplots")
         plot_card.set_compact()
@@ -2775,7 +2777,7 @@ class StageControlView(QWidget):
         self.plot_preview_grid.setVerticalSpacing(8)
         self.plot_scroll.setWidget(self.plot_preview_container)
         plot_card.add_widget(self.plot_scroll)
-        right_col.addWidget(plot_card, 2)
+        right_col.addWidget(plot_card, 3)
 
         layout.addLayout(right_col, 3)
         self._set_workflow_state("idle")
