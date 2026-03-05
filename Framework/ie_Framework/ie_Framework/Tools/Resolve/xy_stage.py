@@ -49,7 +49,8 @@ def connect_and_read_stage_config(uri: str = "tcp://127.0.0.1:5050", connect_pma
     res = pmac_get_stage_pos_info(stageStatus)
 
     if stageStatus.get("error"):
-        print("Something went wrong: ", stageStatus.get("error"))
+        # print("Something went wrong: ", stageStatus.get("error"))
+        pass
     else:
         for key, label in (
             ("xPos", "xPos"),
@@ -65,7 +66,8 @@ def connect_and_read_stage_config(uri: str = "tcp://127.0.0.1:5050", connect_pma
             ("zPos_samBoardSteps", "zPos_samBoardSteps"),
         ):
             if key in stageStatus:
-                print(f"{label}:    ", stageStatus[key])
+                # print(f"{label}:    ", stageStatus[key])
+                pass
 
     # get config for x axis
     limitLowStepsX = pmac_get_param("ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/limitLowSteps")
@@ -113,14 +115,14 @@ def get_current_pos():
 def getXencoder():
     """Read and print the current X encoder position in encoder steps."""
     res = pmac_get_stage_pos_info(stageStatus)
-    print("xPosEnc: ", stageStatus["xPos_encoderSteps"])
+    # print("xPosEnc: ", stageStatus["xPos_encoderSteps"])
     return stageStatus["xPos_encoderSteps"]
 
 
 def getYencoder():
     """Read and print the current Y encoder position in encoder steps."""
     res = pmac_get_stage_pos_info(stageStatus)
-    print("yPosEnc: ", stageStatus["yPos_encoderSteps"])
+    # print("yPosEnc: ", stageStatus["yPos_encoderSteps"])
     return stageStatus["yPos_encoderSteps"]
 
 
@@ -431,25 +433,6 @@ def calibrate_x_y_original(
 calibrate_x_y = calibrate_x_y_original
 
 
-def calibrate_and_measure_org(sc=None, batch: str = "NoBatch"):
-    """Calibrate X/Y, apply updated stepsPerMeter, then run measurement."""
-    sc = sc or StageController()
-    batch = sanitize_batch(batch)
-
-    # 1) Calibration
-    calib = calibrate_x_y()
-
-    # 2) Apply calibration to PMAC (and controller cache)
-    apply_calibration_steps_per_meter(sc,batch,
-        calib["newMotorStepsPerMeterX"],
-        calib["newMotorStepsPerMeterY"],
-    )
-
-    # 3) Measurement using updated calibration
-    measurement = run_stage_measurement(sc, batch=batch)
-
-    return {"calib": calib, "measurement": measurement, "batch": batch}
-
 
 def run_stage_calibration(
     sc,
@@ -520,133 +503,6 @@ def run_stage_calibration(
         "motorStepsY": motorStepsY,
     }
 
-
-def calibrate_motorstepspermeter_reference_style(
-    axis: str = "yaxis",
-    confirm: bool = False,
-    apply_to_pmac: bool = True,
-    sc=None,
-    out_dir: pathlib.Path | None = None,
-    batch: str = "NoBatch",
-):
-    """Kalibrierung im Stil des Original-Skripts (gleicher Ablauf / gleiche Schleifenstruktur)."""
-    axis_raw = (axis or "yaxis").strip().lower()
-    axis_alias = {
-        "x": "xaxis",
-        "y": "yaxis",
-        "both": "both",
-        "xaxis": "xaxis",
-        "yaxis": "yaxis",
-    }
-    axisToBeBeMeasured = axis_alias.get(axis_raw)
-    if axisToBeBeMeasured is None:
-        raise ValueError("axis must be one of: 'xaxis', 'yaxis', 'x', 'y', 'both'")
-
-    if confirm:
-        value = input("---\n HomeStepPosition X and Y are set in the FM? [y/n] \n---").strip().lower()
-        if value != "y":
-            return {"stopped": True, "reason": "user_cancelled", "axis": axisToBeBeMeasured}
-
-    (
-        limitLowStepsX, limitHighStepsX, homeStepPositionX, stepsPerMeterX, encoderStepsPerMeterX,
-        encoderMinPositionX, encoderMaxPositionX,
-        limitLowStepsY, limitHighStepsY, homeStepPositionY, stepsPerMeterY, encoderStepsPerMeterY,
-        encoderMinPositionY, encoderMaxPositionY,
-    ) = connect_and_read_stage_config(connect_pmac=False)
-
-    # configure measurement (wie im Original)
-    saveName = "test_cal_encoder.txt"
-    _ = saveName  # aktuell nicht verwendet, bleibt nur fuer Wiedererkennbarkeit
-
-    # X measurements
-    motorStepsX, calcEncoder = meas_linear(
-        homeStepPositionX - 5 * 4388, homeStepPositionX + 5 * 4388, 20, stepsPerMeterX, encoderStepsPerMeterX
-    )
-    motorStepsY, calcEncoder = meas_linear(
-        homeStepPositionY - 5 * 4388, homeStepPositionY + 5 * 4388, 20, stepsPerMeterY, encoderStepsPerMeterY
-    )
-
-    motorStepsX, calcEncoder = meas_linear(
-        limitLowStepsX + 5000, limitHighStepsX - 5000, 20, stepsPerMeterX, encoderStepsPerMeterX
-    )
-    motorStepsY, calcEncoder = meas_linear(
-        limitLowStepsY + 5000, limitHighStepsY - 5000, 20, stepsPerMeterY, encoderStepsPerMeterY
-    )
-    _ = calcEncoder
-
-    batch = sanitize_batch(batch)
-    Enc = np.zeros(len(motorStepsX))
-    newMotorStepsPerMeterX = None
-    newMotorStepsPerMeterY = None
-    selected_loops = {"both": {0, 1}, "xaxis": {0}, "yaxis": {1}}[axisToBeBeMeasured]
-    out_path = pathlib.Path(out_dir) if out_dir is not None else None
-    if out_path is not None:
-        out_path.mkdir(parents=True, exist_ok=True)
-
-    # x und y loop (wie Original)
-    for k in range(2):
-        if k not in selected_loops:
-            continue
-
-        for i in range(len(motorStepsX)):
-            if k == 0:  # x loop
-                moveXinsteps(motorStepsX[i])
-                Enc[i] = getXencoder()
-            elif k == 1:  # y loop
-                moveYinsteps(motorStepsY[i])
-                Enc[i] = getYencoder()
-
-        moveXinsteps(homeStepPositionX)
-        moveYinsteps(homeStepPositionY)
-
-        if k == 0:
-            x = Enc / encoderStepsPerMeterX
-            y = motorStepsX
-            coef = np.polyfit(x, y, 1)
-            poly1d_fn = np.poly1d(coef)
-            newMotorStepsPerMeterX = int(coef[0])
-            print("MotorstepsPerMeterX: " + str(newMotorStepsPerMeterX))
-            if out_path is not None:
-                save_calibration_plot(out_path, "X", batch, x, y, poly1d_fn)
-
-        elif k == 1:
-            x = Enc / encoderStepsPerMeterY
-            y = motorStepsY
-            coef = np.polyfit(x, y, 1)
-            poly1d_fn = np.poly1d(coef)
-            newMotorStepsPerMeterY = int(coef[0])
-            print("MotorstepsPerMeterY: " + str(newMotorStepsPerMeterY))
-            if out_path is not None:
-                save_calibration_plot(out_path, "Y", batch, x, y, poly1d_fn)
-
-    if apply_to_pmac:
-        if newMotorStepsPerMeterX is not None:
-            pmac_set_param(
-                "ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/X/stepsPerMeter",
-                int(newMotorStepsPerMeterX),
-            )
-            if sc is not None:
-                sc.steps_per_m["X"] = int(newMotorStepsPerMeterX)
-        if newMotorStepsPerMeterY is not None:
-            pmac_set_param(
-                "ConfigRoot/DriverConfig/SamBoardCfg/MicroscopeConfig/Y/stepsPerMeter",
-                int(newMotorStepsPerMeterY),
-            )
-            if sc is not None:
-                sc.steps_per_m["Y"] = int(newMotorStepsPerMeterY)
-
-    return {
-        "stopped": False,
-        "axis": axisToBeBeMeasured,
-        "batch": batch,
-        "saveName": saveName,
-        "newMotorStepsPerMeterX": newMotorStepsPerMeterX,
-        "newMotorStepsPerMeterY": newMotorStepsPerMeterY,
-        "motorStepsX": motorStepsX,
-        "motorStepsY": motorStepsY,
-    }
-
-
 def run_stage_measurement(
     sc,
     batch: str = "NoBatch",
@@ -677,60 +533,6 @@ def run_stage_measurement(
 
     return {"plots": plot_data, "meas_max_um": float(max_abs_um), "batch": batch}
 
-
-def run_stage_calibration_and_measurement(
-    sc,
-    batch: str = "NoBatch",
-    out_root: pathlib.Path | None = None,
-    on_phase=None,
-    on_step=None,
-    on_calib=None,
-    on_post_calibration_pause=None,
-):
-    """Orchestrate calibration first, then measurement, and return the combined payload."""
-    batch = sanitize_batch(batch)
-    if out_root is None:
-        out_root = DATA_ROOT
-    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    out = pathlib.Path(out_root) / batch / f"Run_{ts}"
-    out.mkdir(parents=True, exist_ok=True)
-
-    calib_info = run_stage_calibration(
-        sc,
-        batch=batch,
-        out_dir=out,
-        on_phase=on_phase,
-        on_step=on_step,
-        on_calib=on_calib,
-    )
-    if on_post_calibration_pause is not None:
-        should_continue = bool(on_post_calibration_pause())
-        if not should_continue:
-            return {
-                "out": out,
-                "plots": [],
-                "calib": calib_info,
-                "batch": batch,
-                "meas_max_um": 0.0,
-                "aborted": True,
-                "abort_reason": "sam_reconnect_cancelled",
-            }
-    meas_info = run_stage_measurement(
-        sc,
-        batch=batch,
-        on_phase=on_phase,
-        on_step=on_step,
-    )
-
-    return {
-        "out": out,
-        "plots": meas_info["plots"],
-        "calib": calib_info,
-        "batch": batch,
-        "meas_max_um": meas_info["meas_max_um"],
-        "aborted": False,
-        "abort_reason": None,
-    }
 
     
 # ---------------------------------------------------------------------------

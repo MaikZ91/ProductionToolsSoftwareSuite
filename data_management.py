@@ -445,7 +445,13 @@ def save_calibration_plot(out_dir: pathlib.Path, axis: str, batch: str, x, y, po
     ax.set_title(f"Measured Motorsteps in {axis}-Axis · Charge: {batch}")
     ax.set_xlabel("Encodersteps [m]")
     ax.set_ylabel("Motorsteps [steps]")
-    ax.legend()
+    ax.title.set_color("#ffffff")
+    ax.xaxis.label.set_color("#ffffff")
+    ax.yaxis.label.set_color("#ffffff")
+    leg = ax.legend()
+    if leg is not None:
+        for txt in leg.get_texts():
+            txt.set_color("#ffffff")
     fig.savefig(out_dir / f"calib_{axis.lower()}_{batch}.png")
 
 
