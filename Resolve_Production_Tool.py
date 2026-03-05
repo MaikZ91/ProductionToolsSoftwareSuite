@@ -3541,6 +3541,70 @@ class StageControlView(QWidget):
         ax4.set_title("Delta (µm) vs Weg")
         ax4.set_xlabel("Weg [mm]")
         ax4.set_ylabel("Abweichung [µm]")
+        # Show maximum forward-vs-backward gap (point-wise at aligned path positions).
+        try:
+            x_all = np.asarray(pos_mm, dtype=float)
+            y_all = np.asarray(diff_um, dtype=float)
+            n_total = int(min(x_all.size, y_all.size))
+            n_half = n_total // 2
+            if n_half >= 2:
+                x_fwd = x_all[:n_half]
+                y_fwd = y_all[:n_half]
+                x_bwd = x_all[n_half:n_half * 2]
+                y_bwd = y_all[n_half:n_half * 2]
+
+                x_bwd_aligned = x_bwd[::-1]
+                y_bwd_aligned = y_bwd[::-1]
+
+                finite_mask = (
+                    np.isfinite(x_fwd) &
+                    np.isfinite(y_fwd) &
+                    np.isfinite(x_bwd_aligned) &
+                    np.isfinite(y_bwd_aligned)
+                )
+                if np.any(finite_mask):
+                    x_cmp = x_fwd[finite_mask]
+                    y_fwd_cmp = y_fwd[finite_mask]
+                    y_bwd_cmp = y_bwd_aligned[finite_mask]
+                    gap = np.abs(y_fwd_cmp - y_bwd_cmp)
+                    if gap.size > 0:
+                        gap_max = float(np.max(gap))
+                        if gap_max > 0:
+                            i_max = int(np.argmax(gap))
+                            x_gap = float(x_cmp[i_max])
+                            y_a = float(y_fwd_cmp[i_max])
+                            y_b = float(y_bwd_cmp[i_max])
+                            y_low = min(y_a, y_b)
+                            y_high = max(y_a, y_b)
+
+                            x_min = float(np.min(x_cmp))
+                            x_max = float(np.max(x_cmp))
+                            x_range = max(x_max - x_min, 1e-9)
+                            tick_len = max(0.02 * x_range, 1e-6)
+                            bracket_color = COLORS['text']
+                            bracket_lw = 1.5
+
+                            ax4.plot([x_gap, x_gap], [y_low, y_high], color=bracket_color, linewidth=bracket_lw, zorder=4)
+                            ax4.plot([x_gap - tick_len, x_gap + tick_len], [y_low, y_low], color=bracket_color, linewidth=bracket_lw, zorder=4)
+                            ax4.plot([x_gap - tick_len, x_gap + tick_len], [y_high, y_high], color=bracket_color, linewidth=bracket_lw, zorder=4)
+                            ax4.text(
+                                x_gap + (tick_len * 1.6),
+                                (y_low + y_high) / 2.0,
+                                f"ca. {gap_max:.0f} µm",
+                                color=COLORS['text'],
+                                fontsize=10,
+                                fontweight="semibold",
+                                va="center",
+                                ha="left",
+                                zorder=5,
+                            )
+
+                            left, right = ax4.get_xlim()
+                            needed_right = x_gap + (tick_len * 5.0)
+                            if needed_right > right:
+                                ax4.set_xlim(left, needed_right)
+        except Exception:
+            pass
         fig.suptitle(f"{axis}-Achse – Messung · Charge: {batch}", color=COLORS['text'], fontweight="semibold")
         fig.tight_layout(rect=[0, 0, 1, 0.97])
         out_png = out_dir / f"{axis}_{batch}.png"
