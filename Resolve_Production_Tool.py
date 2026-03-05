@@ -2575,12 +2575,14 @@ class StageControlView(QWidget):
         self._duration_sec = 15 * 3600 # Default 15h
         self._calib_vals = {"X": "---", "Y": "---"}
         self._meas_max_um = None
+        self._meas_span_max_um = None
         self._dur_max_um = None
         self._workflow_state = "idle"
         self._calib_done_for_run = False
         self._meas_done_for_run = False
         self._active_stage_step = "none"
         self.MEAS_MAX_UM = 10.0
+        self.MEAS_SPAN_MAX_UM = 15.0
         self._last_db_sync_ts = 0.0
         # Threading/Workers
         self.thr = None
@@ -2754,6 +2756,27 @@ class StageControlView(QWidget):
         self.chart.fig.subplots_adjust(left=0.08, right=0.98, top=0.92, bottom=0.12)
         chart_card.add_widget(self.chart)
         right_col.addWidget(chart_card)
+
+        plot_card = Card("Ergebnisplots")
+        plot_card.set_compact()
+        self.plot_preview_title = QLabel("Noch keine Plots vorhanden")
+        self.plot_preview_title.setStyleSheet(
+            f"font-size: 11px; font-weight: 700; color: {COLORS['text_muted']}; border: none;"
+        )
+        plot_card.add_widget(self.plot_preview_title)
+        self.plot_scroll = QScrollArea()
+        self.plot_scroll.setWidgetResizable(True)
+        self.plot_scroll.setFrameShape(QFrame.NoFrame)
+        self.plot_scroll.setStyleSheet("background: transparent; border: none;")
+        self.plot_preview_container = QWidget()
+        self.plot_preview_grid = QGridLayout(self.plot_preview_container)
+        self.plot_preview_grid.setContentsMargins(0, 0, 0, 0)
+        self.plot_preview_grid.setHorizontalSpacing(8)
+        self.plot_preview_grid.setVerticalSpacing(8)
+        self.plot_scroll.setWidget(self.plot_preview_container)
+        plot_card.add_widget(self.plot_scroll)
+        right_col.addWidget(plot_card, 2)
+
         layout.addLayout(right_col, 3)
         self._set_workflow_state("idle")
         self._refresh_stage_buttons()
@@ -2767,6 +2790,67 @@ class StageControlView(QWidget):
         return inp
     def _acquire_metadata(self):
         self._batch = resolve_stage.sanitize_batch(self.inputs["batch"].text()) or "NoBatch"
+
+    def _clear_layout_widgets(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                widget.deleteLater()
+            elif child_layout is not None:
+                self._clear_layout_widgets(child_layout)
+
+    def _show_stage_plot_images(self, image_paths, title: str):
+        self.plot_preview_title.setText(title)
+        self._clear_layout_widgets(self.plot_preview_grid)
+
+        valid_paths = []
+        for p in image_paths or []:
+            path = pathlib.Path(p)
+            if path.exists():
+                valid_paths.append(path)
+
+        if not valid_paths:
+            self.plot_preview_title.setText(f"{title} (keine Bilder gefunden)")
+            return
+
+        viewport_width = max(640, self.plot_scroll.viewport().width())
+        thumb_width = max(280, int((viewport_width - 16) / 2))
+        max_items = 4
+        for i, path in enumerate(valid_paths[:max_items]):
+            row = i // 2
+            col = i % 2
+            card = QFrame()
+            card.setStyleSheet(
+                f"background-color: {COLORS['surface']}; border: 1px solid {COLORS['border']}; border-radius: 8px;"
+            )
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(6, 6, 6, 6)
+            card_layout.setSpacing(4)
+
+            name_lbl = QLabel(path.name)
+            name_lbl.setStyleSheet(f"font-size: 10px; color: {COLORS['text_muted']}; border: none;")
+            card_layout.addWidget(name_lbl)
+
+            img_lbl = QLabel()
+            img_lbl.setAlignment(Qt.AlignCenter)
+            img_lbl.setStyleSheet("border: none; background: transparent;")
+            pm = QPixmap(str(path))
+            if not pm.isNull():
+                img_lbl.setPixmap(
+                    pm.scaled(thumb_width, 520, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                )
+            else:
+                img_lbl.setText("Bild konnte nicht geladen werden.")
+                img_lbl.setStyleSheet(f"color: {COLORS['danger']}; border: none; background: transparent;")
+            card_layout.addWidget(img_lbl)
+
+            self.plot_preview_grid.addWidget(card, row, col)
+
+        self.plot_preview_grid.setColumnStretch(0, 1)
+        self.plot_preview_grid.setColumnStretch(1, 1)
+
     def _ensure_run_dir(self):
         if self._run_outdir is None:
             ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -2995,6 +3079,7 @@ class StageControlView(QWidget):
         self._calib_done_for_run = False
         self._meas_done_for_run = False
         self._meas_max_um = None
+        self._meas_span_max_um = None
         self._dur_max_um = None
         self._send_stage_db_event(user_id="100", event_label="Kalibrierung")
         self.running = True
@@ -3028,6 +3113,11 @@ class StageControlView(QWidget):
         self.lbl_phase.setText("KALIBRIERUNG BEENDET")
         out_dir = pathlib.Path(data.get("out", self._ensure_run_dir()))
         batch = data.get("batch", self._batch)
+        calib_images = [
+            out_dir / f"calib_x_{batch}.png",
+            out_dir / f"calib_y_{batch}.png",
+        ]
+        self._show_stage_plot_images(calib_images, "Kalibrierungsplots")
         self._calib_done_for_run = True
         self._set_workflow_state("calib_done")
         report_path = out_dir / f"report_{batch}.pdf"
@@ -3108,11 +3198,23 @@ class StageControlView(QWidget):
         plots = data.get("plots", [])
         batch = data.get("batch", self._batch)
         max_abs_um = 0.0
+        max_span_um = 0.0
+        span_violations = []
+        meas_image_paths = []
         for ax, mot, enc, calc, spm, epm in plots:
-            diff_um = np.abs((enc - calc) / epm * 1e6)
-            max_abs_um = max(max_abs_um, float(np.max(diff_um)))
-            self._plot_and_save(ax, mot, enc, calc, spm, epm, out_dir, batch)
+            raw_diff_um = (enc - calc) / epm * 1e6
+            finite_vals = np.asarray(raw_diff_um)[np.isfinite(raw_diff_um)]
+            if finite_vals.size > 0:
+                span_um = float(np.max(finite_vals) - np.min(finite_vals))
+                max_span_um = max(max_span_um, span_um)
+                if span_um > self.MEAS_SPAN_MAX_UM:
+                    span_violations.append((str(ax), span_um))
+                max_abs_um = max(max_abs_um, float(np.max(np.abs(finite_vals))))
+            out_img = self._plot_and_save(ax, mot, enc, calc, spm, epm, out_dir, batch)
+            meas_image_paths.append(out_img)
+        self._show_stage_plot_images(meas_image_paths, "Messungsplots")
         self._meas_max_um = max_abs_um
+        self._meas_span_max_um = max_span_um
         self._meas_done_for_run = True
         self._set_workflow_state("meas_done")
         report_path = out_dir / f"report_{batch}.pdf"
@@ -3122,15 +3224,31 @@ class StageControlView(QWidget):
             print(f"Report Error: {e}")
         self._refresh_stage_buttons()
         meas_ok = (self._meas_max_um <= self.MEAS_MAX_UM)
-        dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Information)
-        dialog.setWindowTitle("Messung beendet")
-        dialog.setText(
-            "Messung beendet.\n"
-            f"Max. Abweichung: {self._meas_max_um:.2f} µm\n"
-            f"Limit: {self.MEAS_MAX_UM:.1f} µm -> {'OK' if meas_ok else 'FEHLER'}"
-        )
-        dialog.exec()
+        span_ok = (len(span_violations) == 0)
+        if not span_ok:
+            detail = "\n".join([f"{axis}: {span:.2f} µm" for axis, span in span_violations])
+            QMessageBox.critical(
+                self,
+                "Messung Fehler",
+                "Messung beendet, aber Spannweite überschritten.\n"
+                f"Max. Spannweite: {self._meas_span_max_um:.2f} µm\n"
+                f"Limit Spannweite: {self.MEAS_SPAN_MAX_UM:.1f} µm -> FEHLER\n\n"
+                f"Betroffene Achsen:\n{detail}\n\n"
+                f"Max. Abweichung: {self._meas_max_um:.2f} µm "
+                f"(Limit {self.MEAS_MAX_UM:.1f} µm -> {'OK' if meas_ok else 'FEHLER'})"
+            )
+        else:
+            dialog = QMessageBox(self)
+            dialog.setIcon(QMessageBox.Information)
+            dialog.setWindowTitle("Messung beendet")
+            dialog.setText(
+                "Messung beendet.\n"
+                f"Max. Abweichung: {self._meas_max_um:.2f} µm\n"
+                f"Limit Abweichung: {self.MEAS_MAX_UM:.1f} µm -> {'OK' if meas_ok else 'FEHLER'}\n"
+                f"Max. Spannweite: {self._meas_span_max_um:.2f} µm\n"
+                f"Limit Spannweite: {self.MEAS_SPAN_MAX_UM:.1f} µm -> OK"
+            )
+            dialog.exec()
 
     def _on_phase(self, name, maxi):
         self.lbl_phase.setText(name.upper())
@@ -3384,6 +3502,45 @@ class StageControlView(QWidget):
         ax3.set_title("Delta (µm) vs Index")
         ax3.set_xlabel("Normierter Messindex [0..1]")
         ax3.set_ylabel("Abweichung [µm]")
+        # Show peak-to-peak span of valid measurement points as left-side bracket.
+        try:
+            finite_mask = np.isfinite(idx) & np.isfinite(diff_um)
+            if np.any(finite_mask):
+                x_valid = np.asarray(idx)[finite_mask]
+                y_valid = np.asarray(diff_um)[finite_mask]
+                y_min = float(np.min(y_valid))
+                y_max = float(np.max(y_valid))
+                span_um = y_max - y_min
+                if span_um > 0:
+                    x_min = float(np.min(x_valid))
+                    x_max = float(np.max(x_valid))
+                    x_range = max(x_max - x_min, 1e-9)
+                    bracket_x = x_min - (0.06 * x_range)
+                    tick_len = max(0.02 * x_range, 1e-6)
+                    bracket_color = COLORS['text']
+                    bracket_lw = 1.5
+
+                    ax3.plot([bracket_x, bracket_x], [y_min, y_max], color=bracket_color, linewidth=bracket_lw, zorder=4)
+                    ax3.plot([bracket_x - tick_len, bracket_x + tick_len], [y_min, y_min], color=bracket_color, linewidth=bracket_lw, zorder=4)
+                    ax3.plot([bracket_x - tick_len, bracket_x + tick_len], [y_max, y_max], color=bracket_color, linewidth=bracket_lw, zorder=4)
+                    ax3.text(
+                        bracket_x + (tick_len * 1.6),
+                        (y_min + y_max) / 2.0,
+                        f"ca. {span_um:.0f} µm",
+                        color=COLORS['text'],
+                        fontsize=10,
+                        fontweight="semibold",
+                        va="center",
+                        ha="left",
+                        zorder=5,
+                    )
+
+                    left, right = ax3.get_xlim()
+                    needed_left = bracket_x - (tick_len * 2.2)
+                    if needed_left < left:
+                        ax3.set_xlim(needed_left, right)
+        except Exception:
+            pass
 
         ax4 = fig.add_subplot(224); style_ax(ax4)
         ax4.plot(pos_mm, diff_um, color=COLORS['text_muted'], linewidth=1.2, alpha=0.45, zorder=1)
