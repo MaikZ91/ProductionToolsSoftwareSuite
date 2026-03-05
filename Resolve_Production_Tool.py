@@ -2661,10 +2661,6 @@ class StageControlView(QWidget):
         self.btn_dauer.clicked.connect(self.toggle_endurance_test)
         btn_layout.addWidget(self.btn_dauer)
         row_btn = QHBoxLayout()
-        self.btn_open = ModernButton("Ordner öffnen", "ghost")
-        self.btn_open.clicked.connect(self._open_folder)
-        self.btn_open.setEnabled(True)
-        row_btn.addWidget(self.btn_open)
         self.chk_db_sync = QCheckBox("DB Sync")
         self.chk_db_sync.setChecked(False)
         self.chk_db_sync.setStyleSheet(f"font-weight: 600; color: {COLORS['text_muted']};")
@@ -2746,8 +2742,8 @@ class StageControlView(QWidget):
         chart_card.add_layout(top_row)
         self.chart = ModernChart(height=5)
         self.chart.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.chart.setMinimumHeight(220)
-        self.chart.setMaximumHeight(320)
+        self.chart.setMinimumHeight(260)
+        self.chart.setMaximumHeight(380)
         self.line_x, = self.chart.ax.plot([], [], color=COLORS['success'], linewidth=2, label="Fehler X")
         self.line_y, = self.chart.ax.plot([], [], color=COLORS['warning'], linewidth=2, label="Fehler Y")
         self.chart.ax.set_xlabel("Zeit [min]", color=COLORS['text_muted'])
@@ -2757,10 +2753,10 @@ class StageControlView(QWidget):
         leg.get_frame().set_linewidth(1)
         self.chart.fig.subplots_adjust(left=0.08, right=0.98, top=0.92, bottom=0.12)
         chart_card.add_widget(self.chart)
-        right_col.addWidget(chart_card, 1)
+        right_col.addWidget(chart_card, 11)
 
         plot_card = Card("Ergebnisplots")
-        plot_card.set_compact()
+        plot_card.set_compact(content_margins=(12, 4, 12, 8), content_spacing=6)
         self.plot_preview_title = QLabel("Noch keine Plots vorhanden")
         self.plot_preview_title.setStyleSheet(
             f"font-size: 11px; font-weight: 700; color: {COLORS['text_muted']}; border: none;"
@@ -2777,7 +2773,7 @@ class StageControlView(QWidget):
         self.plot_preview_grid.setVerticalSpacing(8)
         self.plot_scroll.setWidget(self.plot_preview_container)
         plot_card.add_widget(self.plot_scroll)
-        right_col.addWidget(plot_card, 3)
+        right_col.addWidget(plot_card, 10)
 
         layout.addLayout(right_col, 3)
         self._set_workflow_state("idle")
@@ -2831,10 +2827,6 @@ class StageControlView(QWidget):
             card_layout.setContentsMargins(6, 6, 6, 6)
             card_layout.setSpacing(4)
 
-            name_lbl = QLabel(path.name)
-            name_lbl.setStyleSheet(f"font-size: 10px; color: {COLORS['text_muted']}; border: none;")
-            card_layout.addWidget(name_lbl)
-
             img_lbl = QLabel()
             img_lbl.setAlignment(Qt.AlignCenter)
             img_lbl.setStyleSheet("border: none; background: transparent;")
@@ -2859,7 +2851,6 @@ class StageControlView(QWidget):
             self._run_outdir = resolve_stage.DATA_ROOT / self._batch / f"Run_{ts}"
             self._run_outdir.mkdir(parents=True, exist_ok=True)
             self._last_outdir = self._run_outdir
-            self.btn_open.setEnabled(True)
         return self._run_outdir
     def _open_folder(self):
         path = self._last_outdir if self._last_outdir else pathlib.Path(".")
