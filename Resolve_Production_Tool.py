@@ -2729,6 +2729,33 @@ class StageControlView(QWidget):
         qa_layout.addStretch()
         qa_layout.addWidget(self.qa_val)
         sl.addWidget(self.qa_box)
+        
+        # Additional KPI summary below QA box (Pass/Fail overview)
+        kpi_frame = QFrame()
+        kpi_frame.setStyleSheet(
+            f"background-color: {hex_to_rgba(COLORS['surface_light'], 0.35)}; "
+            f"border: 1px solid {COLORS['border']}; border-radius: 10px;"
+        )
+        kpi_layout = QHBoxLayout(kpi_frame)
+        kpi_layout.setContentsMargins(10, 6, 10, 6)
+        kpi_layout.setSpacing(12)
+
+        # Measurement KPI
+        self.lbl_kpi_meas = QLabel("Präzisionsmessung: —")
+        self.lbl_kpi_meas.setStyleSheet(
+            f"color: {COLORS['text']}; font-size: 11px; font-weight: 600; border:none;"
+        )
+        # Duration KPI
+        self.lbl_kpi_dur = QLabel("Dauertest: —")
+        self.lbl_kpi_dur.setStyleSheet(
+            f"color: {COLORS['text']}; font-size: 11px; font-weight: 600; border:none;"
+        )
+
+        kpi_layout.addWidget(self.lbl_kpi_meas)
+        kpi_layout.addWidget(self.lbl_kpi_dur)
+        kpi_layout.addStretch()
+        sl.addWidget(kpi_frame)
+
         status_card.add_layout(sl)
         left_col.addWidget(status_card)
         left_col.addStretch()
@@ -3500,11 +3527,15 @@ class StageControlView(QWidget):
         ax3.set_title("Delta (µm) vs Index")
         ax3.set_xlabel("Normierter Messindex [0..1]")
         ax3.set_ylabel("Abweichung [µm]")
-        # Limit lines for Delta vs Index (±25 µm)
+        # Limit lines for Delta vs Index (±25 µm) – emphasized and always visible
         try:
-            x_min, x_max = ax3.get_xlim()
-            ax3.axhline(25.0, color="#ff4d4f", linestyle="--", linewidth=1.2, alpha=0.9)
-            ax3.axhline(-25.0, color="#ff4d4f", linestyle="--", linewidth=1.2, alpha=0.9)
+            ax3.axhline(25.0, color="#ff0000", linestyle="--", linewidth=2.0, alpha=1.0)
+            ax3.axhline(-25.0, color="#ff0000", linestyle="--", linewidth=2.0, alpha=1.0)
+            # Ensure y-limits cover at least the tolerance band
+            ymin, ymax = ax3.get_ylim()
+            ymin = min(ymin, -25.0 * 1.3)
+            ymax = max(ymax, 25.0 * 1.3)
+            ax3.set_ylim(ymin, ymax)
         except Exception:
             pass
         # Show peak-to-peak span of valid measurement points as left-side bracket.
@@ -3553,10 +3584,14 @@ class StageControlView(QWidget):
         ax4.set_title("Delta (µm) vs Weg")
         ax4.set_xlabel("Weg [mm]")
         ax4.set_ylabel("Abweichung [µm]")
-        # Limit lines for Delta vs Weg (±6 µm)
+        # Limit lines for Delta vs Weg (±6 µm) – emphasized and always visible
         try:
-            ax4.axhline(6.0, color="#ff4d4f", linestyle="--", linewidth=1.2, alpha=0.9)
-            ax4.axhline(-6.0, color="#ff4d4f", linestyle="--", linewidth=1.2, alpha=0.9)
+            ax4.axhline(6.0, color="#ff0000", linestyle="--", linewidth=2.0, alpha=1.0)
+            ax4.axhline(-6.0, color="#ff0000", linestyle="--", linewidth=2.0, alpha=1.0)
+            ymin, ymax = ax4.get_ylim()
+            ymin = min(ymin, -6.0 * 1.6)
+            ymax = max(ymax, 6.0 * 1.6)
+            ax4.set_ylim(ymin, ymax)
         except Exception:
             pass
         # Show maximum forward-vs-backward gap (point-wise at aligned path positions).
@@ -3640,6 +3675,30 @@ class StageControlView(QWidget):
         dur_result = "---"
         if self._dur_max_um is not None:
             dur_result = "OK" if self._dur_max_um <= resolve_stage.DUR_MAX_UM else "FAIL"
+        # Update on-screen QA KPIs (labels under QA-Status)
+        try:
+            if hasattr(self, "lbl_kpi_meas"):
+                self.lbl_kpi_meas.setText(
+                    f"Präzisionsmessung: {meas_result} (max {self._meas_max_um:.2f} µm, Limit {self.MEAS_MAX_UM:.1f} µm)"
+                    if self._meas_max_um is not None
+                    else "Präzisionsmessung: —"
+                )
+                self.lbl_kpi_meas.setStyleSheet(
+                    f"color: {'#2ecc71' if meas_result == 'OK' else '#ff4d4f' if meas_result == 'FAIL' else COLORS['text_muted']}; "
+                    "font-size: 11px; font-weight: 700; border:none;"
+                )
+            if hasattr(self, "lbl_kpi_dur"):
+                self.lbl_kpi_dur.setText(
+                    f"Dauertest: {dur_result} (max {self._dur_max_um:.2f} µm, Limit {resolve_stage.DUR_MAX_UM:.1f} µm)"
+                    if self._dur_max_um is not None
+                    else "Dauertest: —"
+                )
+                self.lbl_kpi_dur.setStyleSheet(
+                    f"color: {'#2ecc71' if dur_result == 'OK' else '#ff4d4f' if dur_result == 'FAIL' else COLORS['text_muted']}; "
+                    "font-size: 11px; font-weight: 700; border:none;"
+                )
+        except Exception:
+            pass
         meas_val = self._meas_max_um if self._meas_max_um is not None else 0.0
         dur_val = self._dur_max_um if self._dur_max_um is not None else 0.0
         summary_lines = [
