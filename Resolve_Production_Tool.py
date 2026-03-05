@@ -603,13 +603,18 @@ def hex_to_rgba(hex_color, alpha):
     return f"rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, {alpha})"
 # Global Stylesheet for things hard to style in Python code
 GLOBAL_STYLESHEET = f"""
-QMainWindow {{ background-color: {COLORS['bg']}; }}
-QWidget {{ 
-    background-color: {COLORS['bg']}; 
-    color: {COLORS['text']}; 
-    font-family: "{FONTS['ui']}", "Segoe UI", "Arial";
-    font-size: 12px;
-}}
+ QMainWindow {{ background-color: {COLORS['bg']}; }}
+ QWidget {{
+     background-color: {COLORS['bg']};
+     color: {COLORS['text']};
+     font-family: "{FONTS['ui']}", "Segoe UI", "Arial";
+     font-size: 12px;
+ }}
+ /* Force dialog + message box button text to white for dark theme */
+ QDialog QPushButton,
+ QMessageBox QPushButton {{
+     color: #ffffff;
+ }}
 /* SCROLLBARS */
 QScrollBar:vertical {{
     border: none;
@@ -2654,7 +2659,7 @@ class StageControlView(QWidget):
         self.btn_calib = ModernButton("Kalibrierung starten", "primary")
         self.btn_calib.clicked.connect(self.toggle_calibration_test)
         btn_layout.addWidget(self.btn_calib)
-        self.btn_measure = ModernButton("Messung starten", "secondary")
+        self.btn_measure = ModernButton("Präzisionsmessung starten", "secondary")
         self.btn_measure.clicked.connect(self.toggle_measurement_test)
         btn_layout.addWidget(self.btn_measure)
         self.btn_dauer = ModernButton("Dauertest starten", "ghost")
@@ -2959,10 +2964,10 @@ class StageControlView(QWidget):
             self.btn_calib.set_variant("primary")
 
         if self._meas_done_for_run:
-            self.btn_measure.setText("Messung OK")
+            self.btn_measure.setText("Präzisionsmessung OK")
             self.btn_measure.set_variant("secondary")
         else:
-            self.btn_measure.setText("Messung starten")
+            self.btn_measure.setText("Präzisionsmessung starten")
             self.btn_measure.set_variant("secondary")
 
         if self._workflow_state == "finished":
@@ -3495,6 +3500,13 @@ class StageControlView(QWidget):
         ax3.set_title("Delta (µm) vs Index")
         ax3.set_xlabel("Normierter Messindex [0..1]")
         ax3.set_ylabel("Abweichung [µm]")
+        # Limit lines for Delta vs Index (±25 µm)
+        try:
+            x_min, x_max = ax3.get_xlim()
+            ax3.axhline(25.0, color="#ff4d4f", linestyle="--", linewidth=1.2, alpha=0.9)
+            ax3.axhline(-25.0, color="#ff4d4f", linestyle="--", linewidth=1.2, alpha=0.9)
+        except Exception:
+            pass
         # Show peak-to-peak span of valid measurement points as left-side bracket.
         try:
             finite_mask = np.isfinite(idx) & np.isfinite(diff_um)
@@ -3541,6 +3553,12 @@ class StageControlView(QWidget):
         ax4.set_title("Delta (µm) vs Weg")
         ax4.set_xlabel("Weg [mm]")
         ax4.set_ylabel("Abweichung [µm]")
+        # Limit lines for Delta vs Weg (±6 µm)
+        try:
+            ax4.axhline(6.0, color="#ff4d4f", linestyle="--", linewidth=1.2, alpha=0.9)
+            ax4.axhline(-6.0, color="#ff4d4f", linestyle="--", linewidth=1.2, alpha=0.9)
+        except Exception:
+            pass
         # Show maximum forward-vs-backward gap (point-wise at aligned path positions).
         try:
             x_all = np.asarray(pos_mm, dtype=float)
