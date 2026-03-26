@@ -159,8 +159,8 @@ class ZTriebController(QObject):
     moveSpeed = 800
     homePosition = 0
     freerange_steps = 172
-    one_mm_pos = 400
-    highres_pos = 2040
+    one_mm_pos = 5250
+    highres_pos = 12000
     address = 0x45C
 
     def __init__(self):
